@@ -96,6 +96,18 @@ class InPlaceRepairContractTests(unittest.TestCase):
         self.assertEqual(candidate["length_bytes"], 137_438_953_472)
         self.assertRegex(candidate["identity_digest"], r"^sha256:[0-9a-f]{64}$")
 
+    def test_repair_image_must_fit_its_partition_and_raw_device_alignment(self):
+        for size in (1, 4097, self.parts[3].size + 4096):
+            with self.subTest(size=size):
+                self.manifest["replacement_content"]["boot"]["size_bytes"] = size
+                with self.assertRaisesRegex(InPlaceRepairError, "repair content size"):
+                    collect_repair_inventory(
+                        SimpleNamespace(sys_disk="disk0", parts=self.parts),
+                        self.manifest,
+                        disk_identity_reader=lambda _: "sha256:" + "5" * 64,
+                        filesystem_identity_reader=self._filesystem_identity,
+                    )
+
     def test_release_and_canary_share_the_concrete_repair_executor_adapter(self):
         plan = SimpleNamespace(plan_digest="a" * 64)
         release_adapter = FakeRepairAdapter()

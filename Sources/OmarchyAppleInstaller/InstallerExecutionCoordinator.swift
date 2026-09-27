@@ -1,6 +1,16 @@
 #if os(macOS)
   import Foundation
 
+  /// Created only by app-side checks that fail before an execution request is sent.
+  /// A transport failure after submission must never be wrapped in this type.
+  public struct InstallerPreSubmissionFailure: Error, Sendable {
+    public let underlying: any Error
+
+    public init(_ underlying: any Error) {
+      self.underlying = underlying
+    }
+  }
+
   public struct InstallerExecutionCoordinator: Sendable {
     private let processAdapter = ClosedEngineProcessAdapter()
 
@@ -53,14 +63,18 @@
       operation: EngineHandoffOperation,
       journalProgress: (@Sendable (Data) -> Void)?
     ) async throws -> InstallerExecutionProgress {
-      let submitter = try AuthenticatedEngineXPCSubmitter(
-        machServiceName: configuration.helperMachServiceName,
-        helperCodeSigningRequirement:
-          configuration.helperCodeSigningRequirement,
-        journalProgress: journalProgress
-      )
-      // Nothing leaves the app until the helper has answered.
-      try await submitter.ping()
+      let submitter: AuthenticatedEngineXPCSubmitter
+      do {
+        submitter = try AuthenticatedEngineXPCSubmitter(
+          machServiceName: configuration.helperMachServiceName,
+          helperCodeSigningRequirement: configuration.helperCodeSigningRequirement,
+          journalProgress: journalProgress
+        )
+        // Ping sends no execution request, handoff or credentials.
+        try await submitter.ping()
+      } catch {
+        throw InstallerPreSubmissionFailure(error)
+      }
       let process = ClosedEngineHandoffProcess(
         assets: prepared.review.assets,
         handoffDirectory: handoffDirectory,

@@ -521,6 +521,17 @@
         )
       }
 
+      if let preflight = error as? InstallerPreSubmissionFailure {
+        return FailureDisplay(
+          headline: "Installation couldn’t start",
+          plainDetail:
+            "This attempt stopped before an installation request was sent. It made no disk changes.",
+          technicalDetail: String(describing: preflight.underlying),
+          remedy:
+            "Check the error details, then choose Check again to prepare and review a fresh plan."
+        )
+      }
+
       if let submission = error as? EngineXPCSubmissionError {
         switch submission {
         case .machineOwnerCredentialsRejected:

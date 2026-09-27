@@ -75,6 +75,9 @@
     }
 
     public var isSimulation: Bool { environment.isSimulation }
+    /// Covers credential verification, helper execution, and final app handoff.
+    /// Unlike hasExecutionStarted, it clears on terminal outcomes so shutdown works.
+    public var isExecutionInProgress: Bool { isExecuting }
     public var canInspect: Bool { !isBusy && !isExecuting && !hasExecutionStarted }
     public var canChangeChannel: Bool {
       canInspect && !isEditingSize && credentialSheet.context == nil
@@ -567,6 +570,17 @@
       plan: PlanDisplay?,
       helper: HelperDisplay
     ) {
+      if error is InstallerPreSubmissionFailure {
+        if context.kind == .install {
+          hasExecutionStarted = false
+          environment.discardApproval()
+          recoveryRetryAvailable = false
+        }
+        retrySheet = .hidden
+        phase = .failed(
+          PlainLanguage.failure(for: error, retryRecoveryAvailable: recoveryRetryAvailable))
+        return
+      }
       if let submission = error as? EngineXPCSubmissionError,
         submission == .machineOwnerCredentialsRejected
       {

@@ -539,6 +539,50 @@
       XCTAssertNotNil(failure.technicalDetail)
     }
 
+    func testPreSubmissionFailureAllowsFreshReviewAndRevokesApproval() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(InstallerPreSubmissionFailure(EngineXPCSubmissionError.connectionFailed))
+      ]
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      XCTAssertFalse(session.hasExecutionStarted)
+      XCTAssertFalse(session.isExecutionInProgress)
+      XCTAssertFalse(environment.hasApprovedPlan)
+      XCTAssertTrue(session.canInspect)
+      guard case .failed(let failure) = session.phase else { return XCTFail("Expected failure") }
+      XCTAssertTrue(failure.plainDetail.contains("no disk changes"))
+      await session.inspect()
+      guard case .welcome = session.phase else { return XCTFail("Expected a fresh check") }
+    }
+
+    func testRecoveryRetryPreSubmissionFailurePreservesCheckpointAndQuitGuard() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+        .failure(InstallerPreSubmissionFailure(EngineXPCSubmissionError.connectionFailed)),
+      ]
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      XCTAssertFalse(session.isExecutionInProgress)
+      let gate = OperationGate()
+      environment.executeGate = gate
+      session.presentRecoveryRetryCredentials()
+      let credentials = try authorization()
+      let retry = Task { await session.submit(credentials) }
+      await gate.waitUntilEntered()
+      XCTAssertTrue(session.isExecutionInProgress)
+      await gate.release()
+      await retry.value
+      XCTAssertFalse(session.isExecutionInProgress)
+      XCTAssertTrue(session.hasExecutionStarted)
+      XCTAssertFalse(session.canInspect)
+      XCTAssertTrue(session.canRetryRecoveryAuthorization)
+      XCTAssertTrue(environment.hasApprovedPlan)
+    }
+
     func testRecoveryRetryIsOnlyReachableWhenEligible() async throws {
       let environment = MockInstallerEnvironment()
       environment.executeResults = [
@@ -759,6 +803,7 @@
       let authorization = try authorization()
       let operation = Task { await session.submit(authorization) }
       await gate.waitUntilEntered()
+      XCTAssertTrue(session.isExecutionInProgress)
       let phase = session.phase
       let discards = environment.discardCount
       await session.inspect()
@@ -773,6 +818,7 @@
       await gate.release()
       await operation.value
       let terminal = session.phase
+      XCTAssertFalse(session.isExecutionInProgress)
       environment.savedJournal?(try JournalFixture.data())
       await Task.yield()
       XCTAssertEqual(session.phase, terminal)
