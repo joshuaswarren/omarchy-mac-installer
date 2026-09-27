@@ -4,6 +4,8 @@ Start with the [collaboration plan](collaboration-plan.md): the agreed product d
 
 This branch makes the current synthetic prototypes available for joint development. It does not add a working migration command or enable migration in either app.
 
+The [validation record](validation.md) identifies the tested commit, runner, tool hashes, passed checks, and the optional skip.
+
 | Path | Purpose |
 | --- | --- |
 | [Collaboration plan](collaboration-plan.md) | Try guest delivery, stable capture/lifecycle, local export, authenticated app coordination, and acceptance criteria. |
