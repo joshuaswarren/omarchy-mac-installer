@@ -261,10 +261,12 @@ def findings(root: Path) -> list[tuple[str, str, bool]]:
                 found.append((str(config.relative_to(root)), "an AuthorizedKeysFile override", False))
             if key == "authorizedkeyscommand" and words[1:] != ["/usr/bin/userdbctl", "ssh-authorized-keys", "%u"]:
                 found.append((str(config.relative_to(root)), "an AuthorizedKeysCommand", False))
+            if key in ("trustedusercakeys", "authorizedprincipalsfile", "authorizedprincipalscommand"):
+                found.append((str(config.relative_to(root)), f"an sshd {words[0]}", False))
     sudoers = root / "etc"
     for config in [sudoers / "sudoers", *sorted((sudoers / "sudoers.d").glob("*"))]:
         for line in config_lines(read_small(config)):
-            if re.search(r"NOPASSWD:\s*ALL\s*$", line) or "!authenticate" in line:
+            if re.search(r"NOPASSWD:(\s*[A-Z_]+:)*\s*ALL\s*$", line) or "!authenticate" in line:
                 found.append((str(config.relative_to(root)), "a passwordless sudo grant for every command", False))
     # Packages ship group rules without an action (systemd's empower.rules);
     # a rule for one named user, or any local one, is lab access.
@@ -274,9 +276,14 @@ def findings(root: Path) -> list[tuple[str, str, bool]]:
             if (b"polkit.Result.YES" in body and b"action.id" not in body
                     and (directory.startswith("etc") or re.search(rb"\.user\s*===?", body))):
                 found.append((str(rules.relative_to(root)), "a polkit rule granting every action", False))
-    for link in ENABLE_LINKS:
-        if (root / link).is_symlink() or (root / link).exists():
-            found.append((link, "an enabled lab service", False))
+    # sshd enabled any way: a .wants link (service, socket, template) or a preset.
+    for directory in ("etc/systemd/system", "usr/lib/systemd/system"):
+        for link in sorted((root / directory).glob("*.wants/sshd*")):
+            found.append((str(link.relative_to(root)), "sshd enabled", False))
+    for directory in ("etc/systemd/system-preset", "usr/lib/systemd/system-preset"):
+        for preset in sorted((root / directory).glob("*.preset")):
+            if any(re.fullmatch(r"enable\s+sshd\S*", line) for line in config_lines(read_small(preset))):
+                found.append((str(preset.relative_to(root)), "sshd enabled by a preset", False))
     for mkinitcpio in [root / "etc/mkinitcpio.conf", *sorted((root / "etc/mkinitcpio.conf.d").glob("*"))]:
         for line in config_lines(read_small(mkinitcpio)):
             if line.startswith("FILES") and ".key" in line:
@@ -306,12 +313,13 @@ def initramfs_findings(members: list[str], contents: bytes) -> list[tuple[str, s
 
 
 def check(root: Path, where: str, lab: bool) -> str:
-    """Refuses lab access in a release tree; in a lab tree, requires exactly the overlay."""
+    """Refuses lab access in a release tree (returns ""); in a lab tree, requires
+    exactly the overlay and returns its access_sha256."""
     found = findings(root)
     if not lab:
         require(not found, f"{where} carries lab access or credentials: "
                 + "; ".join(f"/{path} ({what})" for path, what, _ in found))
-        return "no lab access or credentials"
+        return ""
     always = [f"/{path} ({what})" for path, what, refused in found if refused]
     require(not always, f"{where} carries credentials: " + "; ".join(always))
     profile = root / PROFILE
@@ -338,7 +346,9 @@ def check(root: Path, where: str, lab: bool) -> str:
     allowed = set(expected) | set(ENABLE_LINKS) | {"etc/omarchy-lab", "etc/omarchy-lab/authorized_keys"}
     extra = [f"/{path} ({what})" for path, what, _ in found if path not in allowed]
     require(not extra, f"{where} carries lab access outside the overlay: " + "; ".join(extra))
-    return f"lab access for {user} ({len(access['keys'])} keys), access_sha256 {fields.get('access_sha256', '')}"
+    digest = access_sha256(expected)
+    require(fields.get("access_sha256") == digest, f"{where}'s lab profile records another access digest")
+    return digest
 
 
 def main(argv: list[str]) -> int:

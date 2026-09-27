@@ -122,6 +122,10 @@ class TreeTest(unittest.TestCase):
             "usr/share/polkit-1/rules.d/10-user.rules": (
                 'polkit.addRule(function(a, s) { if (s.user == "maralc") return polkit.Result.YES; });\n', 0o644),
             "etc/systemd/system/multi-user.target.wants/sshd.service": None,
+            "etc/systemd/system/sockets.target.wants/sshd.socket": None,
+            "etc/systemd/system-preset/10-remote.preset": ("enable sshd.service\n", 0o644),
+            "etc/ssh/sshd_config.d/10-ca.conf": ("TrustedUserCAKeys /etc/ssh/ca.pub\n", 0o644),
+            "etc/sudoers.d/zz-setenv": ("maralc ALL=(ALL) NOPASSWD:SETENV: ALL\n", 0o440),
             "etc/NetworkManager/system-connections/lab-thunderbolt.nmconnection": ("[connection]\n", 0o600),
             "usr/local/bin/omarchy-lab-renamed": ("#!/bin/bash\n", 0o755),
         }
