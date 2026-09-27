@@ -15,13 +15,19 @@ PGREP=/usr/bin/pgrep
 # running from is removed; every refusal or failure is logged and the package
 # still succeeds.
 remove_legacy_app() {
-  local legacy=$1 identifier
+  local legacy=$1 identifier status=0
   [[ -d $legacy && ! -L $legacy ]] || return 0
   identifier=$("$PLIST_BUDDY" -c 'Print :CFBundleIdentifier' "$legacy/Contents/Info.plist" 2>/dev/null) || identifier=""
   if [[ $identifier != "$INSTALLER_APP_IDENTIFIER" ]]; then
     echo "postinstall: leaving $legacy: bundle identifier is '${identifier:-unknown}'" >&2
-  elif "$PGREP" -f "$legacy/Contents/" >/dev/null 2>&1; then
+    return 0
+  fi
+  # pgrep exits 1 only when nothing matches; any other failure keeps the app.
+  "$PGREP" -f "$legacy/Contents/" >/dev/null 2>&1 || status=$?
+  if (( status == 0 )); then
     echo "postinstall: leaving $legacy: it is running" >&2
+  elif (( status != 1 )); then
+    echo "postinstall: leaving $legacy: could not tell whether it is running (pgrep exit $status)" >&2
   elif ! /bin/rm -rf "$legacy"; then
     echo "postinstall: could not remove $legacy" >&2
     /usr/bin/logger -t omarchy-installer-pkg "could not remove $legacy" || true
