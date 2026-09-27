@@ -238,12 +238,49 @@
     public static let channelMenuTitle = "Release channel"
     public static let channelStable = "Stable"
     public static let channelRC = "Release candidate"
+    public static let channelEdge = "Edge"
+    public static let channelNoMacRelease = "No Mac release yet"
+    public static let channelModelUnavailable = "Not available for this Mac"
+    public static let channelUnreachable = "Couldn’t load"
+    public static let channelUnverified = "Couldn’t verify"
+    public static let channelMenuCheckAgain = "Check Channels Again"
 
     public static func badge(for channel: ReleaseChannel) -> String {
       switch channel {
       case .stable: channelStable
       case .rc: rcBadge
+      case .edge: channelEdge
       }
+    }
+
+    /// A channel menu item: the channel's name, then what its verified
+    /// catalog offers this Mac when that is not simply "available".
+    public static func channelMenuItem(
+      _ channel: ReleaseChannel,
+      availability: ReleaseChannelAvailability?
+    ) -> String {
+      let name = badge(for: channel)
+      let state: String? =
+        switch availability {
+        case .none, .available: nil
+        case .noRelease: channelNoMacRelease
+        case .modelUnavailable: channelModelUnavailable
+        case .checkFailed(.network): channelUnreachable
+        case .checkFailed(.verification): channelUnverified
+        }
+      guard let state else { return name }
+      return "\(name) — \(state)"
+    }
+
+    /// Whether the channel menu lets this item be chosen. The channel in use
+    /// always stays chosen; one not yet checked, or whose check failed, can
+    /// be chosen to try it.
+    public static func channelMenuItemEnabled(
+      _ channel: ReleaseChannel,
+      selected: ReleaseChannel?,
+      availability: ReleaseChannelAvailability?
+    ) -> Bool {
+      channel == selected || availability?.isSelectable ?? true
     }
 
     public static var doneVerifiedRows: [PlanFactRow] {
@@ -346,6 +383,18 @@
         technicalDetail: technicalDetail,
         remedy: remedy,
         isBlockedModel: true
+      )
+    }
+
+    /// A verified, signed catalog that admits no Mac: the channel exists but
+    /// has nothing to install yet. Not a network or verification problem.
+    public static func noMacRelease(technicalDetail: String? = nil) -> FailureDisplay {
+      FailureDisplay(
+        headline: "No Mac release on this channel yet",
+        plainDetail:
+          "This release channel is verified but doesn’t offer Omarchy for any Mac yet. No installation files were downloaded and the disk has not been changed.",
+        technicalDetail: technicalDetail,
+        remedy: "Choose another channel from the Release channel menu, or check again later."
       )
     }
 
@@ -655,6 +704,8 @@
           )
         case .unsupportedDevice(let identifier):
           return unsupportedModel(deviceIdentifier: identifier, technicalDetail: technical)
+        case .noMacRelease:
+          return noMacRelease(technicalDetail: technical)
         case .notInCatalog(let identifier, let model, let supported):
           return unsupportedModel(
             deviceIdentifier: identifier,
@@ -704,12 +755,12 @@
           )
         case .unexpectedHTTPStatus(404):
           return FailureDisplay(
-            headline: "No release is available on this channel",
+            headline: "This channel’s release list wasn’t found",
             plainDetail:
-              "No downloadable release was found on the selected channel.",
+              "The release server has no signed release list at this channel’s address, so the installer can’t tell what the channel offers. Installation has not started.",
             technicalDetail: technical,
             remedy:
-              "Choose another release channel from the menu bar, or check again later."
+              "Check again later, or choose another release channel from the menu bar."
           )
         case .unexpectedHTTPStatus:
           return FailureDisplay(

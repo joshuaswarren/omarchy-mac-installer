@@ -157,6 +157,11 @@ done
 pass "the pre-check refuses a set package resolved elsewhere, a refused package, and a base name that does not resolve"
 
 # ── install order ──────────────────────────────────────────────────────────
+source_commit=$(printf 'a%.0s' {1..40})
+builder_commit=$(printf 'c%.0s' {1..40})
+printf 'candidate_set=apple-test-fixture\ncandidate_source_commit=%s\n' "$source_commit" >>"$scratch/inputs"
+jq '. + {candidate_only: true}' "$candidates/import.json" >"$scratch/import.json" && mv "$scratch/import.json" "$candidates/import.json"
+export MAC_IMAGE_BUILDER_COMMIT=$builder_commit MAC_IMAGE_BUILDER_CLEAN=false
 target=$scratch/target
 mkdir -p "$target"
 mount_api() { :; }
@@ -185,12 +190,45 @@ done
 pass "omarchy-settings installs alone, then the manifest, the runtime and the Apple set, set packages by qualified name"
 pass "the Apple set carries the speaker stack's model profiles and DSP chain"
 
-[[ $(<"$target/var/lib/omarchy/image/target") == $'format=1\nplatform=apple-silicon' ]] ||
-  fail "the image-target manifest names the platform"
+expected_target="format=1
+platform=apple-silicon
+candidate_set=apple-test-fixture
+candidate_source_commit=$source_commit
+builder_commit=$builder_commit
+builder_tree_clean=false
+image_profile=test"
+[[ $(<"$target/var/lib/omarchy/image/target") == "$expected_target" ]] ||
+  fail "the image-target manifest names the platform, then the set, the builder and the profile" \
+    "$(<"$target/var/lib/omarchy/image/target")"
 [[ $(stat -c %a "$target/var/lib/omarchy/image/target" 2>/dev/null || stat -f %Lp "$target/var/lib/omarchy/image/target") == 644 ]] ||
   fail "the image-target manifest is mode 0644"
 [[ ! -e $target/var/lib/omarchy/image-target ]] || fail "only the one manifest path is written"
 pass "the image-target manifest names apple-silicon, mode 0644, at /var/lib/omarchy/image/target"
+pass "the image-target manifest records the candidate set, its source commit, the builder commit and tree state, and the test profile"
+
+image_profile_of() {
+  (profile=$1; jq "$2" "$candidates/import.json" >"$scratch/import.json.new" &&
+    cp "$candidates/import.json" "$scratch/import.json.keep" && mv "$scratch/import.json.new" "$candidates/import.json" &&
+    image_profile; mv "$scratch/import.json.keep" "$candidates/import.json")
+}
+[[ $(image_profile_of lab .) == lab && $(image_profile_of release .) == test &&
+  $(image_profile_of release '. + {candidate_only: false}') == release ]] ||
+  fail "the image profile is lab for a lab image, else test for a candidate-only set, else release"
+pass "the image profile is lab for a lab image, else test for a candidate-only set, else release"
+
+mv "$candidates/import.json" "$scratch/import.json.keep"
+if (chown() { :; }; fail() { builder_fail "$@"; }; write_image_target) >/dev/null 2>&1; then
+  fail "the image-target manifest is refused when the candidate set cannot be read"
+fi
+mv "$scratch/import.json.keep" "$candidates/import.json"
+pass "the image-target manifest is refused when the candidate set cannot be read"
+
+for unset_variable in MAC_IMAGE_BUILDER_COMMIT MAC_IMAGE_BUILDER_CLEAN; do
+  if (unset "$unset_variable"; chown() { :; }; fail() { builder_fail "$@"; }; write_image_target) >/dev/null 2>&1; then
+    fail "the image-target manifest is refused without $unset_variable"
+  fi
+done
+pass "the image-target manifest is not written without the builder commit and tree state"
 
 # ── first boot ─────────────────────────────────────────────────────────────
 make_first_boot() {
@@ -258,3 +296,22 @@ if ((EUID != 0)); then
   unset -f sudo pgrep
   pass "without a way to hide its loop devices, the build refuses to run beside a desktop automounter"
 fi
+
+# ── lab access ─────────────────────────────────────────────────────────────
+target=$scratch/lab-root
+logs=$scratch
+mkdir -p "$target/usr/lib/systemd/system" "$scratch/lab-access"
+: >"$target/usr/lib/systemd/system/sshd.service"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKm3ZIe3P3NW/VLwzdZ6vgFvk4OAabP02rnxiZKmXG2r lab\n' \
+  >"$scratch/lab-access/authorized_keys"
+isolated_chroot() { shift; printf '%s\n' "$*" >>"$scratch/chroot"; }
+: >"$scratch/chroot"
+(fail() { builder_fail "$@"; }; profile=release; apply_lab_access)
+[[ ! -e $target/etc/sudoers.d/omarchy-lab && ! -s $scratch/chroot ]] || fail "a release image gets no lab access"
+(fail() { builder_fail "$@"; }; profile=lab; lab_access_dir=$scratch/lab-access; apply_lab_access
+  [[ $lab_access_sha256 =~ ^[0-9a-f]{64}$ ]] || fail "the lab access digest is recorded")
+[[ $(<"$scratch/chroot") == "visudo -cf /etc/sudoers.d/omarchy-lab" ]] || fail "the lab sudoers rule is validated in the image"
+python3 -c 'import importlib.util, sys; s = importlib.util.spec_from_file_location("l", sys.argv[1]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.check(__import__("pathlib").Path(sys.argv[2]), "the image", True)' \
+  "$here/builder/lab_access.py" "$target" || fail "the builder writes exactly the lab overlay"
+unset -f isolated_chroot
+pass "a lab build writes the lab overlay and validates its sudoers rule; a release build writes none"

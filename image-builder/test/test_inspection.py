@@ -310,13 +310,50 @@ class InspectionTest(unittest.TestCase):
         self.assertFails("boot-maintenance", "incomplete")
 
     def test_image_target_manifest(self):
-        for name, change in (("missing", lambda p: p.unlink()),
-                             ("another platform", lambda p: p.write_text("format=1\nplatform=qualcomm\n")),
-                             ("writable", lambda p: p.chmod(0o666))):
+        good = fixtures.image_target(self.summary)
+        for name, change, pattern in (
+            ("missing", lambda p: p.unlink(), "missing"),
+            ("another platform", lambda p: p.write_text(good.replace("apple-silicon", "qualcomm")), "apple-silicon"),
+            ("writable", lambda p: p.chmod(0o666), "mode"),
+            ("an older image's two lines", lambda p: p.write_text("format=1\nplatform=apple-silicon\n"),
+             "does not record candidate_set, candidate_source_commit, builder_commit, builder_tree_clean, image_profile"),
+            ("another set", lambda p: p.write_text(good.replace(self.summary["set"], "apple-test-other")),
+             "another candidate set"),
+            ("another source commit", lambda p: p.write_text(
+                good.replace(self.summary["source_commit"], "b" * 40)), "another candidate set"),
+            ("no builder commit", lambda p: p.write_text(good.replace("c" * 40, "unknown")), "builder commit"),
+            ("an unknown tree state", lambda p: p.write_text(good.replace("clean=true", "clean=yes")), "clean"),
+            ("the lab profile", lambda p: p.write_text(good.replace("=test", "=lab")), "test profile"),
+            ("a field twice", lambda p: p.write_text(good + "image_profile=test\n"), "twice"),
+            ("a line without a value", lambda p: p.write_text(good + "stray\n"), "malformed"),
+        ):
             with self.subTest(name):
                 self.setUp()
                 change(self.root / "var/lib/omarchy/image/target")
-                self.assertFails("image-target", "missing|apple-silicon|mode")
+                self.assertFails("image-target", pattern)
+
+    def test_image_target_records_the_images_provenance(self):
+        report = self.inspect()
+        self.assertEqual(report["checks"]["image-target"]["result"], "passed")
+        self.assertEqual(report["image_target"], {
+            "candidate_set": self.summary["set"], "candidate_source_commit": self.summary["source_commit"],
+            "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "test"})
+
+    def test_image_target_keeps_the_runtimes_reading_rules(self):
+        target = self.root / "var/lib/omarchy/image/target"
+        target.write_text("# comment\n" + target.read_text() + "later_key=ignored\n")
+        (self.factory / "var/lib/omarchy/image/target").write_bytes(target.read_bytes())
+        self.assertEqual(self.inspect()["checks"]["image-target"]["result"], "passed")
+
+    def test_image_target_profile_follows_the_build(self):
+        target = self.root / "var/lib/omarchy/image/target"
+        target.write_text(target.read_text().replace("=test", "=lab"))
+        (self.factory / "var/lib/omarchy/image/target").write_bytes(target.read_bytes())
+        report = inspection.inspect(self.root, self.candidates, "edge", self.factory, trust=self.signer.trust,
+                                    profile="lab")
+        self.assertEqual(report["checks"]["image-target"]["result"], "passed", report["checks"]["image-target"])
+        release = dict(self.summary, candidate_only=False)
+        self.assertEqual(inspection.image_profile("release", type("C", (), {"summary": release})()), "release")
 
     def test_factory(self):
         for name, change in (
@@ -324,6 +361,8 @@ class InspectionTest(unittest.TestCase):
             ("owner state", lambda f: fixtures.write(f, "var/lib/omarchy/provisioning/pending", b"")),
             ("another set", lambda f: fixtures.write(f, "var/lib/omarchy/factory-sealed", "format=2\ncandidate_set=x\n")),
             ("no image target", lambda f: (f / "var/lib/omarchy/image/target").unlink()),
+            ("another image target", lambda f: fixtures.write(f, "var/lib/omarchy/image/target",
+                                                              fixtures.image_target(self.summary, "lab"))),
             ("a keyring", lambda f: (f / "etc/pacman.d/gnupg").mkdir(parents=True)),
         ):
             with self.subTest(name):

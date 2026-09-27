@@ -18,12 +18,14 @@
     case invalidCatalogEnvelope
   }
 
-  /// The release channels a build can read. Every build names all of them, so
-  /// a channel can be opened later without shipping a new signed app. The rc
-  /// channel carries the Aurora kernel image; the old rc-aurora lane is gone.
+  /// The release channels a build can read: the same three Omarchy offers,
+  /// in menu order. Every build names all of them, so a channel can be opened
+  /// later without shipping a new signed app. The developer channel links a
+  /// source checkout after installation and is never an installer channel.
   public enum ReleaseChannel: String, CaseIterable, Codable, Sendable {
     case stable
     case rc
+    case edge
   }
 
   public struct ReleaseChannelEndpoints: Equatable, Sendable {

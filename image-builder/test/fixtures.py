@@ -289,6 +289,13 @@ def import_set(set_dir: Path, output: Path, signer: Signer, receipt: str) -> dic
     return candidate_set.snapshot(set_dir, output, receipt, SOURCE, trust=signer.trust)
 
 
+def image_target(summary: dict, profile: str = "test") -> str:
+    """The image-target manifest build-mac-image writes for SUMMARY's set."""
+    return (f"format=1\nplatform=apple-silicon\ncandidate_set={summary['set']}\n"
+            f"candidate_source_commit={summary['source_commit']}\nbuilder_commit={'c' * 40}\n"
+            f"builder_tree_clean=true\nimage_profile={profile}\n")
+
+
 def make_root(root: Path, candidates: Path) -> None:
     """An image root that passes inspection against the imported set CANDIDATES."""
     summary = json.loads((candidates / "import.json").read_text())
@@ -350,7 +357,7 @@ def make_root(root: Path, candidates: Path) -> None:
     for name, version in {**versions, **others}.items():
         local_package(root, name, version, owners.get(name, []))
     state = root / "var/lib/omarchy"
-    write(root, "var/lib/omarchy/image/target", "format=1\nplatform=apple-silicon\n")
+    write(root, "var/lib/omarchy/image/target", image_target(summary))
     (state / "image").chmod(0o755)
     write(root, "var/lib/omarchy/mac-first-boot/pending", b"")
     write(root, "var/lib/omarchy/mac-first-boot/deferred-steps", "install/hardware/apple/limine-boot.sh\n")

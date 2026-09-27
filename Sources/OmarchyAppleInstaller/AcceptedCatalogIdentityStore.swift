@@ -11,9 +11,15 @@
   }
 
   public struct AcceptedCatalogIdentityStore: Sendable {
-    /// The pre-channel state file. It always described the stable channel, so
-    /// stable still reads it once and then supersedes it.
-    public static let legacyFileName = "accepted-catalog.json"
+    /// State files of the MX Mac installer, which shares this workspace. They
+    /// hold another stream's floors, so this stream never reads, writes or
+    /// removes them.
+    public static let mxMacFileNames = [
+      "accepted-catalog.json",
+      "accepted-catalog-stable.json",
+      "accepted-catalog-rc.json",
+      "accepted-catalog-rc-aurora.json",
+    ]
     private static let maximumBytes: Int64 = 4_096
 
     private let directory: URL
@@ -24,11 +30,13 @@
       self.channel = channel
     }
 
-    /// Each channel keeps its own accepted sequence. Without this, a tester who
-    /// accepted a rc catalog could never go back to stable: the older stable
-    /// sequence would look like a rollback.
+    /// Each channel of this release stream keeps its own accepted sequence.
+    /// Without this, a tester who accepted a rc catalog could never go back to
+    /// stable: the older stable sequence would look like a rollback. The
+    /// stream name keeps the MX Mac installer's floors, in the same workspace,
+    /// from blocking this stream's first catalogs and the other way round.
     public static func fileName(for channel: ReleaseChannel) -> String {
-      "accepted-catalog-\(channel.rawValue).json"
+      "accepted-catalog-\(InstallerBuildConfiguration.streamPath)-\(channel.rawValue).json"
     }
 
     private var fileName: String {
@@ -37,13 +45,7 @@
 
     public func load() throws -> AcceptedCatalogIdentity? {
       try validateDirectory()
-      if let identity = try read(fileName: fileName) {
-        return identity
-      }
-      guard channel == .stable else {
-        return nil
-      }
-      return try read(fileName: Self.legacyFileName)
+      return try read(fileName: fileName)
     }
 
     private func read(fileName: String) throws -> AcceptedCatalogIdentity? {
@@ -124,7 +126,7 @@
       }
 
       let pending = directory.appendingPathComponent(
-        ".accepted-catalog-\(channel.rawValue)-\(UUID().uuidString.lowercased()).tmp"
+        ".\(fileName)-\(UUID().uuidString.lowercased()).tmp"
       )
       let descriptor = Darwin.open(
         pending.path,
@@ -160,13 +162,6 @@
         throw AcceptedCatalogIdentityStoreError.writeFailed
       }
       try synchronizeDirectory()
-      if channel == .stable {
-        // The channel file now carries what the legacy file said, so retire it
-        // rather than leave two records that can disagree.
-        try? FileManager.default.removeItem(
-          at: directory.appendingPathComponent(Self.legacyFileName)
-        )
-      }
     }
 
     private func validateDirectory() throws {

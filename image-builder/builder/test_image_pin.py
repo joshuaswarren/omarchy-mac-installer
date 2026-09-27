@@ -9,7 +9,8 @@ the importer accepts) therefore ignores upgrades of the packages built from the
 set's source commit, in a marked block of /etc/pacman.conf's [options]. A set
 package taken from the channel (the boot package, the closure) keeps following
 it. The runtime's own pacman templates carry no pin, and nothing else in the
-image changes. Deleting the marked lines makes the Mac follow its channel.
+image changes. Keep the marked lines until the channel carries qualified Mac
+packages: without them a pacman -Syu can downgrade and break the Mac.
 
   test_image_pin.py names IMPORT_JSON              prints the pinned packages
   test_image_pin.py render TEMPLATE IMPORT_JSON    prints the installed pacman.conf
@@ -19,7 +20,7 @@ from pathlib import Path
 import sys
 
 MARK = "# Test image only (omarchy-mac-installer image-builder): keeps the candidate set's runtime,"
-REASON = "# whose version sorts below the channel's. Delete these three lines to follow the channel."
+REASON = "# whose version sorts below the channel's. Keep these three lines: the channel has no Mac packages yet, so removing them can downgrade and break this Mac."
 
 
 def pinned(summary: dict) -> list[str]:

@@ -73,12 +73,12 @@ struct OnePageInstallerView: View {
     }
     .task {
       onSessionAvailable(session)
-      await session.inspect()
+      await recheck()
     }
     .onChange(of: channel) { _, _ in
       // Switching channel discards anything already planned: the new channel
       // may name a different release entirely.
-      Task { await session.inspect() }
+      Task { await recheck() }
     }
     .onChange(of: scenePhase) { _, phase in
       if phase == .active {
@@ -132,6 +132,12 @@ struct OnePageInstallerView: View {
   }
 
   // MARK: Header — this Mac in one line
+
+  /// Inspects the Mac, then re-reads what each channel offers it.
+  private func recheck() async {
+    await session.inspect()
+    await session.refreshChannelAvailability()
+  }
 
   @ViewBuilder
   private var header: some View {
@@ -279,7 +285,7 @@ struct OnePageInstallerView: View {
       EmptyView()
 
     case .unsupported:
-      Button(PlainLanguage.checkAgain) { Task { await session.inspect() } }
+      Button(PlainLanguage.checkAgain) { Task { await recheck() } }
         .omarchySecondaryButton()
         .disabled(session.isBusy)
 
@@ -335,7 +341,7 @@ struct OnePageInstallerView: View {
 
     case .failed(let failure):
       if session.canInspect {
-        Button("Check again") { Task { await session.inspect() } }
+        Button("Check again") { Task { await recheck() } }
           .omarchySecondaryButton()
       }
       if failure.retryRecoveryAvailable {

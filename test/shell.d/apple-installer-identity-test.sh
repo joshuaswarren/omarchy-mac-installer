@@ -36,7 +36,7 @@ source "$config"
 for name in INSTALLER_APP_NAME INSTALLER_LEGACY_APP_NAME INSTALLER_FILE_STEM INSTALLER_APP_IDENTIFIER \
   INSTALLER_HELPER_IDENTIFIER INSTALLER_PKG_IDENTIFIER INSTALLER_TEAM_ID \
   INSTALLER_APP_SIGNING_IDENTITY INSTALLER_PKG_SIGNING_IDENTITY INSTALLER_TRUST_ROOT_FINGERPRINT \
-  INSTALLER_CATALOG_KEY_SERVICE INSTALLER_PUBLIC_BASE INSTALLER_R2_BUCKET \
+  INSTALLER_CATALOG_KEY_SERVICE INSTALLER_PUBLIC_BASE INSTALLER_STREAM_PATH INSTALLER_R2_BUCKET \
   INSTALLER_R2_ENDPOINT INSTALLER_GITHUB_RELEASE_REPO INSTALLER_GITHUB_RELEASE_LOGIN; do
   [[ -n ${seen[$name]:-} ]] || fail "identity.conf defines $name"
 done
@@ -49,6 +49,10 @@ done
   fail "the package signing identity belongs to the configured team"
 [[ $INSTALLER_PUBLIC_BASE == https://?* && $INSTALLER_PUBLIC_BASE != */ ]] ||
   fail "the public base is https without a trailing slash"
+# One path segment: the stream must never be the bucket root, where the MX Mac
+# feeds live, nor reach into another stream.
+[[ $INSTALLER_STREAM_PATH =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+  fail "the stream path is one lowercase path segment"
 trust_root=$ROOT/Release/trust-root.ed25519.pub
 [[ -f $trust_root && ! -L $trust_root && $(wc -c <"$trust_root") -eq 32 ]] ||
   fail "the trust root is a 32-byte public key"
@@ -61,14 +65,14 @@ descriptor=$ROOT/Release/release.json
 default_channel=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["default_channel"])' "$descriptor")
 bash "$ROOT/scripts/make-release-descriptor" \
   --public-key "$trust_root" \
-  --base-url "$INSTALLER_PUBLIC_BASE" \
+  --base-url "$INSTALLER_PUBLIC_BASE/$INSTALLER_STREAM_PATH" \
   --default-channel "$default_channel" \
   --output "$test_tmp/release.json" >/dev/null
 cmp -s "$test_tmp/release.json" "$descriptor" ||
   fail "Release/release.json is what make-release-descriptor writes from identity.conf" \
     "$(diff "$test_tmp/release.json" "$descriptor" || true)"
 for template in "$ROOT"/scripts/release-inputs*.template.json; do
-  python3 - "$template" "$INSTALLER_PUBLIC_BASE" "$INSTALLER_FILE_STEM" <<'PY' ||
+  python3 - "$template" "$INSTALLER_PUBLIC_BASE/$INSTALLER_STREAM_PATH" "$INSTALLER_FILE_STEM" <<'PY' ||
 import json, sys
 template, base, stem = sys.argv[1:4]
 installer = json.load(open(template))["installer"]

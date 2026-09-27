@@ -8,13 +8,14 @@
   struct SimulationDashboard: View {
     var onSessionAvailable: ((InstallerSession) -> Void)? = nil
     var onColorSchemeChange: ((Bool) -> Void)? = nil
-    @State private var scenario = InstallerSimulationScenario.success
-    @State private var channel = ReleaseChannel.stable
+    @State private var scenario = Self.launchScenario
+    @State private var channel = ReleaseChannel.edge
     @State private var slow = false
     @State private var dark = true
     @State private var generation = UUID()
-    @State private var environment = InstallerSimulationEnvironment(scenario: .success)
+    @State private var environment = InstallerSimulationEnvironment(scenario: Self.launchScenario)
     @State private var canChangeChannel = false
+    @State private var session: InstallerSession?
 
     var body: some View {
       VStack(spacing: 0) {
@@ -31,12 +32,27 @@
           }
           HStack {
             Picker("Test channel", selection: $channel) {
-              Text("Stable").tag(ReleaseChannel.stable)
-              Text("Release candidate").tag(ReleaseChannel.rc)
+              ForEach(ReleaseChannel.allCases, id: \.self) { option in
+                Text(PlainLanguage.badge(for: option)).tag(option)
+              }
             }.disabled(!canChangeChannel)
             Toggle("Slow playback", isOn: $slow)
             Toggle("Dark mode", isOn: $dark)
           }
+          // The Release channel menu's items, exactly as the app menu words
+          // them, so the three channel states can be reviewed in the window.
+          Text(
+            "Release channel menu: "
+              + ReleaseChannel.allCases.map { option in
+                let availability = session?.channelAvailability[option]
+                let item = PlainLanguage.channelMenuItem(option, availability: availability)
+                let enabled = PlainLanguage.channelMenuItemEnabled(
+                  option, selected: channel, availability: availability)
+                return (option == channel ? "✓ " : "") + item + (enabled ? "" : " (disabled)")
+              }.joined(separator: " · ")
+          )
+          .font(OmarchyTheme.detail)
+          .fixedSize(horizontal: false, vertical: true)
           Text(scenario.guidance).font(OmarchyTheme.body).fixedSize(
             horizontal: false, vertical: true)
           Text(
@@ -52,15 +68,44 @@
         OnePageInstallerView(
           environment: environment, channel: channel,
           onChannelAvailability: { canChangeChannel = $0 },
-          onSessionAvailable: { onSessionAvailable?($0) }
+          onSessionAvailable: {
+            session = $0
+            onSessionAvailable?($0)
+          }
         )
         .id(generation)
       }
       .preferredColorScheme(dark ? .dark : .light)
+      .task { await continueAtLaunch() }
       .onChange(of: dark) { _, value in onColorSchemeChange?(value) }
       .onChange(of: scenario) { _, _ in reset() }
       .onChange(of: slow) { _, _ in reset() }
       .onChange(of: channel) { _, _ in reset() }
+    }
+
+    /// `--simulate-scenario=NAME` opens on that scenario, so a screen can be
+    /// reviewed or captured without driving the picker. One token: AppKit
+    /// would take a separate bare word for a file to open.
+    private static var launchScenario: InstallerSimulationScenario {
+      let prefix = "--simulate-scenario="
+      guard
+        let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) })
+      else { return .success }
+      return InstallerSimulationScenario(rawValue: String(argument.dropFirst(prefix.count)))
+        ?? .success
+    }
+
+    /// `--simulate-continue` presses Continue once the launch scenario's
+    /// first check is done, to reach its plan or failure screen.
+    private func continueAtLaunch() async {
+      guard ProcessInfo.processInfo.arguments.contains("--simulate-continue") else { return }
+      for _ in 0..<100 {
+        if let session, case .welcome = session.phase {
+          await session.continueToPlan()
+          return
+        }
+        try? await Task.sleep(for: .milliseconds(100))
+      }
     }
 
     private func reset() {
