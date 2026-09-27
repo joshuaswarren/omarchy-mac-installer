@@ -13,14 +13,16 @@
   /// from the signed catalog instead, so the two versions are deliberately
   /// allowed to differ. The bundled v0.9.2 engine recognizes M3 devices without
   /// expert mode; the older v0.9.0 bundle refused them before catalog loading.
+  /// The .18 overlay also reports tight-disk candidates and keeps allocation
+  /// recommendations separate from the safety limits used after staging.
   /// An installation engine fix ships in a catalog without rebuilding
   /// and re-notarizing the app. Nothing may require them to be equal.
   public struct ValidationEngineArtifactLocator: Sendable {
-    public static let version = "v0.9.2-omarchy.17"
-    public static let fileName = "installer-v0.9.2-omarchy.17.tar.gz"
+    public static let version = "v0.9.2-omarchy.18"
+    public static let fileName = "installer-v0.9.2-omarchy.18.tar.gz"
     public static let expectedDigest =
-      "sha256:ecb61645a9c75ba733425fb300b8b53b09f9dbc297a86acce1e0ee41f36e32e5"
-    public static let expectedSizeBytes: UInt64 = 17_838_045
+      "sha256:aba44d2050ecc84203a3a520ad53a0142e71f95d14245bd0313f1cb85bcbd565"
+    public static let expectedSizeBytes: UInt64 = 17_839_116
 
     public init() {}
 
