@@ -155,20 +155,27 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability] {
     guard let host = lock.withLock({ hostInspection }) else { return [:] }
     let deviceIdentifier = host.identity.deviceIdentifier
-    let configuration: InstallerReleaseConfiguration
-    let stateDirectory: URL
-    do {
-      configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
-      stateDirectory = try installerWorkspace().state
-    } catch {
-      return Dictionary(
+    let everyChannelFailed = { (error: any Error) in
+      Dictionary(
         uniqueKeysWithValues: ReleaseChannel.allCases.map {
           ($0, ReleaseChannelAvailability(checkError: error))
         })
     }
+    let configuration: InstallerReleaseConfiguration
+    do {
+      configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
+    } catch {
+      return everyChannelFailed(error)
+    }
     // A sealed catalog answers for every channel alike, so it says nothing
     // about what each channel offers.
     guard configuration.sealedCatalogDocuments == nil else { return [:] }
+    let stateDirectory: URL
+    do {
+      stateDirectory = try installerWorkspace().state
+    } catch {
+      return everyChannelFailed(error)
+    }
     return await withTaskGroup(
       of: (ReleaseChannel, ReleaseChannelAvailability).self
     ) { group in

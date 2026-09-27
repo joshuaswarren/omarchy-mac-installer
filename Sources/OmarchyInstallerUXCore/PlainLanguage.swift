@@ -241,7 +241,7 @@
     public static let channelEdge = "Edge"
     public static let channelNoMacRelease = "No Mac release yet"
     public static let channelModelUnavailable = "Not available for this Mac"
-    public static let channelUnreachable = "Couldn’t reach"
+    public static let channelUnreachable = "Couldn’t load"
     public static let channelUnverified = "Couldn’t verify"
     public static let channelMenuCheckAgain = "Check Channels Again"
 

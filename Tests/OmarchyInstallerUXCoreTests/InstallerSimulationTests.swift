@@ -36,7 +36,7 @@
           "Edge — Not available for this Mac", PlainLanguage.blockedHeadline
         ),
         (
-          .channelUnreachable, .checkFailed(.network), "Edge — Couldn’t reach",
+          .channelUnreachable, .checkFailed(.network), "Edge — Couldn’t load",
           "This channel’s release list wasn’t found"
         ),
       ]

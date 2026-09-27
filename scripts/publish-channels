@@ -53,7 +53,7 @@ channels_usage() {
   cat <<'USAGE'
 Usage:
   publish-channels envelope --catalog FILE --signature FILE --output FILE
-  publish-channels empty-catalog --sequence N --output FILE
+  publish-channels empty-catalog --output FILE [--sequence N]
   publish-channels os-promote --tag TAG --to stable|rc|edge [--minimum-sequence N] [--no-prune]
   publish-channels app-publish --pkg FILE --version X.Y.Z [--to stable|rc|edge]
   publish-channels channel-status [--channel stable|rc|edge|all]
@@ -62,7 +62,9 @@ Usage:
 Keys are relative to the release stream, PUBLIC_BASE/STREAM_PATH. empty-catalog
 writes the unsigned catalog of a channel with no Mac release yet: sign it,
 wrap it with envelope, stage it as releases/TAG/catalog.signed.json and
-os-promote it like any other release.
+os-promote it like any other release. Its sequence defaults to the current Unix
+time, as real catalogs use; a later one would block every real release until
+that time passes, so it is refused.
 
 Credentials come from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or the Keychain
 items omarchy-r2-access-key-id and omarchy-r2-secret-access-key.
@@ -104,8 +106,12 @@ bucket_key() {
 # A channel with no Mac release yet still serves a signed catalog, so the app
 # can tell "nothing here yet" from a channel it cannot reach or verify.
 write_empty_catalog() {
-  local sequence=$1 output=$2
+  local sequence=$1 output=$2 now
+  now=$(date +%s)
+  [[ -n $sequence ]] || sequence=$now
   [[ $sequence =~ ^[1-9][0-9]*$ ]] || die "the sequence must be a positive integer: $sequence"
+  (( sequence <= now )) ||
+    die "the sequence $sequence is later than now ($now); real catalogs could not follow it"
   [[ ! -e $output ]] || die "refusing to overwrite $output"
   python3 - "$sequence" "$output" <<'PY'
 import datetime
@@ -318,7 +324,15 @@ os_promote() {
     live_sequence=$(catalog_field "$work/live-catalog" sequence)
     (( sequence > live_sequence )) ||
       die "candidate sequence $sequence does not exceed the live $channel sequence $live_sequence"
-    previous_tag=$(python3 -c '
+    # The live pointer names the set it serves, even an empty catalog's that
+    # names no artifact; the catalog's own artifacts are the fallback.
+    if fetch_public "channels/$channel/channel.json" "$work/live-channel.json"; then
+      previous_tag=$(python3 -c '
+import json, sys
+print(json.load(open(sys.argv[1])).get("os_tag") or "")
+' "$work/live-channel.json")
+    fi
+    [[ -n $previous_tag ]] || previous_tag=$(python3 -c '
 import json, re, sys
 for model in json.load(open(sys.argv[1]))["models"]:
     m = re.search(r"/releases/([^/]+)/", model["payloadArtifact"]["sourceURL"])
@@ -687,7 +701,7 @@ channels_main() {
           *) channels_usage ;;
         esac
       done
-      [[ -n $sequence && -n $output ]] || channels_usage
+      [[ -n $output ]] || channels_usage
       write_empty_catalog "$sequence" "$output"
       ;;
     os-promote) os_promote "$@" ;;

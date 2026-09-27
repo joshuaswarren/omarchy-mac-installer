@@ -66,7 +66,7 @@
       case .modelNotOnChannel:
         "The test channel's signed catalog lists other Macs only. Its channel label says Not available for this Mac, and Continue names this Mac and the models the channel supports."
       case .channelUnreachable:
-        "The test channel's catalog address returns 404. Its channel label says Couldn’t reach, and Continue reports a server problem, never a missing Mac release."
+        "The test channel's catalog address returns 404. Its channel label says Couldn’t load, and Continue reports a server problem, never a missing Mac release."
       default:
         "Walk through the installer with test data. Check keyboard navigation, smaller windows, and activity details. Reset starts again."
       }

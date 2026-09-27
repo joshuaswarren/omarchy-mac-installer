@@ -532,6 +532,12 @@ assert catalog["schemaVersion"] == 4 and catalog["sequence"] == 1000 and catalog
   fail "empty-catalog never overwrites"
 "$PUBLISHER" empty-catalog --sequence 0 --output "$WORK/zero.catalog" >/dev/null 2>&1 &&
   fail "empty-catalog refuses a zero sequence"
+"$PUBLISHER" empty-catalog --sequence $(( $(date +%s) + 86400 )) --output "$WORK/future.catalog" >/dev/null 2>&1 &&
+  fail "empty-catalog refuses a sequence later than now"
+before=$(date +%s)
+"$PUBLISHER" empty-catalog --output "$WORK/now.catalog" >/dev/null || fail "empty-catalog defaults its sequence"
+python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["sequence"]; assert int(sys.argv[2]) <= s <= int(sys.argv[2]) + 60, s' \
+  "$WORK/now.catalog" "$before" || fail "the default sequence is the current Unix time"
 sign_catalog "$WORK/empty.catalog" "$WORK/empty.sig"
 mkdir -p "$STREAM_DIR/releases/os-v4.0.2-mac.1.20260911-empty"
 "$PUBLISHER" envelope --catalog "$WORK/empty.catalog" --signature "$WORK/empty.sig" \
@@ -550,6 +556,19 @@ OMARCHY_PUBLISH_ASSUME_YES=os-v4.0.2-mac.1.20260911-empty "$PUBLISHER" os-promot
 cmp -s "$STREAM_DIR/channels/stable/catalog.signed.json" "$STREAM_DIR/channels/rc/catalog.signed.json" ||
   fail "stable and rc serve the same empty catalog"
 pass "a signed empty catalog promotes to stable and rc and survives the stable prune"
+
+# --- replacing an empty catalog keeps it as the rollback set -----------------
+"$PUBLISHER" empty-catalog --sequence 1100 --output "$WORK/empty2.catalog" >/dev/null
+sign_catalog "$WORK/empty2.catalog" "$WORK/empty2.sig"
+mkdir -p "$STREAM_DIR/releases/os-v4.0.2-mac.1.20260912-empty"
+"$PUBLISHER" envelope --catalog "$WORK/empty2.catalog" --signature "$WORK/empty2.sig" \
+  --output "$STREAM_DIR/releases/os-v4.0.2-mac.1.20260912-empty/catalog.signed.json" >/dev/null
+OMARCHY_PUBLISH_ASSUME_YES=os-v4.0.2-mac.1.20260912-empty "$PUBLISHER" os-promote \
+  --tag os-v4.0.2-mac.1.20260912-empty --to rc >"$WORK/empty2-rc.log" 2>&1 ||
+  fail "a newer empty catalog promotes to rc" "$(cat "$WORK/empty2-rc.log")"
+python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['previous_os_tag']=='os-v4.0.2-mac.1.20260911-empty', d" \
+  "$STREAM_DIR/channels/rc/channel.json" || fail "channel.json records the empty set it superseded"
+pass "an empty catalog it replaces stays recorded for rollback"
 
 # --- the MX Mac feeds at the bucket root are never touched ---------------------
 [[ $(root_digest) == "$MX_ROOT_DIGEST" ]] || fail "the MX Mac feeds are unchanged" "$(cd "$BUCKET_DIR" && find . -type f -not -path "./$INSTALLER_STREAM_PATH/*")"

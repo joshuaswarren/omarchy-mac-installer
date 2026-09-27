@@ -24,7 +24,7 @@
         "Release candidate — Not available for this Mac")
       XCTAssertEqual(
         PlainLanguage.channelMenuItem(.rc, availability: .checkFailed(.network)),
-        "Release candidate — Couldn’t reach")
+        "Release candidate — Couldn’t load")
       XCTAssertEqual(
         PlainLanguage.channelMenuItem(.rc, availability: .checkFailed(.verification)),
         "Release candidate — Couldn’t verify")
