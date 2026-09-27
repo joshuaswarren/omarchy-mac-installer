@@ -451,20 +451,38 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
     case reclaimFailed = "macOS resize failed"
     case disconnected = "Connection lost"
 
+    /// Each preview is one consistent disk: members sit between macOS and
+    /// Recovery, so macOS after removal is macOS plus everything removed.
+    /// `success` is the M1 Pro lab Mac's converged install (2026-09-28).
     var previewTicket: (OmarchyRemovalTicket, String) {
-      let kept = [
-        OmarchyRemovalItem(
-          title: "macOS “Macintosh HD”", detail: "disk0s2 · grows to 494.4 GB",
-          bytes: 461_600_000_000),
-        OmarchyRemovalItem(title: "Apple system container", detail: "disk0s1", bytes: 524_288_000),
-        OmarchyRemovalItem(title: "Apple Recovery", detail: "disk0s6", bytes: 5_368_664_064),
-      ]
+      func kept(macOS: UInt64, after: UInt64, recovery: String) -> [OmarchyRemovalItem] {
+        [
+          OmarchyRemovalItem(
+            title: "macOS “Macintosh HD”",
+            detail: "disk0s2 · grows to \(String(format: "%.1f GB", Double(after) / 1e9))",
+            bytes: macOS),
+          OmarchyRemovalItem(
+            title: "Apple system container", detail: "disk0s1", bytes: 524_288_000),
+          OmarchyRemovalItem(title: "Apple Recovery", detail: recovery, bytes: 5_368_664_064),
+        ]
+      }
+      func ticket(
+        kind: OmarchyRemovalKind = .installation, macOS: UInt64, deletions: [OmarchyRemovalItem],
+        free: UInt64 = 0, recovery: String, notes: [String] = []
+      ) -> OmarchyRemovalTicket {
+        let reclaim = deletions.reduce(free) { $0 + $1.bytes }
+        return OmarchyRemovalTicket(
+          id: UUID(), kind: kind, reclaimBytes: reclaim, macOSBytesAfter: macOS + reclaim,
+          deletions: deletions,
+          kept: kept(macOS: macOS, after: macOS + reclaim, recovery: recovery),
+          notes: notes)
+      }
       switch self {
       case .freeSpace:
         return (
-          OmarchyRemovalTicket(
-            id: UUID(), kind: .freeSpace, reclaimBytes: 32_800_505_856,
-            macOSBytesAfter: 494_400_505_856, kept: kept,
+          ticket(
+            kind: .freeSpace, macOS: 461_600_000_000, deletions: [], free: 32_800_505_856,
+            recovery: "disk0s6",
             notes: [
               "macOS takes all the unallocated space directly after it, whatever put it there."
             ]),
@@ -472,8 +490,8 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
         )
       case .asahi:
         return (
-          OmarchyRemovalTicket(
-            id: UUID(), reclaimBytes: 32_800_505_856, macOSBytesAfter: 494_400_505_856,
+          ticket(
+            macOS: 461_600_000_000,
             deletions: [
               OmarchyRemovalItem(
                 title: "Startup container “Arch Linux ARM”", detail: "disk0s3 · APFS",
@@ -482,13 +500,13 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
                 title: "EFI partition “EFI - ARCH”", detail: "disk0s4", bytes: 524_288_000),
               OmarchyRemovalItem(
                 title: "Linux partition", detail: "disk0s5", bytes: 29_776_412_672),
-            ], kept: kept),
+            ], recovery: "disk0s6"),
           "Found “Arch Linux ARM”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
         )
       default:
         return (
-          OmarchyRemovalTicket(
-            id: UUID(), reclaimBytes: 275_000_000_000, macOSBytesAfter: 995_000_000_000,
+          ticket(
+            macOS: 678_662_672_384,
             deletions: [
               OmarchyRemovalItem(
                 title: "Startup container “Omarchy”", detail: "disk0s3 · APFS",
@@ -497,8 +515,8 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
                 title: "EFI partition “EFI - OMARC”", detail: "disk0s4", bytes: 524_288_000),
               OmarchyRemovalItem(title: "Linux partition", detail: "disk0s5", bytes: 2_147_483_648),
               OmarchyRemovalItem(
-                title: "Linux partition", detail: "disk0s6", bytes: 269_828_710_400),
-            ], kept: kept),
+                title: "Linux partition", detail: "disk0s6", bytes: 310_828_335_104),
+            ], recovery: "disk0s7"),
           "Found “Omarchy”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
         )
       }
