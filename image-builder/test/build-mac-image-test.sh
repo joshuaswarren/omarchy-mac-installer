@@ -258,3 +258,22 @@ if ((EUID != 0)); then
   unset -f sudo pgrep
   pass "without a way to hide its loop devices, the build refuses to run beside a desktop automounter"
 fi
+
+# ── lab access ─────────────────────────────────────────────────────────────
+target=$scratch/lab-root
+logs=$scratch
+mkdir -p "$target/usr/lib/systemd/system" "$scratch/lab-access"
+: >"$target/usr/lib/systemd/system/sshd.service"
+printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKm3ZIe3P3NW/VLwzdZ6vgFvk4OAabP02rnxiZKmXG2r lab\n' \
+  >"$scratch/lab-access/authorized_keys"
+isolated_chroot() { shift; printf '%s\n' "$*" >>"$scratch/chroot"; }
+: >"$scratch/chroot"
+(fail() { builder_fail "$@"; }; profile=release; apply_lab_access)
+[[ ! -e $target/etc/sudoers.d/omarchy-lab && ! -s $scratch/chroot ]] || fail "a release image gets no lab access"
+(fail() { builder_fail "$@"; }; profile=lab; lab_access_dir=$scratch/lab-access; apply_lab_access
+  [[ $lab_access_sha256 =~ ^[0-9a-f]{64}$ ]] || fail "the lab access digest is recorded")
+[[ $(<"$scratch/chroot") == "visudo -cf /etc/sudoers.d/omarchy-lab" ]] || fail "the lab sudoers rule is validated in the image"
+python3 -c 'import importlib.util, sys; s = importlib.util.spec_from_file_location("l", sys.argv[1]); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); m.check(__import__("pathlib").Path(sys.argv[2]), "the image", True)' \
+  "$here/builder/lab_access.py" "$target" || fail "the builder writes exactly the lab overlay"
+unset -f isolated_chroot
+pass "a lab build writes the lab overlay and validates its sudoers rule; a release build writes none"

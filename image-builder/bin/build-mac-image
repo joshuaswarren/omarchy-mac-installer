@@ -60,7 +60,7 @@ TOOLCHAIN=(pacman arch-install-scripts btrfs-progs e2fsprogs dosfstools libarchi
 
 usage() {
   cat <<'USAGE'
-Usage: bin/build-mac-image --inputs FILE --candidates DIR [--cache DIR] [--dry-run] OUT
+Usage: bin/build-mac-image --inputs FILE --candidates DIR [--cache DIR] [--lab-access DIR] [--dry-run] OUT
 
 Builds the Apple Silicon image for the candidate set in DIR from the inputs
 record FILE (bin/mac-image-inputs resolve) into the empty or missing directory
@@ -68,6 +68,14 @@ OUT, in a privileged linux/arm64 Arch Linux ARM container. --cache holds the
 verified root filesystem, databases and package archives between runs, so a
 later build from the same record installs the same bytes. --dry-run checks the
 inputs and the candidate set and prints what would be built.
+
+--lab-access DIR builds a lab test image (edge lane only): DIR holds the lab
+controller's public keys (authorized_keys), optionally the lab user (user,
+default maralc) and Thunderbolt addresses per model (thunderbolt), and the image
+grants that user key-only SSH, passwordless sudo and polkit
+(builder/lab_access.py). It never carries a secret: enrollment credentials go
+over SSH after the first boot. IMAGE and PROVENANCE record profile=lab, and the
+inspection holds the image to exactly that overlay; any other image refuses it.
 
 Needs docker, curl, gpg, python3, bsdtar and sha256sum on the host. As root or
 with passwordless sudo, it hides its loop devices from desktop automounters
@@ -158,15 +166,17 @@ record_field() {
 }
 
 host_main() {
-  local inputs="" candidates="" cache="" out commit clean=true started=$SECONDS dry_run=false cache_mounts=()
+  local inputs="" candidates="" cache="" lab_access="" out commit clean=true started=$SECONDS dry_run=false
+  local cache_mounts=() lab_mounts=()
   while (($#)); do
     case $1 in
-      --inputs|--candidates|--cache)
+      --inputs|--candidates|--cache|--lab-access)
         (($# > 1)) && [[ -n $2 ]] || usage_error "$1 requires a value"
         case $1 in
           --inputs) inputs=$2 ;;
           --candidates) candidates=$2 ;;
           --cache) cache=$2 ;;
+          --lab-access) lab_access=$2 ;;
         esac
         shift 2
         ;;
@@ -185,6 +195,12 @@ host_main() {
   done
   "$BASH" "$ROOT/bin/mac-image-inputs" check "$inputs" >/dev/null
   inputs=$(cd -- "$(dirname -- "$inputs")" && pwd)/$(basename -- "$inputs")
+  if [[ -n $lab_access ]]; then
+    [[ $(record_field omarchy_channel "$inputs") == edge ]] || fail "a lab image is built for the edge lane only"
+    python3 "$ROOT/builder/lab_access.py" validate "$lab_access" >/dev/null || fail "--lab-access is not lab access"
+    lab_access=$(cd -- "$lab_access" && pwd)
+    lab_mounts=(-v "$lab_access:/lab-access:ro")
+  fi
 
   host_work=$(mktemp -d)
   trap host_cleanup EXIT
@@ -203,6 +219,7 @@ host_main() {
     fail "the candidate set is not the one the inputs record names"
   if $dry_run; then
     echo "Would build the Apple Silicon image of $(sed -n 's/^set=//p' "$host_work/import.txt") from $inputs into $out"
+    [[ -z $lab_access ]] || { echo "as a lab test image:"; python3 "$ROOT/builder/lab_access.py" validate "$lab_access"; }
     cat "$host_work/import.txt"
     return 0
   fi
@@ -238,7 +255,7 @@ host_main() {
   # interruption reaches the traps above at once.
   docker run --rm --cidfile "$host_work/cid" --privileged --platform linux/arm64 \
     -v "$ROOT:/src:ro" -v "$inputs:/inputs:ro" -v "$host_work/candidates:/candidates:ro" \
-    -v "$host_work/dbs:/dbs:ro" -v "$out:/out" -v /work "${cache_mounts[@]}" \
+    -v "$host_work/dbs:/dbs:ro" -v "$out:/out" -v /work "${cache_mounts[@]}" "${lab_mounts[@]}" \
     -e MAC_IMAGE_BUILDER_COMMIT="$commit" \
     -e MAC_IMAGE_BUILDER_CLEAN="$clean" \
     -e MAC_IMAGE_BUILDER_IMAGE="$(docker image inspect --format '{{.Id}}' "$host_image")" \
@@ -262,6 +279,9 @@ body=""
 api_mounts=()
 lane=""
 test_image_pin=""
+profile=release
+lab_access_dir=/lab-access
+lab_access_sha256=""
 declare -a unavailable=()
 
 field() {
@@ -912,6 +932,17 @@ arm_first_boot() {
   fi
 }
 
+# A lab test image only (--lab-access): public keys, sudo and polkit for the lab
+# user, sshd and the lab access unit (builder/lab_access.py). Written into @
+# before @factory is sealed from it, so a factory reset keeps lab access.
+apply_lab_access() {
+  [[ $profile == lab ]] || return 0
+  lab_access_sha256=$(python3 "$ROOT/builder/lab_access.py" apply "$lab_access_dir" "$target") ||
+    fail "could not write the lab access overlay"
+  isolated_chroot "$target" visudo -cf /etc/sudoers.d/omarchy-lab >>"$logs/lab-access.log" 2>&1 ||
+    fail "the lab sudoers rule does not validate (logs/lab-access.log)"
+}
+
 sealed_body() {
   printf 'format=2\ncandidate_set=%s\ncandidate_source_commit=%s\n' \
     "$(field candidate_set)" "$(field candidate_source_commit)"
@@ -970,6 +1001,7 @@ configure_image() {
   write_installed_config
   stage_owner_provisioning
   forget_private_pacman
+  apply_lab_access
 
   isolated_chroot "$target" mkinitcpio -P >"$logs/mkinitcpio.log" 2>&1 || fail "mkinitcpio failed (logs/mkinitcpio.log)"
   [[ -s $target/boot/vmlinuz-$KERNEL && -s $target/boot/initramfs-$KERNEL.img ]] ||
@@ -1122,9 +1154,11 @@ cleanup_target() {
 }
 
 payload_name() {
-  local date
+  local date lane_name=""
   date=$(field resolved_at | cut -c1-10 | tr - .)
-  printf 'omarchy-%s-aarch64-apple-silicon-mac-%s-os-package.zip\n' "$date" "$lane"
+  # A lab image's payload says so in its name (mac-image-check PAYLOAD_NAME).
+  [[ $profile == release ]] || lane_name=$lane-$profile
+  printf 'omarchy-%s-aarch64-apple-silicon-mac-%s-os-package.zip\n' "$date" "${lane_name:-$lane}"
 }
 
 write_installer_data() {
@@ -1162,6 +1196,7 @@ write_provenance() {
     jq -r '.packages[] | "candidate=\(.name)|\(.version)|\(.filename)|\(.sha256)"' "$candidates/import.json"
     printf 'hardware_setup=%s\n' "$hardware_setup"
     printf 'test_image_pin=%s\n' "$test_image_pin"
+    [[ $profile == release ]] || printf 'profile=%s\nlab_access_sha256=%s\n' "$profile" "$lab_access_sha256"
     while read -r name; do
       [[ -z $name ]] || printf 'unavailable=%s\n' "$name"
     done <"$work/unavailable"
@@ -1192,6 +1227,7 @@ write_image() {
     done
     printf 'hardware_setup=%s\n' "$hardware_setup"
     printf 'test_image_pin=%s\n' "$test_image_pin"
+    [[ $profile == release ]] || printf 'profile=%s\nlab_access_sha256=%s\n' "$profile" "$lab_access_sha256"
     printf 'package_set_sha256=%s\n' "$(package_set_sha256)"
     (cd "$work/final" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r path; do
       printf 'image_sha256=%s|%s\n' "$path" "$(sha256_of "$work/final/$path")"
@@ -1232,6 +1268,10 @@ container_main() {
   (($# == 0)) || usage_error "--in-container takes no arguments"
   bash "$ROOT/bin/mac-image-inputs" check /inputs >/dev/null
   lane=$(field omarchy_channel)
+  if [[ -d $lab_access_dir ]]; then
+    [[ $lane == edge ]] || fail "a lab image is built for the edge lane only"
+    profile=lab
+  fi
   [[ -d /out && -z $(ls -A /out) ]] || fail "/out is not an empty directory"
   [[ $(sha256_of "$ROOT/builder/omarchy-volume.icns") == "$ICON_SHA256" ]] || fail "the volume icon changed"
   [[ -f "$candidates/import.json" ]] || fail "the candidate set was not imported"
@@ -1267,7 +1307,7 @@ build_payload() {
   seal_images
   step "inspecting the images"
   python3 "$ROOT/bin/mac-image-check" image "$lane" "$work/final/root.img" "$work/final/boot.img" "$work/final/esp" \
-    --candidates "$candidates" --report /out/INSPECTION ||
+    --candidates "$candidates" --report /out/INSPECTION --profile "$profile" ||
     fail "the images do not pass inspection (INSPECTION)"
   step "packaging"
   zip=/out/$(payload_name)
@@ -1276,7 +1316,7 @@ build_payload() {
   find "$work/final" -exec touch -h -d "$(field resolved_at)" {} +
   (cd "$work/final" && bsdtar --format zip -cf "$zip" esp boot.img root.img omarchy-volume.icns)
   write_installer_data "${zip##*/}" /out/installer_data.json
-  python3 "$ROOT/bin/mac-image-check" payload "$lane" "$zip" /out/installer_data.json ||
+  python3 "$ROOT/bin/mac-image-check" payload "$lane" "$zip" /out/installer_data.json --profile "$profile" ||
     fail "the payload does not pass the layout check"
   write_provenance "$zip"
   write_image "$zip"

@@ -19,6 +19,8 @@ check = importlib.util.module_from_spec(spec)
 loader.exec_module(check)
 
 NAME = "omarchy-2026.09.25-aarch64-apple-silicon-mac-edge-os-package.zip"
+LAB = ["profile=lab", "lab_access_sha256=" + "d" * 64]
+LAB_NAME = "omarchy-2026.09.25-aarch64-apple-silicon-mac-edge-lab-os-package.zip"
 INPUTS = {
     "candidate_set": "apple-test-fixture",
     "candidate_source_commit": "a" * 40,
@@ -52,7 +54,10 @@ def package_set(packages) -> str:
     return hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
-def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None) -> None:
+def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
+          profile=(), provenance_profile=None, name=None, inspection_digest=None) -> None:
+    lab = "profile=lab" in profile
+    name = name or (LAB_NAME if lab else NAME)
     payload = out / "payload"
     for directory in ("esp/EFI/BOOT", "esp/EFI/Linux", "esp/m1n1", "esp/omarchy"):
         (payload / directory).mkdir(parents=True)
@@ -72,25 +77,30 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
                                              "  protocol: efi\n  path: boot():/EFI/Linux/omarchy_linux-aurora.efi\n")
     (payload / "esp/m1n1/boot.bin").write_bytes(b"m1n1" * 64)
     shutil.copy(ROOT / "builder/omarchy-volume.icns", payload / "omarchy-volume.icns")
-    zip_path = out / NAME
+    zip_path = out / name
     subprocess.run(["bsdtar", "--format", "zip", "-cf", str(zip_path), "esp", "boot.img", "root.img",
                     "omarchy-volume.icns"], cwd=payload, check=True)
-    (out / "installer_data.json").write_text(json.dumps(check.expected_metadata(NAME)))
-    (out / "INSPECTION").write_text(json.dumps({"result": inspection}))
+    (out / "installer_data.json").write_text(json.dumps(check.expected_metadata(name)))
+    report = {"result": inspection}
+    digest = inspection_digest or next((l.split("=", 1)[1] for l in profile if l.startswith("lab_access_sha256=")), None)
+    if digest:
+        report.update(profile="lab", lab_access_sha256=digest)
+    (out / "INSPECTION").write_text(json.dumps(report))
     (out / "inputs").write_text("format=2\n" + "".join(f"{k}={v}\n" for k, v in INPUTS.items()))
     lines = ["format=2", "kind=mac-image", "lane=edge", "kernel=linux-aurora", "platform=apple-silicon",
              "builder_commit=" + "c" * 40, "builder_tree_clean=true", f"inputs_sha256={sha(out / 'inputs')}"]
     lines += [f"input.{k}={v}" for k, v in INPUTS.items()]
     lines += [f"candidate={n}|{v}|{f}|{s}" for n, v, _, f, s in candidates]
-    lines += ["hardware_setup=build", f"package_set_sha256={package_set(packages)}", f"package_count={len(packages)}"]
+    lines += ["hardware_setup=build", *(profile if provenance_profile is None else provenance_profile),
+              f"package_set_sha256={package_set(packages)}", f"package_count={len(packages)}"]
     lines += [f"package={i}|{'|'.join(p)}" for i, p in enumerate(packages, 1)]
     lines += [f"installer_data_sha256={sha(out / 'installer_data.json')}", f"inspection_sha256={sha(out / 'INSPECTION')}",
-              f"payload={NAME}|{zip_path.stat().st_size}|{sha(zip_path)}"]
+              f"payload={name}|{zip_path.stat().st_size}|{sha(zip_path)}"]
     (out / "PROVENANCE").write_text("\n".join(lines) + "\n")
-    digests = check.check_payload("edge", zip_path, out / "installer_data.json")
+    digests = check.check_payload("edge", zip_path, out / "installer_data.json", "lab" if name == LAB_NAME else "release")
     image = ["format=2", "lane=edge", "platform=apple-silicon", "builder_commit=" + "c" * 40, "builder_tree_clean=true",
              *[f"{k}={v}" for k, v in INPUTS.items()],
-             "hardware_setup=build", f"package_set_sha256={package_set(packages)}",
+             "hardware_setup=build", *profile, f"package_set_sha256={package_set(packages)}",
              *[f"image_sha256={m}|{d}" for m, d in sorted(digests.items())], f"input_digest={sha(out / 'inputs')}"]
     if image_edit:
         image = image_edit(image)
@@ -152,6 +162,61 @@ class BuildDirectoryTest(unittest.TestCase):
             stream.write(b"\0")
         with self.assertRaises(check.CheckError):
             check.check_provenance("edge", self.out)
+
+    def test_a_lab_image_on_edge_passes(self):
+        build(self.out, profile=LAB)
+        check.check_provenance("edge", self.out)
+        check.check_descriptor("edge", self.out)
+
+    def test_lab_and_release_payloads_are_told_apart_by_name(self):
+        build(self.out, profile=LAB)
+        with self.assertRaisesRegex(check.CheckError, "names a lab image"):
+            check.check_payload("edge", self.out / LAB_NAME, self.out / "installer_data.json", "release")
+        shutil.rmtree(self.out)
+        self.out.mkdir()
+        build(self.out)
+        with self.assertRaisesRegex(check.CheckError, "does not name a lab image"):
+            check.check_payload("edge", self.out / NAME, self.out / "installer_data.json", "lab")
+        for mode in ("provenance", "descriptor"):
+            with self.subTest(mode=mode):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, name=LAB_NAME)
+                with self.assertRaisesRegex(check.CheckError, "names a lab image"):
+                    getattr(check, f"check_{mode}")("edge", self.out)
+
+    def test_inspection_must_carry_the_recorded_lab_digest(self):
+        build(self.out, profile=LAB, inspection_digest="e" * 64)
+        with self.assertRaisesRegex(check.CheckError, "INSPECTION's lab access digest"):
+            check.check_provenance("edge", self.out)
+
+    def test_a_lab_record_must_be_whole_and_agree(self):
+        cases = {
+            "names no lab access digest": dict(profile=["profile=lab"]),
+            "not one profile=lab": dict(profile=["profile=release"]),
+            "lab access on a release image": dict(profile=[LAB[1]]),
+            "profile does not match PROVENANCE": dict(profile=LAB, provenance_profile=[]),
+            "lab_access_sha256 does not match PROVENANCE": dict(
+                profile=LAB, provenance_profile=["profile=lab", "lab_access_sha256=" + "e" * 64]),
+        }
+        for message, options in cases.items():
+            with self.subTest(message=message):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, **options)
+                with self.assertRaisesRegex(check.CheckError, message):
+                    check.check_descriptor("edge", self.out)
+
+    def test_a_lab_image_is_refused_on_release_lanes(self):
+        for lane in ("rc", "stable"):
+            with self.subTest(lane=lane):
+                with self.assertRaisesRegex(check.CheckError, f"refused on the {lane} lane"):
+                    check.check_recorded_profile(lane, {"profile": ["lab"], "lab_access_sha256": ["f" * 64]}, "IMAGE")
+                with self.assertRaisesRegex(check.CheckError, f"refused on the {lane} lane"):
+                    check.check_profile(lane, "lab")
+                self.assertEqual(check.main(["mac-image-check", "tree", lane, str(self.out), "--candidates",
+                                             str(self.out), "--profile", "lab"]), 1)
+        self.assertEqual(check.main(["mac-image-check", "provenance", "edge", str(self.out), "--profile", "lab"]), 64)
 
     def test_payload_without_limine(self):
         build(self.out)

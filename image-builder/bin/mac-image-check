@@ -19,6 +19,11 @@ descriptor  a build directory whose IMAGE names the lane, platform, builder
             commit, candidate set, package set digest, each payload member's
             sha256 and the inputs digest, matching the bytes and records
             beside it.
+
+image and tree refuse lab access (builder/lab_access.py) in every subvolume,
+@factory and the initramfs, unless --profile lab names an edge lab image; a lab
+image must then carry exactly the lab overlay. IMAGE and PROVENANCE record a
+lab image as profile=lab, which only the edge lane accepts.
 """
 
 from __future__ import annotations
@@ -60,10 +65,14 @@ REQUIRED_MEMBERS = {
     f"esp/EFI/Linux/omarchy_{KERNEL}.efi",
     ICON,
 }
+# A lab image's payload says so in its name (-lab-), so it never passes for a release payload.
 PAYLOAD_NAME = re.compile(
-    r"^omarchy-\d{4}\.\d{2}\.\d{2}-aarch64-apple-silicon-mac-(edge|rc|stable)-os-package\.zip$"
+    r"^omarchy-\d{4}\.\d{2}\.\d{2}-aarch64-apple-silicon-mac-(edge|rc|stable)(-lab)?-os-package\.zip$"
 )
 LANES = ("edge", "rc", "stable")
+PROFILES = ("release", "lab")
+# The only lane a lab image may be built for.
+LAB_LANE = "edge"
 IMAGE_LINKS = {
     "etc/systemd/system/multi-user.target.wants/omarchy-vendor-firmware.service":
         "/etc/systemd/system/omarchy-vendor-firmware.service",
@@ -87,6 +96,13 @@ NODE_PIN = ROOT / "builder/node.pin"
 
 def _inspection():
     spec = importlib.util.spec_from_file_location("inspection", ROOT / "builder/inspection.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _module(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / f"builder/{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -179,10 +195,13 @@ def check_plaintext_root(header: bytes, where: str) -> None:
     check_root_superblock(header, where)
 
 
-def check_payload(lane: str, package: Path, installer_data: Path) -> dict[str, str]:
+def check_payload(lane: str, package: Path, installer_data: Path, profile: str = "release") -> dict[str, str]:
+    check_profile(lane, profile)
     name = package.name
     match = PAYLOAD_NAME.fullmatch(name)
     require(match is not None and match.group(1) == lane, f"{name} is not a {lane} mac image payload name")
+    require((match.group(2) == "-lab") == (profile == "lab"),
+            f"{name} {'does not name' if profile == 'lab' else 'names'} a lab image")
     try:
         metadata = json.loads(installer_data.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -427,20 +446,56 @@ def check_secret_material(root: Path, where: str) -> None:
     require(not human_users(root), f"{where} has a user: {human_users(root)}")
 
 
-def check_tree(root: Path, factory: Path | None = None) -> None:
+def check_profile(lane: str, profile: str) -> None:
+    require(profile in PROFILES, f"{profile} is not an image profile")
+    require(profile != "lab" or lane == LAB_LANE, f"a lab image is refused on the {lane} lane")
+
+
+def check_lab_access(root: Path, where: str, profile: str) -> str:
+    """The lab overlay's access_sha256 in a lab tree, "" in a release tree."""
+    lab = _module("lab_access")
+    try:
+        return lab.check(root, where, profile == "lab")
+    except (lab.LabAccessError, OSError) as error:
+        raise CheckError(str(error)) from None
+
+
+def check_initramfs_lab_access(root: Path) -> None:
+    lab = _module("lab_access")
+    limine = _module("apple_limine")
+    try:
+        initrd = limine.pe_sections(root / f"boot/efi/EFI/Linux/omarchy_{KERNEL}.efi").get(".initrd") or b""
+        chunks = limine.initramfs_archives(initrd)
+        members = [member for chunk in chunks for member in limine._bsdtar(chunk, "-t").decode(errors="replace").splitlines()]
+        contents = b"".join(limine._bsdtar(chunk, "-xO") for chunk in chunks)
+    except (limine.ContractError, OSError, ValueError) as error:
+        raise CheckError(f"cannot read the UKI's initramfs: {error}") from None
+    found = lab.initramfs_findings(members, contents)
+    require(not found, "the initramfs carries " + "; ".join(f"{path} ({what})" for path, what, _ in found))
+
+
+def check_tree(root: Path, factory: Path | None = None, profile: str = "release") -> str:
     require(root.is_dir(), f"{root} is not a directory")
     check_fstab(root)
     check_boot(root)
     check_state(root)
     check_secret_material(root, "the image")
+    digest = check_lab_access(root, "the image", profile)
+    check_initramfs_lab_access(root)
     if factory is not None:
         require(factory.is_dir(), "@factory is missing")
         check_secret_material(factory, "@factory")
+        require(check_lab_access(factory, "@factory", profile) == digest, "@factory's lab access is not the image's")
+    return digest
 
 
-def inspect_tree(lane: str, root: Path, factory: Path | None, candidates: Path, report: Path | None) -> None:
+def inspect_tree(lane: str, root: Path, factory: Path | None, candidates: Path, report: Path | None,
+                 lab_digest: str = "") -> None:
     inspection = _inspection()
     result = inspection.inspect(root, candidates, lane, factory)
+    if lab_digest:
+        result["profile"] = "lab"
+        result["lab_access_sha256"] = lab_digest
     if report is not None:
         inspection.write_report(result, report)
     for identifier in result["failed_checks"]:
@@ -462,7 +517,9 @@ def check_subvolumes(listed: list[str]) -> None:
             f"root.img holds subvolumes {sorted(listed)}, not {list(SUBVOLUMES)} and optionally {list(NESTED_SUBVOLUMES)}")
 
 
-def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candidates: Path, report: Path | None) -> None:
+def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candidates: Path, report: Path | None,
+                profile: str = "release") -> None:
+    check_profile(lane, profile)
     require(os.geteuid() == 0, "image checks mount the images and need root")
     for image, capacity in ((root_image, ROOT_SIZE), (boot_image, BOOT_SIZE)):
         size = image.stat().st_size
@@ -497,11 +554,15 @@ def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candid
             factory.mkdir()
             run("mount", "-o", "ro,subvol=@factory", root_loop, str(factory))
             mounts.append(str(factory))
-            check_tree(tree, factory)
+            digest = check_tree(tree, factory, profile)
             for subvolume, point in (("@", tree), ("@home", tree / "home"), ("@log", tree / "var/log"),
                                      ("@pkg", tree / "var/cache/pacman/pkg"), ("@factory", factory)):
                 check_secret_material(point, subvolume)
-            inspect_tree(lane, tree, factory, candidates, report)
+            # Each subvolume unmounted too, so nothing hides under a mount point.
+            # The lab overlay lives in @ (and @factory); the others carry none.
+            for subvolume in ("@", "@home", "@log", "@pkg"):
+                check_lab_access(top / subvolume, f"{subvolume} (unmounted)", profile if subvolume == "@" else "release")
+            inspect_tree(lane, tree, factory, candidates, report, digest)
         finally:
             for mount in reversed(mounts):
                 subprocess.run(["umount", mount], check=False)
@@ -526,6 +587,7 @@ def parse_fields(path: Path) -> dict[str, list[str]]:
 
 
 def payload_in(directory: Path, lane: str) -> Path:
+    # The name's profile is checked against the records by check_payload.
     zips = [path for path in directory.iterdir() if path.suffix == ".zip" and path.is_file()]
     matches = [path for path in zips if PAYLOAD_NAME.fullmatch(path.name) is not None]
     require(len(matches) == 1, f"{directory} does not hold one {lane} payload")
@@ -577,8 +639,26 @@ def check_provenance(lane: str, directory: Path) -> None:
     inspection = directory / "INSPECTION"
     require(inspection.is_file() and file_sha256(inspection) == fields["inspection_sha256"][0],
             "INSPECTION is not the one PROVENANCE names")
-    require(json.loads(inspection.read_text()).get("result") == "passed", "INSPECTION did not pass")
-    check_payload(lane, payload, installer_data)
+    report = json.loads(inspection.read_text())
+    require(report.get("result") == "passed", "INSPECTION did not pass")
+    profile = check_recorded_profile(lane, fields, "PROVENANCE")
+    require(report.get("lab_access_sha256") == fields.get("lab_access_sha256", [None])[0],
+            "INSPECTION's lab access digest does not match PROVENANCE")
+    check_payload(lane, payload, installer_data, profile)
+
+
+def check_recorded_profile(lane: str, fields: dict[str, list[str]], where: str) -> str:
+    """A lab image says so (profile=lab, lab_access_sha256=); anything else is a release image."""
+    recorded = fields.get("profile")
+    if recorded is None:
+        require("lab_access_sha256" not in fields, f"{where} names lab access on a release image")
+        return "release"
+    require(recorded == ["lab"], f"{where} records the profile {recorded}, not one profile=lab")
+    check_profile(lane, "lab")
+    digests = fields.get("lab_access_sha256", [])
+    require(len(digests) == 1 and re.fullmatch(r"[0-9a-f]{64}", digests[0]) is not None,
+            f"{where} names no lab access digest")
+    return "lab"
 
 
 IMAGE_INPUTS = ("candidate_set", "candidate_source_commit", "candidate_signer", "candidate_receipt_sha256",
@@ -609,10 +689,13 @@ def check_descriptor(lane: str, directory: Path) -> None:
     require(provenance_fields.get("inputs_sha256") == [digest], "IMAGE input_digest does not match PROVENANCE")
     for key in ("package_set_sha256", "hardware_setup", "builder_commit", "builder_tree_clean"):
         require(provenance_fields.get(key) == fields[key], f"IMAGE {key} does not match PROVENANCE")
+    profile = check_recorded_profile(lane, fields, "IMAGE")
+    for key in ("profile", "lab_access_sha256"):
+        require(provenance_fields.get(key) == fields.get(key), f"IMAGE {key} does not match PROVENANCE")
     payload = payload_in(directory, lane)
     installer_data = directory / "installer_data.json"
     require(installer_data.is_file(), "installer_data.json is not beside IMAGE")
-    digests = check_payload(lane, payload, installer_data)
+    digests = check_payload(lane, payload, installer_data, profile)
     recorded = {}
     for value in fields.get("image_sha256", []):
         require("|" in value, "IMAGE has a malformed image_sha256")
@@ -623,9 +706,9 @@ def check_descriptor(lane: str, directory: Path) -> None:
     require(recorded == digests, "IMAGE does not name each payload member's sha256")
 
 
-USAGE = """Usage: mac-image-check payload <edge|rc|stable> PAYLOAD.zip INSTALLER_DATA.json
-       mac-image-check image <edge|rc|stable> ROOT.img BOOT.img ESP_DIR --candidates DIR [--report FILE]
-       mac-image-check tree <edge|rc|stable> ROOT_TREE [FACTORY_TREE] --candidates DIR [--report FILE]
+USAGE = """Usage: mac-image-check payload <edge|rc|stable> PAYLOAD.zip INSTALLER_DATA.json [--profile lab]
+       mac-image-check image <edge|rc|stable> ROOT.img BOOT.img ESP_DIR --candidates DIR [--report FILE] [--profile lab]
+       mac-image-check tree <edge|rc|stable> ROOT_TREE [FACTORY_TREE] --candidates DIR [--report FILE] [--profile lab]
        mac-image-check provenance <edge|rc|stable> BUILD_DIR
        mac-image-check descriptor <edge|rc|stable> BUILD_DIR"""
 
@@ -633,14 +716,18 @@ USAGE = """Usage: mac-image-check payload <edge|rc|stable> PAYLOAD.zip INSTALLER
 def main(argv: list[str]) -> int:
     rest: list[str] = []
     options: dict[str, Path] = {}
+    profile = "release"
     arguments = iter(argv[1:])
     for arg in arguments:
-        if arg in ("--candidates", "--report"):
+        if arg in ("--candidates", "--report", "--profile"):
             value = next(arguments, None)
-            if value is None:
+            if value is None or (arg == "--profile" and value not in PROFILES):
                 print(USAGE, file=sys.stderr)
                 return 64
-            options[arg[2:]] = Path(value)
+            if arg == "--profile":
+                profile = value
+            else:
+                options[arg[2:]] = Path(value)
         else:
             rest.append(arg)
     arity = {"payload": 2, "image": 3, "tree": None, "provenance": 1, "descriptor": 1}
@@ -655,18 +742,20 @@ def main(argv: list[str]) -> int:
     elif len(paths) != arity[mode]:
         print(USAGE, file=sys.stderr)
         return 64
-    if mode in ("image", "tree") and "candidates" not in options:
+    if (mode in ("image", "tree") and "candidates" not in options) or (mode not in ("image", "tree", "payload") and profile != "release"):
         print(USAGE, file=sys.stderr)
         return 64
     try:
         if mode == "payload":
-            check_payload(lane, Path(paths[0]), Path(paths[1]))
+            check_payload(lane, Path(paths[0]), Path(paths[1]), profile)
         elif mode == "image":
-            check_image(lane, Path(paths[0]), Path(paths[1]), Path(paths[2]), options["candidates"], options.get("report"))
+            check_image(lane, Path(paths[0]), Path(paths[1]), Path(paths[2]), options["candidates"], options.get("report"),
+                        profile)
         elif mode == "tree":
             factory = Path(paths[1]) if len(paths) == 2 else None
-            check_tree(Path(paths[0]), factory)
-            inspect_tree(lane, Path(paths[0]), factory, options["candidates"], options.get("report"))
+            check_profile(lane, profile)
+            digest = check_tree(Path(paths[0]), factory, profile)
+            inspect_tree(lane, Path(paths[0]), factory, options["candidates"], options.get("report"), digest)
         elif mode == "provenance":
             check_provenance(lane, Path(paths[0]))
         else:
@@ -674,7 +763,7 @@ def main(argv: list[str]) -> int:
     except CheckError as error:
         print(f"mac-image-check: {error}", file=sys.stderr)
         return 1
-    print(f"ok - the {lane} mac image {mode} meets the contract")
+    print(f"ok - the {lane} {'lab ' if profile == 'lab' else ''}mac image {mode} meets the contract")
     return 0
 
 
