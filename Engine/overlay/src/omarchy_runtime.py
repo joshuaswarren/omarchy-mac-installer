@@ -152,11 +152,17 @@ class EngineRuntime:
             collected = omarchy_planner.collect_inventory(
                 installer,
                 free_parts,
-                # Upstream filters out containers below its 38GB reserve.
-                # Keep them here so the engine can report an exact shortfall.
+                # Also keep tight macOS containers for exact shortfalls.
+                # Do not probe unrelated stubs or data-only containers that
+                # upstream did not consider resizable.
                 [
                     part for part in installer.parts
-                    if part.type == "Apple_APFS" and part.container is not None
+                    if part in resizable_parts or (
+                        part.type == "Apple_APFS"
+                        and part.container is not None
+                        and part.os
+                        and any(os.version for os in part.os)
+                    )
                 ] if is_gpt else [],
                 stub_size,
                 part_align,

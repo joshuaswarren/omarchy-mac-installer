@@ -57,7 +57,7 @@ class PlannerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_macOS_free_floor_uses_physical_disk_and_caps_at_38GB(self):
+    def test_macOS_free_floor_is_38GB_on_every_disk_size(self):
         gb = 1_000_000_000
         unit = 1024**2
         for disk_gb in (128, 256, 512, 760, 1000):
@@ -74,7 +74,7 @@ class PlannerTests(unittest.TestCase):
                 (candidate,) = collect_inventory(
                     self.installer, [], self.resize, 2 * gb, unit
                 )["candidates"]
-                expected = used + min(disk_gb * gb // 20, 38 * gb)
+                expected = used + 38 * gb
                 expected = (expected + unit - 1) // unit * unit
                 self.assertEqual(candidate["minimum_container_bytes"], expected)
 
@@ -89,7 +89,7 @@ class PlannerTests(unittest.TestCase):
         inventory = collect_inventory(self.installer, [], self.resize, 2_000_000_000, 1_048_576)
         candidate = inventory["candidates"][0]
         self.assertGreater(candidate["minimum_container_bytes"], candidate["length_bytes"])
-        self.assertGreaterEqual(candidate["minimum_container_bytes"], 207_800_000_000)
+        self.assertGreaterEqual(candidate["minimum_container_bytes"], 233_000_000_000)
         layout = self.journal.inventory("disk0", [candidate])
         with self.assertRaises(ValueError):
             self.journal.plan(device_identifier="apple,j314s", layout_digest=layout,
@@ -191,9 +191,9 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
         self.assertEqual(resize["minimum_container_bytes"], 460 * 1024**3)
 
-    def test_macOS_reserve_limits_diskutil_relaxation(self):
+    def test_macOS_reserve_is_not_relaxed_to_fit_partition_floor(self):
         # Asahi's 38GB reserve leaves less than the partition floor, but
-        # diskutil's own recommended minimum still releases enough.
+        # diskutil's smaller minimum must not override the macOS reserve.
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
         self.resize[0].size = 200 * 1024**3
         self.installer.resize_bounds = {
@@ -213,7 +213,7 @@ class PlannerTests(unittest.TestCase):
 
         (resize,) = inventory["candidates"]
         self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
-        self.assertEqual(resize["minimum_container_bytes"], 182_761_553_920)
+        self.assertEqual(resize["minimum_container_bytes"], 180 * 1024**3)
 
     def test_stricter_diskutil_limit_is_never_relaxed(self):
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
@@ -243,7 +243,7 @@ class PlannerTests(unittest.TestCase):
         )
         self.resize[0].size = 200 * gib
         previous_container = 200 * gib
-        for available in (31, 32, 41, 42, 61, 62, 71, 72):
+        for available in (32, 41, 42, 61, 62, 71, 72):
             with self.subTest(available_gib=available):
                 container = (200 - available) * gib
                 self.installer.resize_bounds = {

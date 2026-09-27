@@ -56,19 +56,9 @@ public struct InstallerAllocationRecommendation:
         guard available > reservedBytes else {
           return nil
         }
-        var usable = available - reservedBytes
-        // Keep Asahi's extra macOS reserve when the partition floor still
-        // fits after staging. Prefer the larger Linux minimum only when it
-        // also fits. Older engines supply only the mandatory minimums.
-        if let preferredContainer = candidate.recommendedContainerBytes {
-          let preferredAvailable =
-            candidate.lengthBytes - min(candidate.lengthBytes, preferredContainer)
-          if preferredAvailable >= reservedBytes,
-            preferredAvailable - reservedBytes >= minimum
-          {
-            usable = preferredAvailable - reservedBytes
-          }
-        }
+        // The engine's hard container floor already protects macOS. A second
+        // recommendation threshold can shrink the range as free space grows.
+        let usable = available - reservedBytes
         if let recommended = candidate.recommendedInstallBytes {
           let alignedRecommended = Self.alignUp(recommended, unit: unit)
           if alignedRecommended <= usable - (usable % unit) {

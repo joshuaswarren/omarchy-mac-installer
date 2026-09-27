@@ -203,12 +203,12 @@
           requiredBytes: 40_000_000_000, availableBytes: 34_500_000_000)
       }
       if scenario == .tightDisk {
-        let chosen = min(55_000_000_000, max(40_000_000_000, omarchyBytes ?? 40_000_000_000))
+        let chosen = min(42_000_000_000, max(40_000_000_000, omarchyBytes ?? 40_000_000_000))
         return .plan(
           PlanDisplay(
             diskTotalBytes: 245_000_000_000, omarchyBytes: chosen,
             bindingDigest: "simulation-tight-\(chosen)", minimumBytes: 40_000_000_000,
-            maximumBytes: 55_000_000_000, macOSFreeBeforeAllocationBytes: 80_000_000_000,
+            maximumBytes: 42_000_000_000, macOSFreeBeforeAllocationBytes: 80_000_000_000,
             recommendedOmarchyBytes: 77_000_000_000))
       }
       progress(AssetProgressUpdate(stage: .planning))

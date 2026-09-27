@@ -23,40 +23,46 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
     }
   }
 
-  func testResizeFallbackSurvivesBothThresholdsAfterStagingReserve() throws {
-    for available: UInt64 in [31, 32, 41, 42, 61, 62, 71, 72] {
+  func testResizeRangeGrowsAsSpaceIsFreedAfterStaging() throws {
+    var previousMaximum: UInt64 = 0
+    for available: UInt64 in 42...100 {
       let inventory = try resizeInventory(available: available)
       let recommendation = try InstallerAllocationRecommendation(
         inventory: inventory, reservedBytes: 10 * gib
       )
-
       XCTAssertEqual(recommendation.minimumBytes, (available >= 72 ? 62 : 32) * gib)
-      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, recommendation.minimumBytes)
-      if available >= 42 {
-        // Preserve Asahi's extra reserve whenever it still holds the floor
-        // after staging, including on roomy disks.
-        XCTAssertLessThanOrEqual(recommendation.maximumBytes, (available - 10) * gib)
-      }
+      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum)
+      XCTAssertLessThanOrEqual(recommendation.maximumBytes, (available - 10) * gib)
+      previousMaximum = recommendation.maximumBytes
       XCTAssertNoThrow(
         try PinnedAsahiPlanRequest(
-          inventory: inventory,
-          candidate: recommendation.candidate,
-          requestedLengthBytes: recommendation.requestedLengthBytes
-        )
-      )
+          inventory: inventory, candidate: recommendation.candidate,
+          requestedLengthBytes: recommendation.requestedLengthBytes))
+    }
+  }
+
+  func testLegacyRecommendationDoesNotShrinkCeilingOrFreezeAtFloor() throws {
+    var previousMaximum: UInt64 = 0
+    for available: UInt64 in 31...100 {
+      let inventory = try resizeInventory(
+        available: available, hardAvailable: max(50, available))
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory, reservedBytes: 10 * gib)
+      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum)
+      XCTAssertGreaterThan(recommendation.maximumBytes, 32 * gib)
+      previousMaximum = recommendation.maximumBytes
     }
   }
 
   func testResizeFallbackStillRejectsBelowThePartitionFloor() throws {
     XCTAssertThrowsError(
       try InstallerAllocationRecommendation(
-        inventory: resizeInventory(available: 31), reservedBytes: 19 * gib
+        inventory: resizeInventory(available: 50), reservedBytes: 19 * gib
       )
     ) { error in
       XCTAssertEqual(
         error as? InstallerAllocationRecommendationError,
-        .insufficientSpace(requiredBytes: 32 * self.gib, availableBytes: 31 * self.gib)
-      )
+        .insufficientSpace(requiredBytes: 32 * self.gib, availableBytes: 31 * self.gib))
     }
   }
 
@@ -80,13 +86,14 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
   }
 
   private func resizeInventory(
-    available: UInt64, recommendations: [String: Any]? = nil, kind: String = "resize"
+    available: UInt64, hardAvailable: UInt64? = nil, recommendations: [String: Any]? = nil,
+    kind: String = "resize"
   ) throws -> ValidatedEngineInventory {
     let container = (200 - available) * gib
     var candidate: [String: Any] = [
       "kind": kind, "source_identifier": "disk0s2", "offset_bytes": gib,
       "length_bytes": 200 * gib, "minimum_install_bytes": 32 * gib,
-      "minimum_container_bytes": kind == "resize" ? min(150 * gib, container) : 0,
+      "minimum_container_bytes": kind == "resize" ? (200 - (hardAvailable ?? available)) * gib : 0,
     ]
     candidate.merge(
       recommendations ?? [

@@ -6,6 +6,21 @@
 
   @MainActor
   final class InstallerSimulationTests: XCTestCase {
+    func testTightDiskSimulationKeepsHardMacOSReserve() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .tightDisk, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      await session.replan(omarchyBytes: 55_000_000_000)
+      guard case .planReview(let plan, _) = session.phase else {
+        return XCTFail("Expected disk review")
+      }
+      XCTAssertEqual(plan.maximumBytes, 42_000_000_000)
+      XCTAssertEqual(plan.omarchyBytes, plan.maximumBytes)
+      XCTAssertEqual(plan.macOSFreeBeforeAllocationBytes! - plan.omarchyBytes, 38_000_000_000)
+    }
+
     func testGenericAndQuantifiedPlanningFailuresRemainDistinct() async {
       for (scenario, headline) in [
         (InstallerSimulationScenario.planFailure, "There isn’t enough usable disk space"),

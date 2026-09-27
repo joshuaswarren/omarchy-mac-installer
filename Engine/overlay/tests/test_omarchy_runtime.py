@@ -366,14 +366,20 @@ class EngineRuntimeTests(unittest.TestCase):
             "OMARCHY_ENGINE_JOURNAL": str(self.journal_path),
         })
         runtime.journal.inspection("apple,j314s", "supported")
-        tight = SimpleNamespace(type="Apple_APFS", container={"CapacityFree": 1})
-        recovery = SimpleNamespace(type="Apple_APFS_Recovery", container={})
-        unknown = SimpleNamespace(type="Apple_APFS", container=None)
+        macos = [SimpleNamespace(version="15.7")]
+        tight = SimpleNamespace(type="Apple_APFS", container={"CapacityFree": 1}, os=macos)
+        roomy = SimpleNamespace(type="Apple_APFS", container={}, os=macos)
+        data = SimpleNamespace(name="data", type="Apple_APFS", container={}, os=[])
+        stub = SimpleNamespace(type="Apple_APFS", container={}, os=[SimpleNamespace(version=None)])
+        upstream_data = SimpleNamespace(name="upstream-data", type="Apple_APFS", container={}, os=[])
+        recovery = SimpleNamespace(type="Apple_APFS_Recovery", container={}, os=macos)
+        unknown = SimpleNamespace(type="Apple_APFS", container=None, os=macos)
+        parts = [tight, roomy, data, stub, upstream_data, recovery, unknown]
         with patch("omarchy_runtime.omarchy_planner.collect_inventory", return_value=self.inventory) as collect:
-            runtime.run_layout(installer=self._layout_installer([tight, recovery, unknown]),
-                               free_parts=[], resizable_parts=[], stub_size=2_500_000_000,
+            runtime.run_layout(installer=self._layout_installer(parts),
+                               free_parts=[], resizable_parts=[roomy, upstream_data], stub_size=2_500_000_000,
                                part_align=1_048_576)
-        self.assertEqual(collect.call_args.args[2], [tight])
+        self.assertEqual(collect.call_args.args[2], [tight, roomy, upstream_data])
 
     def test_non_gpt_disk_does_not_offer_resize_candidates(self):
         runtime = EngineRuntime.from_environment({
