@@ -431,6 +431,44 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(report["checks"]["pacman-config"]["result"], "passed", report["checks"]["pacman-config"])
         self.assertIn("apple-silicon edge pacman.conf", report["checks"]["pacman-config"]["detail"])
 
+    def test_pacman_config_prefers_omarchy_macs_template(self):
+        runtime = self.root / "usr/share/omarchy/default/pacman"
+        apple = "[options]\nArchitecture = auto\n\n[omarchy]\nServer = https://pkgs.omarchy.org/edge/$arch\n"
+        apple += "\n[asahi-alarm]\nServer = https://github.com/asahi-alarm/asahi-alarm/releases/download/aarch64\n"
+        apple += "".join(f"\n[{r}]\nInclude = /etc/pacman.d/mirrorlist\n" for r in ("core", "extra", "alarm", "aur"))
+        (runtime / "apple-silicon").mkdir()
+        (runtime / "apple-silicon/pacman-edge.conf").write_text(apple)
+        package = self.root / "usr/share/omarchy-mac/pacman"
+        package.mkdir(parents=True)
+        (package / "pacman-edge.conf").write_text(apple + "\n# omarchy-mac\n")
+        pinned = fixtures.test_image_pin.pinned(self.summary)
+        (self.root / "etc/pacman.conf").write_bytes(fixtures.test_image_pin.render(apple.encode(), pinned))
+        self.assertFails("pacman-config", "omarchy-mac's apple-silicon edge configuration")
+        (self.root / "etc/pacman.conf").write_bytes(fixtures.test_image_pin.render((apple + "\n# omarchy-mac\n").encode(), pinned))
+        report = self.inspect()
+        self.assertEqual(report["checks"]["pacman-config"]["result"], "passed", report["checks"]["pacman-config"])
+        self.assertIn("omarchy-mac's apple-silicon edge pacman.conf", report["checks"]["pacman-config"]["detail"])
+
+    def test_pacman_config_needs_a_template(self):
+        (self.root / "usr/share/omarchy/default/pacman/aarch64/pacman-edge.conf").unlink()
+        self.assertFails("pacman-config", "the image ships no Apple Silicon pacman configuration for edge")
+
+    def test_pacman_config_takes_a_single_aarch64_mirror_list(self):
+        runtime = self.root / "usr/share/omarchy/default/pacman"
+        mirrors = (runtime / "aarch64/mirrorlist-edge").read_text()
+        (runtime / "aarch64/mirrorlist-edge").unlink()
+        (runtime / "mirrorlist-aarch64").write_text(mirrors + "# one list for every channel\n")
+        self.assertFails("pacman-config", "aarch64 edge mirror list")
+        (self.root / "etc/pacman.d/mirrorlist").write_text(mirrors + "# one list for every channel\n")
+        report = self.inspect()
+        self.assertEqual(report["checks"]["pacman-config"]["result"], "passed", report["checks"]["pacman-config"])
+        # With both layouts, the channel's own list wins, as build-mac-image writes it.
+        (runtime / "aarch64/mirrorlist-edge").write_text(mirrors)
+        self.assertFails("pacman-config", "aarch64 edge mirror list")
+        (self.root / "etc/pacman.d/mirrorlist").write_text(mirrors)
+        report = self.inspect()
+        self.assertEqual(report["checks"]["pacman-config"]["result"], "passed", report["checks"]["pacman-config"])
+
     def test_test_image_keeps_the_sets_runtime(self):
         conf = (self.root / "etc/pacman.conf").read_text()
         self.assertIn("[options]\n" + fixtures.test_image_pin.MARK + "\n", conf)
