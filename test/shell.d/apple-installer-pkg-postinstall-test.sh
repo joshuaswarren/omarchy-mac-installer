@@ -23,6 +23,7 @@ cat "$3"
 STUB
 cat >"$test_tmp/pgrep" <<'STUB'
 #!/bin/bash
+[[ ! -e ${2%/Contents/}/pgrep-fails ]] || exit 3
 [[ -e ${2%/Contents/}/running ]]
 STUB
 chmod +x "$test_tmp/plistbuddy" "$test_tmp/pgrep"
@@ -60,6 +61,14 @@ run_removal "$legacy" 2>"$test_tmp/log" || fail "a refusal still succeeds"
 grep -Fq "it is running" "$test_tmp/log" || fail "the refusal is logged" "$(cat "$test_tmp/log")"
 rm -rf "$legacy"
 pass "a running legacy app is kept"
+
+make_bundle "$legacy" "$INSTALLER_APP_IDENTIFIER"
+touch "$legacy/pgrep-fails"
+run_removal "$legacy" 2>"$test_tmp/log" || fail "a refusal still succeeds"
+[[ -d $legacy ]] || fail "a legacy app is kept when pgrep cannot tell whether it runs"
+grep -Fq "could not tell whether it is running" "$test_tmp/log" || fail "the refusal is logged" "$(cat "$test_tmp/log")"
+rm -rf "$legacy"
+pass "a legacy app is kept when pgrep fails"
 
 make_bundle "$test_tmp/target.app" "$INSTALLER_APP_IDENTIFIER"
 ln -s "$test_tmp/target.app" "$legacy"
