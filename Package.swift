@@ -93,6 +93,11 @@ let package = Package(
       path: "Tests/OmarchyInstallerLifecycleTests"
     ),
     .testTarget(
+      name: "OmarchyAppleInstallerAppTests",
+      dependencies: ["OmarchyAppleInstallerApp"],
+      path: "Tests/OmarchyAppleInstallerAppTests"
+    ),
+    .testTarget(
       name: "OmarchyInstallerUXCoreTests",
       dependencies: ["OmarchyInstallerUXCore"],
       path: "Tests/OmarchyInstallerUXCoreTests"

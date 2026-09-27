@@ -18,8 +18,45 @@ struct OmarchyRemovalSheet: View {
   @State private var completed = false
   @State private var message = "Checking for an existing Omarchy installation…"
   @State private var client: AuthenticatedEngineXPCSubmitter?
+  @State private var contentHeight: CGFloat = 0
+  @State private var footerHeight: CGFloat = 0
+  @State private var measuredHeightCap: CGFloat?
+  private var fixedHeightCap: CGFloat?
+  private var preloaded = false
+  private var onControlFrame: ((String, CGRect) -> Void)?
   #if DEBUG
     @State private var scenario = RemovalPreviewScenario.success
+  #endif
+
+  init(
+    isSimulation: Bool, onBusyChanged: @escaping (Bool) -> Void,
+    onClose: @escaping () -> Void, onRequiresReview: @escaping () -> Void
+  ) {
+    self.isSimulation = isSimulation
+    self.onBusyChanged = onBusyChanged
+    self.onClose = onClose
+    self.onRequiresReview = onRequiresReview
+    _measuredHeightCap = State(
+      initialValue: NSApp?.mainWindow.flatMap(RemovalSheetLayout.heightCap(for:)))
+  }
+
+  #if DEBUG
+    init(
+      previewScenario: RemovalPreviewScenario, heightCap: CGFloat?,
+      showsAccountFields: Bool = false,
+      onControlFrame: ((String, CGRect) -> Void)? = nil
+    ) {
+      self.init(
+        isSimulation: !showsAccountFields, onBusyChanged: { _ in }, onClose: {},
+        onRequiresReview: {})
+      let (ticket, message) = previewScenario.previewTicket
+      _scenario = State(initialValue: previewScenario)
+      _ticket = State(initialValue: ticket)
+      _message = State(initialValue: message)
+      fixedHeightCap = heightCap
+      preloaded = true
+      self.onControlFrame = onControlFrame
+    }
   #endif
 
   private var canRemove: Bool {
@@ -28,6 +65,54 @@ struct OmarchyRemovalSheet: View {
   }
 
   var body: some View {
+    VStack(spacing: 0) {
+      ScrollView(.vertical) {
+        scrollingContent
+          .onGeometryChange(for: CGFloat.self) {
+            $0.size.height
+          } action: {
+            contentHeight = $0
+          }
+      }
+      .contentMargins(.bottom, bodyScrolls ? 18 : 0, for: .scrollContent)
+      .frame(height: bodyHeight)
+      .scrollBounceBehavior(.basedOnSize)
+      footer
+        .onGeometryChange(for: CGFloat.self) {
+          $0.size.height
+        } action: {
+          footerHeight = $0
+        }
+        .overlay(alignment: .top) { if bodyScrolls { Divider() } }
+    }
+    .frame(width: 520)
+    .coordinateSpace(.named(RemovalSheetLayout.coordinateSpace))
+    .omarchyTypography()
+    .foregroundStyle(OmarchyTheme.text)
+    .background(OmarchyTheme.window)
+    .background {
+      if fixedHeightCap == nil {
+        RemovalSheetHeightCapReader { measuredHeightCap = $0 }
+      }
+    }
+    .interactiveDismissDisabled(busy)
+    .task { if !preloaded { await prepare() } }
+    .onDisappear { password = "" }
+    .onChange(of: busy) { _, value in onBusyChanged(value) }
+  }
+
+  private var heightCap: CGFloat {
+    fixedHeightCap ?? measuredHeightCap ?? RemovalSheetLayout.fallbackHeightCap()
+  }
+
+  private var bodyHeight: CGFloat {
+    RemovalSheetLayout.bodyHeight(
+      content: contentHeight, footer: footerHeight, cap: heightCap)
+  }
+
+  private var bodyScrolls: Bool { contentHeight > bodyHeight + 0.5 }
+
+  private var scrollingContent: some View {
     VStack(alignment: .leading, spacing: 18) {
       Text(heading)
         .font(OmarchyTheme.title)
@@ -73,6 +158,15 @@ struct OmarchyRemovalSheet: View {
         )
         .font(OmarchyTheme.body)
         .fixedSize(horizontal: false, vertical: true)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding([.horizontal, .top], 26)
+  }
+
+  private var footer: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      if let ticket, !submitted {
         VStack(alignment: .leading, spacing: 7) {
           Text("Type this to confirm:")
             .foregroundStyle(OmarchyTheme.secondaryText)
@@ -83,6 +177,7 @@ struct OmarchyRemovalSheet: View {
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
             .accessibilityIdentifier("removal-confirmation")
+            .reportsFrame("removal-confirmation", to: onControlFrame)
         }
         .font(OmarchyTheme.body)
         if !isSimulation {
@@ -124,19 +219,15 @@ struct OmarchyRemovalSheet: View {
           .omarchyDangerButton()
           .disabled(!canRemove)
           .accessibilityIdentifier("remove-omarchy")
+          .reportsFrame("remove-omarchy", to: onControlFrame)
         }
       }
       .padding(.top, 4)
     }
-    .padding(26)
-    .frame(width: 520)
-    .omarchyTypography()
-    .foregroundStyle(OmarchyTheme.text)
-    .background(OmarchyTheme.window)
-    .interactiveDismissDisabled(busy)
-    .task { await prepare() }
-    .onDisappear { password = "" }
-    .onChange(of: busy) { _, value in onBusyChanged(value) }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 26)
+    .padding(.top, 18)
+    .padding(.bottom, 26)
   }
 
   private var heading: String {
@@ -255,8 +346,99 @@ struct OmarchyRemovalSheet: View {
   }
 }
 
+enum RemovalSheetLayout {
+  static let coordinateSpace = "removal-sheet"
+  static let screenMargin: CGFloat = 16
+  static let minimumHeightCap: CGFloat = 360
+
+  /// A sheet hangs from just below its parent window's title bar, so it can
+  /// only grow down to the bottom of the parent screen's visible frame.
+  static func heightCap(
+    parentFrame: CGRect, titleBarHeight: CGFloat, visibleFrame: CGRect
+  ) -> CGFloat {
+    let available =
+      min(parentFrame.maxY - titleBarHeight, visibleFrame.maxY) - visibleFrame.minY - screenMargin
+    return min(max(available, minimumHeightCap), visibleFrame.height).rounded(.down)
+  }
+
+  static func bodyHeight(content: CGFloat, footer: CGFloat, cap: CGFloat) -> CGFloat {
+    max(min(content, cap - footer), 0)
+  }
+
+  @MainActor static func fallbackHeightCap() -> CGFloat {
+    guard let visibleFrame = NSScreen.main?.visibleFrame else { return .greatestFiniteMagnitude }
+    return max(visibleFrame.height - screenMargin, minimumHeightCap)
+  }
+
+  @MainActor static func heightCap(for parent: NSWindow) -> CGFloat? {
+    guard let screen = parent.screen ?? NSScreen.main else { return nil }
+    return heightCap(
+      parentFrame: parent.frame,
+      titleBarHeight: parent.frame.height - parent.contentLayoutRect.height,
+      visibleFrame: screen.visibleFrame)
+  }
+}
+
+extension View {
+  fileprivate func reportsFrame(_ id: String, to report: ((String, CGRect) -> Void)?) -> some View {
+    onGeometryChange(for: CGRect.self) {
+      $0.frame(in: .named(RemovalSheetLayout.coordinateSpace))
+    } action: {
+      report?(id, $0)
+    }
+  }
+}
+
+private struct RemovalSheetHeightCapReader: NSViewRepresentable {
+  let onChange: (CGFloat) -> Void
+
+  func makeNSView(context: Context) -> ReaderView {
+    let view = ReaderView()
+    view.onChange = onChange
+    return view
+  }
+
+  func updateNSView(_ view: ReaderView, context: Context) {
+    view.onChange = onChange
+  }
+
+  final class ReaderView: NSView {
+    var onChange: ((CGFloat) -> Void)?
+    private var lastCap: CGFloat?
+
+    // Selector observers are removed automatically when the view is freed.
+    override func viewDidMoveToWindow() {
+      super.viewDidMoveToWindow()
+      let center = NotificationCenter.default
+      center.removeObserver(self)
+      guard window != nil else { return }
+      for name in [
+        NSWindow.didMoveNotification, NSWindow.didResizeNotification,
+        NSWindow.didChangeScreenNotification, NSWindow.didBecomeKeyNotification,
+        NSApplication.didChangeScreenParametersNotification,
+      ] {
+        center.addObserver(self, selector: #selector(changed(_:)), name: name, object: nil)
+      }
+      DispatchQueue.main.async { [weak self] in self?.update() }
+    }
+
+    @objc private func changed(_ note: Notification) {
+      guard let changed = note.object as? NSWindow else { return update() }
+      if changed === window || changed === window?.sheetParent { update() }
+    }
+
+    private func update() {
+      guard let parent = window?.sheetParent ?? NSApp?.mainWindow, parent !== window,
+        let cap = RemovalSheetLayout.heightCap(for: parent), cap != lastCap
+      else { return }
+      lastCap = cap
+      onChange?(cap)
+    }
+  }
+}
+
 #if DEBUG
-  private enum RemovalPreviewScenario: String, CaseIterable {
+  enum RemovalPreviewScenario: String, CaseIterable {
     case success = "Complete removal"
     case asahi = "Older omarchy-mac installation"
     case freeSpace = "Free space only"
