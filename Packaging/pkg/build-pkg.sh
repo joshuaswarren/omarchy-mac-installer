@@ -109,8 +109,15 @@ comp="$work/component.pkg"
   "$comp"
 
 echo "=== productbuild (signed distribution) ==="
+# Installer asks for a running installer app, under either name, to be closed
+# before it installs; otherwise the old app keeps running, postinstall has to
+# leave it in place and the new app can't take the single-instance lease.
+distribution="$work/distribution.xml"
+/usr/bin/productbuild --synthesize --package "$comp" "$distribution"
+"$PKG_DIR/add-must-close" "$distribution" "$PKG_IDENTIFIER" "$INSTALLER_APP_IDENTIFIER"
 /usr/bin/productbuild \
-  --package "$comp" \
+  --distribution "$distribution" \
+  --package-path "$work" \
   --identifier "$PKG_IDENTIFIER" \
   --version "$VERSION" \
   --sign "$INSTALLER_ID" \
