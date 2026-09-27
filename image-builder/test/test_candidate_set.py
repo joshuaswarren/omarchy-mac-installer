@@ -208,6 +208,48 @@ class CandidateSetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pins another omarchy"):
             self.verify(directory, receipt)
 
+    def apple_layout(self, directory, lists):
+        contents = fixtures.default_contents()
+        install = "usr/share/omarchy/install/"
+        del contents["omarchy"][install + "omarchy-apple-silicon.packages"]
+        contents["omarchy"].update({install + name: data for name, data in lists.items()})
+        output = self.work / "output"
+        if output.exists():
+            output.chmod(0o700)
+            shutil.rmtree(output)
+        return fixtures.make_set(self.work / directory, self.signer, contents=contents)
+
+    def test_apple_package_list_by_either_name(self):
+        apple = b"# Apple\nomarchy-mac\nomarchy-mac-boot\n"
+        layouts = {
+            "upstream": {"omarchy-apple-silicon.packages": apple},
+            "older": {"omarchy-apple.packages": apple},
+            "compatibility-link": {"omarchy-apple-silicon.packages": apple,
+                                   "omarchy-apple.packages": "omarchy-apple-silicon.packages"},
+            "reverse-link": {"omarchy-apple.packages": apple,
+                             "omarchy-apple-silicon.packages": "omarchy-apple.packages"},
+        }
+        for directory, lists in layouts.items():
+            with self.subTest(layout=directory):
+                receipt = self.apple_layout(directory, lists)
+                self.verify(self.work / directory, receipt)
+
+    def test_apple_package_list_prefers_upstreams_name(self):
+        receipt = self.apple_layout("both", {"omarchy-apple-silicon.packages": b"omarchy-mac\nomarchy-mac-boot\n",
+                                             "omarchy-apple.packages": b"omarchy-mac\n"})
+        self.verify(self.work / "both", receipt)
+        receipt = self.apple_layout("both-stale", {"omarchy-apple-silicon.packages": b"omarchy-mac\n",
+                                                   "omarchy-apple.packages": b"omarchy-mac\nomarchy-mac-boot\n"})
+        with self.assertRaisesRegex(ValueError, "lacks the add-on or boot package"):
+            self.verify(self.work / "both-stale", receipt)
+
+    def test_apple_package_list_missing(self):
+        for directory, lists in (("none", {}), ("link-only", {"omarchy-apple.packages": "omarchy-apple-silicon.packages"})):
+            with self.subTest(layout=directory):
+                receipt = self.apple_layout(directory, lists)
+                with self.assertRaisesRegex(ValueError, "the runtime ships no Apple package list"):
+                    self.verify(self.work / directory, receipt)
+
     def test_describe_prints_what_an_inputs_record_pins(self):
         summary = c.describe(self.input, self.signer.trust)
         self.assertEqual(summary["receipt_sha256"], self.receipt)

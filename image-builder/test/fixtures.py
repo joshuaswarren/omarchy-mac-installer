@@ -61,7 +61,7 @@ def default_contents() -> dict[str, dict[str, bytes]]:
     contents = {
         "omarchy": {
             "usr/share/doc/omarchy/source-revision": (SOURCE + "\n").encode(),
-            "usr/share/omarchy/install/omarchy-apple.packages": b"# Apple\nomarchy-mac\nomarchy-mac-boot\n",
+            "usr/share/omarchy/install/omarchy-apple-silicon.packages": b"# Apple\nomarchy-mac\nomarchy-mac-boot\n",
             "usr/share/omarchy/install/omarchy-base.packages": b"hyprland\n",
         },
         "omarchy-settings": {

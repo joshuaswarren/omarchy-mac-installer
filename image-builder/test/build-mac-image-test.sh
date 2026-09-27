@@ -81,7 +81,7 @@ pass "a plain uboot-asahi request cannot resolve to asahi-alarm: set packages ar
 # What omarchy-pkg-defaults composes before the Apple list: base, then aarch64 when the runtime ships it.
 mkdir -p "$scratch/runtime/usr/share/omarchy/install"
 printf '# Base\nhyprland\nzram-generator\n' >"$scratch/runtime/usr/share/omarchy/install/omarchy-base.packages"
-printf 'omarchy-mac\n' >"$scratch/runtime/usr/share/omarchy/install/omarchy-apple.packages"
+printf 'omarchy-mac\n' >"$scratch/runtime/usr/share/omarchy/install/omarchy-apple-silicon.packages"
 (cd "$scratch/runtime" && bsdtar -cJf "$candidates/omarchy-4.0.0-1-aarch64.pkg.tar.xz" usr)
 [[ $(runtime_lists | paste -sd' ' -) == "hyprland zram-generator" ]] ||
   fail "a runtime without an aarch64 list composes the base list alone"
@@ -89,15 +89,63 @@ printf '# aarch64\nzram-generator\n' >"$scratch/runtime/usr/share/omarchy/instal
 (cd "$scratch/runtime" && bsdtar -cJf "$candidates/omarchy-4.0.0-1-aarch64.pkg.tar.xz" usr)
 [[ $(runtime_lists | paste -sd' ' -) == "hyprland zram-generator zram-generator" ]] ||
   fail "the aarch64 additions follow the base list"
-rm -f "$candidates/omarchy-4.0.0-1-aarch64.pkg.tar.xz"
 pass "the runtime's base list, then its aarch64 additions, as omarchy-pkg-defaults composes them"
+
+# The Apple list by upstream's name, else an older runtime's; never a link, which bsdtar reads as empty.
+install_dir=$scratch/runtime/usr/share/omarchy/install
+apple_layout() {
+  rm -f "$install_dir"/omarchy-apple*.packages
+  while (($#)); do
+    if [[ $2 == @* ]]; then
+      ln -s "${2#@}" "$install_dir/$1"
+    else
+      { echo "# Apple"; tr ' ' '\n' <<<"$2"; } >"$install_dir/$1"
+    fi
+    shift 2
+  done
+  (cd "$scratch/runtime" && bsdtar -cJf "$candidates/omarchy-4.0.0-1-aarch64.pkg.tar.xz" usr)
+}
+chosen_apple() {
+  (fail() { builder_fail "$@"; }; read_apple_list && echo "${apple_names[*]}")
+}
+apple_layout omarchy-apple-silicon.packages 'omarchy-mac wf-recorder'
+[[ $(chosen_apple) == "omarchy-mac wf-recorder" ]] || fail "an upstream runtime's omarchy-apple-silicon.packages is the Apple list"
+apple_layout omarchy-apple.packages omarchy-mac
+[[ $(chosen_apple) == omarchy-mac ]] || fail "an older runtime's omarchy-apple.packages is the Apple list"
+apple_layout omarchy-apple-silicon.packages 'omarchy-mac wf-recorder' omarchy-apple.packages omarchy-mac
+[[ $(chosen_apple) == "omarchy-mac wf-recorder" ]] || fail "upstream's name wins when a runtime ships both"
+apple_layout omarchy-apple-silicon.packages 'omarchy-mac wf-recorder' omarchy-apple.packages @omarchy-apple-silicon.packages
+[[ $(chosen_apple) == "omarchy-mac wf-recorder" ]] || fail "a compatibility link beside the list changes nothing"
+apple_layout omarchy-apple.packages omarchy-mac omarchy-apple-silicon.packages @omarchy-apple.packages
+[[ $(chosen_apple) == omarchy-mac ]] || fail "a link by upstream's name is passed over for the list it names"
+pass "the Apple list is omarchy-apple-silicon.packages, else an older runtime's omarchy-apple.packages, never a link"
+refused_apple() {
+  local output
+  if output=$(chosen_apple 2>&1); then
+    fail "$2 is refused"
+  fi
+  [[ $output == "build-mac-image: $1" ]] || fail "$2 is refused with: $1 (got: $output)"
+}
+apple_layout
+refused_apple "the runtime ships no Apple package list (omarchy-apple-silicon.packages or omarchy-apple.packages)" \
+  "a runtime with no Apple list"
+apple_layout omarchy-apple.packages @omarchy-apple-silicon.packages
+refused_apple "the runtime ships no Apple package list (omarchy-apple-silicon.packages or omarchy-apple.packages)" \
+  "a runtime whose only Apple list is a link"
+apple_layout omarchy-apple-silicon.packages ''
+refused_apple "the runtime's omarchy-apple-silicon.packages names no package" "a runtime whose Apple list names nothing"
+rm -f "$candidates/omarchy-4.0.0-1-aarch64.pkg.tar.xz"
+pass "a runtime with no Apple list, only a link to one, or an empty one stops the build before anything installs"
+grep -A3 '^  prepare_repositories$' "$here/bin/build-mac-image" | grep -Fxq '  read_apple_list' ||
+  fail "the build reads the Apple list before it creates the images"
+pass "the build reads the Apple list once, before it creates the images"
 
 runtime_list() {
   case $1 in
     base) printf 'hyprland\nobs-studio\n' ;;
-    apple) printf 'omarchy-mac\nomarchy-mac-boot\n' ;;
   esac
 }
+apple_names=(omarchy-mac omarchy-mac-boot)
 resolution=good
 target_pacman() {
   local name
@@ -137,7 +185,6 @@ pass "the pre-check passes a set that resolves from itself and records base name
 runtime_list() {
   case $1 in
     base) printf 'hyprland\nbroken\n' ;;
-    apple) printf 'omarchy-mac\nomarchy-mac-boot\n' ;;
   esac
 }
 if (fail() { builder_fail "$@"; }; precheck_transaction) >/dev/null 2>&1; then
@@ -146,7 +193,6 @@ fi
 runtime_list() {
   case $1 in
     base) printf 'hyprland\nobs-studio\n' ;;
-    apple) printf 'omarchy-mac\nomarchy-mac-boot\n' ;;
   esac
 }
 for resolution in stolen refused; do

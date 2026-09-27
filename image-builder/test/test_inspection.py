@@ -15,7 +15,8 @@ import fixtures  # noqa: E402
 
 inspection = fixtures.load("inspection", "builder/inspection.py")
 inspection.OWNER_UID = os.geteuid()
-CHECKS = ("candidate-versions", "minimum-versions", "refused-packages", "installed-boot-payloads", "candidate-files",
+CHECKS = ("candidate-versions", "minimum-versions", "refused-packages", "apple-packages", "installed-boot-payloads",
+          "candidate-files",
           "m1n1-stage2", "aurora-device-trees", "limine-uki", "embedded-initramfs", "boot-splash", "boot-maintenance",
           "image-target", "first-boot", "snapshots", "pacman-config", "installed-system", "factory")
 # Fixture roots live on whatever filesystem the tests run on: these paths stand in for btrfs subvolumes.
@@ -288,6 +289,40 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(report["checks"]["installed-system"]["result"], "passed", report["checks"]["installed-system"])
         self.assertIn("deferred install/hardware/bluetooth.sh",
                       report["installed_system"]["unit-enabled-bluetooth"]["detail"])
+
+    def test_apple_package_list_by_either_name(self):
+        install = self.root / "usr/share/omarchy/install"
+        report = self.inspect()
+        self.assertEqual(report["checks"]["apple-packages"]["result"], "passed", report["checks"]["apple-packages"])
+        self.assertEqual(report["apple_package_list"], "omarchy-apple-silicon.packages")
+        # omarchy-mac's compatibility link beside upstream's name.
+        (install / "omarchy-apple.packages").symlink_to("omarchy-apple-silicon.packages")
+        self.assertEqual(self.inspect()["apple_package_list"], "omarchy-apple-silicon.packages")
+        # An older runtime's name alone.
+        (install / "omarchy-apple.packages").unlink()
+        (install / "omarchy-apple-silicon.packages").rename(install / "omarchy-apple.packages")
+        report = self.inspect()
+        self.assertEqual(report["checks"]["apple-packages"]["result"], "passed", report["checks"]["apple-packages"])
+        self.assertEqual(report["apple_package_list"], "omarchy-apple.packages")
+        self.assertIn("omarchy-apple.packages", report["checks"]["apple-packages"]["detail"])
+
+    def test_apple_package_list_prefers_upstreams_name(self):
+        install = self.root / "usr/share/omarchy/install"
+        (install / "omarchy-apple.packages").write_text("omarchy-mac\nnot-installed\n")
+        report = self.inspect()
+        self.assertEqual(report["checks"]["apple-packages"]["result"], "passed", report["checks"]["apple-packages"])
+        (install / "omarchy-apple-silicon.packages").write_text("# Apple\nomarchy-mac\n  # indented\nwf-recorder\n")
+        self.assertFails("apple-packages", "omarchy-apple-silicon.packages names packages that are not installed: wf-recorder$")
+
+    def test_apple_package_list_missing(self):
+        install = self.root / "usr/share/omarchy/install"
+        (install / "omarchy-apple-silicon.packages").unlink()
+        self.assertFails("apple-packages", "the image ships no Apple package list")
+        (install / "omarchy-apple.packages").symlink_to("omarchy-apple-silicon.packages")
+        self.assertFails("apple-packages", "the image ships no Apple package list")
+        (install / "omarchy-apple.packages").unlink()
+        (install / "omarchy-apple-silicon.packages").write_text("# Apple\n\n")
+        self.assertFails("apple-packages", "omarchy-apple-silicon.packages names no package")
 
     def test_installed_version_below_the_minimum(self):
         local = self.root / "var/lib/pacman/local"

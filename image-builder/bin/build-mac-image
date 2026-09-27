@@ -279,6 +279,7 @@ repos=$work/repos
 candidates=/candidates
 body=""
 api_mounts=()
+apple_names=()
 lane=""
 test_image_pin=""
 profile=release
@@ -632,11 +633,30 @@ candidate_archive() {
   jq -r --arg name "$1" '.packages[] | select(.name == $name) | .filename' "$candidates/import.json"
 }
 
-# The runtime's package list for LABEL (base, aarch64 or apple), read from the
+# The runtime's package list for LABEL (base or aarch64), read from the
 # candidate omarchy archive itself.
 runtime_list() {
   bsdtar -xOf "$candidates/$(candidate_archive omarchy)" "usr/share/omarchy/install/omarchy-$1.packages" |
     awk 'NF && $1 !~ /^#/ { print $1 }'
+}
+
+# The runtime's Apple list, read once before anything installs:
+# omarchy-apple-silicon.packages, else an older runtime's
+# omarchy-apple.packages. A link is passed over: bsdtar reads it as empty, and
+# the list it names is a member of its own.
+read_apple_list() {
+  local archive name list="" text
+  archive=$candidates/$(candidate_archive omarchy)
+  for name in omarchy-apple-silicon omarchy-apple; do
+    if [[ $(bsdtar -tvf "$archive" "usr/share/omarchy/install/$name.packages" 2>/dev/null) == -* ]]; then
+      list=usr/share/omarchy/install/$name.packages
+      break
+    fi
+  done
+  [[ -n $list ]] || fail "the runtime ships no Apple package list (omarchy-apple-silicon.packages or omarchy-apple.packages)"
+  text=$(bsdtar -xOf "$archive" "$list") || fail "could not read the runtime's ${list##*/}"
+  mapfile -t apple_names < <(awk 'NF && $1 !~ /^#/ { print $1 }' <<<"$text")
+  ((${#apple_names[@]})) || fail "the runtime's ${list##*/} names no package"
 }
 
 # What omarchy-pkg-defaults composes before the Apple list: the base list, then
@@ -688,7 +708,7 @@ precheck_transaction() {
   available_base
   resolved=$(target_pacman -Sp --print-format '%r %n %v' "${BOOTSTRAP[@]}" "${PLATFORM_PACKAGES[@]}" \
     "$(qualified omarchy)" "$(qualified omarchy-settings)" "${base_names[@]}" "${APPLE_AUDIO[@]}" \
-    $(qualified $(runtime_list apple) $(candidate_names boot)) 2>>"$logs/precheck.log") ||
+    $(qualified "${apple_names[@]}" $(candidate_names boot)) 2>>"$logs/precheck.log") ||
     fail "the package set does not resolve against the pinned databases (logs/precheck.log)"
   printf '%s\n' "$resolved" >"$logs/precheck.log"
   while read -r name; do
@@ -754,7 +774,7 @@ install_runtime() {
 install_apple_set() {
   local installed name version
   mount_api
-  target_pacman -S $(qualified $(runtime_list apple) $(candidate_names boot)) "${PLATFORM_PACKAGES[@]}" \
+  target_pacman -S $(qualified "${apple_names[@]}" $(candidate_names boot)) "${PLATFORM_PACKAGES[@]}" \
     "${APPLE_AUDIO[@]}" >>"$logs/install.log" 2>&1 || fail "could not install the Apple set (logs/install.log)"
   unmount_api
   installed=$(pacman --dbpath "$target/var/lib/pacman" -Q)
@@ -1323,6 +1343,7 @@ build_payload() {
   prepare_toolchain
   step "publishing $(field candidate_set) as [omarchy-candidates]"
   prepare_repositories
+  read_apple_list
   render_config "$repos" /cache >"$work/build.conf"
   step "creating the images"
   create_images
