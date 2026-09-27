@@ -45,6 +45,7 @@ public struct InstallerAllocationRecommendation:
         unit: unit
       )
       let maximum: UInt64
+      var preferredCeiling: UInt64?
       if candidate.kind == "free" {
         // A free extent is fixed on the partition map: nothing recomputes it
         // between planning and execution, so it needs no reserve or margin.
@@ -56,22 +57,23 @@ public struct InstallerAllocationRecommendation:
         guard available > reservedBytes else {
           return nil
         }
-        var usable = available - reservedBytes
-        // Keep Asahi's extra macOS reserve when the partition floor still
-        // fits after staging. Prefer the larger Linux minimum only when it
-        // also fits. Older engines supply only the mandatory minimums.
+        let usable = available - reservedBytes
+        // The engine's hard reserve bounds what the owner may choose, so the
+        // ceiling only grows as macOS frees space. Asahi's larger macOS
+        // reserve caps the default size instead; dragging past it shows the
+        // caution. Older engines supply only the mandatory minimums.
         if let preferredContainer = candidate.recommendedContainerBytes {
           let preferredAvailable =
             candidate.lengthBytes - min(candidate.lengthBytes, preferredContainer)
-          if preferredAvailable >= reservedBytes,
-            preferredAvailable - reservedBytes >= minimum
-          {
-            usable = preferredAvailable - reservedBytes
-          }
+          preferredCeiling = preferredAvailable - min(preferredAvailable, reservedBytes)
         }
+        // The doubled size becomes the minimum only when it also fits under
+        // Asahi's macOS reserve; otherwise the default would cross that line.
         if let recommended = candidate.recommendedInstallBytes {
           let alignedRecommended = Self.alignUp(recommended, unit: unit)
-          if alignedRecommended <= usable - (usable % unit) {
+          if alignedRecommended <= usable - (usable % unit),
+            alignedRecommended <= (preferredCeiling ?? UInt64.max)
+          {
             minimum = alignedRecommended
           }
         }
@@ -93,7 +95,8 @@ public struct InstallerAllocationRecommendation:
       return Ranked(
         candidate: candidate,
         minimum: minimum,
-        maximum: alignedMaximum
+        maximum: alignedMaximum,
+        preferredCeiling: preferredCeiling.map { $0 - ($0 % unit) }
       )
     }.sorted { left, right in
       if left.candidate.kind != right.candidate.kind {
@@ -130,9 +133,10 @@ public struct InstallerAllocationRecommendation:
     candidate = selected.candidate
     minimumBytes = selected.minimum
     maximumBytes = selected.maximum
+    let defaultTarget = min(alignedTarget, selected.preferredCeiling ?? alignedTarget)
     requestedLengthBytes = min(
       selected.maximum,
-      max(selected.minimum, alignedTarget)
+      max(selected.minimum, defaultTarget)
     )
   }
 
@@ -190,5 +194,6 @@ public struct InstallerAllocationRecommendation:
     let candidate: ValidatedEngineCandidate
     let minimum: UInt64
     let maximum: UInt64
+    var preferredCeiling: UInt64? = nil
   }
 }

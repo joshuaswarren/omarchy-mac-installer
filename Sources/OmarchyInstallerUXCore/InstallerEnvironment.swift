@@ -152,14 +152,14 @@
         let remaining = free - min(free, allocation)
         if remaining < Self.recommendedMacOSFreeBytes {
           cautions.append(
-            "macOS will keep less free space than recommended: about \(remaining / 1_000_000_000) GB instead of 38 GB. A macOS update may not install until you free up space in macOS. This estimate includes installation staging space."
+            "macOS will keep less free space than recommended: about \(remaining / 1_000_000_000) GB instead of 38 GB. A macOS update may not install until you free up space in macOS. This estimate includes the space the installer's download uses."
           )
         }
       }
       if let recommended = recommendedOmarchyBytes, allocation < recommended {
         if allocation <= minimumBytes {
           cautions.append(
-            "Omarchy will use its minimum size, \(PlainLanguage.bytes(allocation)), with little room for updates and snapshots. Choose a larger size if you can."
+            "Omarchy will use its minimum size, \(PlainLanguage.bytes(allocation)), with little room for updates and snapshots. \(isResizable ? "Choose a larger size if you can." : "Free up space in macOS to allow a larger size.")"
           )
         } else {
           cautions.append(

@@ -74,7 +74,12 @@ MACOS_RECOMMENDED_FREE_BYTES = 38_000_000_000
 
 
 def _resize_offer(installer, part, bounds, floor, part_align):
-    """Keep an explicit macOS reserve as well as diskutil's APFS limit."""
+    """Keep 38GB free for macOS as well as diskutil's APFS limit.
+
+    The reserve is a hard floor on every disk size: macOS updates and swap
+    need that room, and a Mac whose macOS cannot update has no local way
+    back. Omarchy gives up its doubled size before macOS gives up this.
+    """
     disk = installer.dutil.get_disk_size(installer.sys_disk)
     total = bounds.get("total_bytes")
     free = bounds.get("free_bytes")
@@ -90,18 +95,14 @@ def _resize_offer(installer, part, bounds, floor, part_align):
     ):
         raise PlanningError("inconsistent macOS resize metrics")
     used = total - free
-    reserve = min((disk + 19) // 20, MACOS_RECOMMENDED_FREE_BYTES)
-
-    def container_for(headroom):
-        value = used + headroom
-        aligned = (value + part_align - 1) // part_align * part_align
-        if aligned >= 2**64:
-            raise PlanningError("macOS resize floor overflow")
-        return max(preferred, aligned)
-
+    value = used + MACOS_RECOMMENDED_FREE_BYTES
+    aligned = (value + part_align - 1) // part_align * part_align
+    if aligned >= 2**64:
+        raise PlanningError("macOS resize floor overflow")
+    container = max(preferred, aligned)
     # Report even an exhausted container: planning/admission will refuse it,
     # while Swift can account for the full reserve deficit in its shortfall.
-    return floor, container_for(reserve), container_for(MACOS_RECOMMENDED_FREE_BYTES)
+    return floor, container, container
 
 
 def collect_inventory(

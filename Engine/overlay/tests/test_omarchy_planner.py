@@ -57,7 +57,7 @@ class PlannerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def test_macOS_free_floor_uses_physical_disk_and_caps_at_38GB(self):
+    def test_macOS_keeps_38GB_free_on_every_disk_size(self):
         gb = 1_000_000_000
         unit = 1024**2
         for disk_gb in (128, 256, 512, 760, 1000):
@@ -74,9 +74,9 @@ class PlannerTests(unittest.TestCase):
                 (candidate,) = collect_inventory(
                     self.installer, [], self.resize, 2 * gb, unit
                 )["candidates"]
-                expected = used + min(disk_gb * gb // 20, 38 * gb)
-                expected = (expected + unit - 1) // unit * unit
+                expected = (used + 38 * gb + unit - 1) // unit * unit
                 self.assertEqual(candidate["minimum_container_bytes"], expected)
+                self.assertEqual(candidate["recommended_container_bytes"], expected)
 
     def test_exhausted_reserve_is_reported_and_cannot_be_planned(self):
         self.resize[0].size = 200_000_000_000
@@ -191,9 +191,10 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
         self.assertEqual(resize["minimum_container_bytes"], 460 * 1024**3)
 
-    def test_macOS_reserve_limits_diskutil_relaxation(self):
-        # Asahi's 38GB reserve leaves less than the partition floor, but
-        # diskutil's own recommended minimum still releases enough.
+    def test_macOS_reserve_is_not_relaxed_to_diskutil_minimum(self):
+        # diskutil alone would release enough for the partition floor, but
+        # the 38GB reserve still holds; the container is reported so the
+        # shortfall can be quantified, and planning refuses it.
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
         self.resize[0].size = 200 * 1024**3
         self.installer.resize_bounds = {
@@ -213,7 +214,11 @@ class PlannerTests(unittest.TestCase):
 
         (resize,) = inventory["candidates"]
         self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
-        self.assertEqual(resize["minimum_container_bytes"], 182_761_553_920)
+        self.assertEqual(resize["minimum_container_bytes"], 180 * 1024**3)
+        self.assertLess(
+            resize["length_bytes"] - resize["minimum_container_bytes"],
+            resize["minimum_install_bytes"],
+        )
 
     def test_stricter_diskutil_limit_is_never_relaxed(self):
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
@@ -264,10 +269,28 @@ class PlannerTests(unittest.TestCase):
                 previous_container = resize["minimum_container_bytes"]
 
                 # The same plan remains admissible as Asahi crosses the
-                # old fallback thresholds between inspect and plan.
+                # old fallback thresholds between inspect and plan; below
+                # the floor the 38GB reserve refuses it.
                 journal = Journal(str(self.root / f"space-{available}.jsonl"))
                 journal.inspection("apple,j314s", "supported")
                 layout = journal.inventory("disk0", [resize])
+                if available < 32:
+                    with self.assertRaises(ValueError):
+                        journal.plan(
+                            device_identifier="apple,j314s",
+                            layout_digest=layout,
+                            candidate_kind="resize",
+                            source_identifier=resize["source_identifier"],
+                            requested_length_bytes=32 * gib,
+                            engine_version="test",
+                            engine_digest="sha256:" + "d" * 64,
+                            metadata_digest="sha256:" + "e" * 64,
+                            payload_digest="sha256:" + "f" * 64,
+                            required_human_steps=[
+                                "enterOneTrueRecovery", "authenticateMachineOwner"
+                            ],
+                        )
+                    continue
                 journal.plan(
                     device_identifier="apple,j314s",
                     layout_digest=layout,

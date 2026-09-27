@@ -153,10 +153,19 @@ class EngineRuntime:
                 installer,
                 free_parts,
                 # Upstream filters out containers below its 38GB reserve.
-                # Keep them here so the engine can report an exact shortfall.
+                # Keep a container that holds a macOS (upstream's own test in
+                # get_min_free_space) so the engine can report an exact
+                # shortfall; stubs and data-only containers stay filtered.
                 [
                     part for part in installer.parts
                     if part.type == "Apple_APFS" and part.container is not None
+                    and (
+                        part in resizable_parts
+                        or any(
+                            entry.version
+                            for entry in (getattr(part, "os", None) or [])
+                        )
+                    )
                 ] if is_gpt else [],
                 stub_size,
                 part_align,

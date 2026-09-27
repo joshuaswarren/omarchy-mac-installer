@@ -759,7 +759,7 @@ private struct DiskSplitPanel: View {
           )
           .transaction { $0.animation = nil }
           if plan.recommendedMacOSContainerBytes != nil {
-            Text("Reserve line: 38 GB free for macOS")
+            Text("The line marks where macOS keeps 38 GB free, our recommended minimum.")
               .font(OmarchyTheme.detail).foregroundStyle(OmarchyTheme.caution)
           }
           if editable {

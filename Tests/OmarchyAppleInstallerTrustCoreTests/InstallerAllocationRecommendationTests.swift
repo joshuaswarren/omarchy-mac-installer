@@ -33,9 +33,9 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       XCTAssertEqual(recommendation.minimumBytes, (available >= 72 ? 62 : 32) * gib)
       XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, recommendation.minimumBytes)
       if available >= 42 {
-        // Preserve Asahi's extra reserve whenever it still holds the floor
-        // after staging, including on roomy disks.
-        XCTAssertLessThanOrEqual(recommendation.maximumBytes, (available - 10) * gib)
+        // The default keeps Asahi's extra macOS reserve whenever it still
+        // holds the floor after staging; the ceiling stays the engine's.
+        XCTAssertLessThanOrEqual(recommendation.requestedLengthBytes, (available - 10) * gib)
       }
       XCTAssertNoThrow(
         try PinnedAsahiPlanRequest(
@@ -45,6 +45,53 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
         )
       )
     }
+  }
+
+  func testResizeCeilingKeeps38GBForMacOSAndNeverShrinksAsSpaceIsFreed() throws {
+    // 245 GB container, 10 GB staging, 39.6 GB floor, hard 38 GB reserve.
+    // 85 GB free cannot hold the floor (85 - 38 - 10 < 39.6); 88 GB can.
+    // From there the ceiling only grows, and never crosses the reserve.
+    let gb: UInt64 = 1_000_000_000
+    var previousMaximum: UInt64 = 0
+    for free: UInt64 in [85, 88, 95, 120] {
+      let used = 245 * gb - free * gb
+      let resize = candidate(
+        kind: "resize", source: "disk0s2", length: 245 * gb,
+        minimumInstall: 39_600_000_000, minimumContainer: used + 38 * gb,
+        recommendedInstall: 76_600_000_000, recommendedContainer: used + 38 * gb)
+      if free == 85 {
+        XCTAssertThrowsError(
+          try InstallerAllocationRecommendation(
+            inventory: inventory([resize]), reservedBytes: 10 * gb)
+        ) {
+          XCTAssertEqual(
+            $0 as? InstallerAllocationRecommendationError,
+            .insufficientSpace(requiredBytes: 39_600_521_216, availableBytes: 36_999_004_160))
+        }
+        continue
+      }
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory([resize]), reservedBytes: 10 * gb)
+      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum, "free \(free) GB")
+      XCTAssertLessThanOrEqual(recommendation.maximumBytes, (free - 48) * gb, "free \(free) GB")
+      XCTAssertLessThanOrEqual(recommendation.requestedLengthBytes, recommendation.maximumBytes)
+      previousMaximum = recommendation.maximumBytes
+    }
+  }
+
+  func testResizeCeilingIgnoresALooserRecommendationThanTheHardReserve() throws {
+    // A transcript whose recommended container is stricter than its minimum
+    // must not move the ceiling: only the engine's hard reserve bounds it.
+    let gb: UInt64 = 1_000_000_000
+    let used = 157 * gb
+    let resize = candidate(
+      kind: "resize", source: "disk0s2", length: 245 * gb,
+      minimumInstall: 39_600_000_000, minimumContainer: used + 12_800_000_000,
+      recommendedInstall: 76_600_000_000, recommendedContainer: used + 38 * gb)
+    let recommendation = try InstallerAllocationRecommendation(
+      inventory: inventory([resize]), reservedBytes: 10 * gb)
+    XCTAssertGreaterThan(recommendation.maximumBytes, recommendation.minimumBytes)
+    XCTAssertLessThanOrEqual(recommendation.requestedLengthBytes, 40 * gb)
   }
 
   func testResizeFallbackStillRejectsBelowThePartitionFloor() throws {
@@ -674,7 +721,9 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
     length: UInt64,
     minimumInstall: UInt64,
     minimumContainer: UInt64 = 0,
-    identityDigest: String? = nil
+    identityDigest: String? = nil,
+    recommendedInstall: UInt64? = nil,
+    recommendedContainer: UInt64? = nil
   ) -> ValidatedEngineCandidate {
     ValidatedEngineCandidate(
       kind: kind,
@@ -683,7 +732,9 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       lengthBytes: length,
       minimumInstallBytes: minimumInstall,
       minimumContainerBytes: minimumContainer,
-      identityDigest: identityDigest
+      identityDigest: identityDigest,
+      recommendedInstallBytes: recommendedInstall,
+      recommendedContainerBytes: recommendedContainer
     )
   }
 }
