@@ -205,7 +205,7 @@ struct EngineTranscriptDecoder: Sendable {
               "kind", "source_identifier", "offset_bytes", "length_bytes",
               "minimum_install_bytes", "minimum_container_bytes",
             ]
-          if candidate["kind"] as? String == "resize",
+          if ["resize", "free", "replace"].contains(candidate["kind"] as? String ?? ""),
             candidate["recommended_install_bytes"] != nil
               || candidate["recommended_container_bytes"] != nil
           {
@@ -314,7 +314,7 @@ struct EngineTranscriptDecoder: Sendable {
             candidate.minimumInstallBytes > 0,
             (candidate.recommendedInstallBytes == nil
               && candidate.recommendedContainerBytes == nil)
-              || (candidate.kind == "resize"
+              || (["resize", "free", "replace"].contains(candidate.kind)
                 && candidate.recommendedInstallBytes.map { $0 >= candidate.minimumInstallBytes }
                   == true
                 && candidate.recommendedContainerBytes.map { $0 >= candidate.minimumContainerBytes }

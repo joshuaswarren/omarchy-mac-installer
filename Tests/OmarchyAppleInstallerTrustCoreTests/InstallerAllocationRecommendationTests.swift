@@ -5,6 +5,24 @@ import XCTest
 final class InstallerAllocationRecommendationTests: XCTestCase {
   private let gib: UInt64 = 1_073_741_824
 
+  func testShortfallIncludesReserveAndStagingDeficits() {
+    for (container, reserve, expected): (UInt64, UInt64, UInt64) in [
+      (208, 10, 50), (198, 10, 40), (200, 10, 42),
+    ] {
+      let resize = candidate(
+        kind: "resize", source: "disk0s2", length: 200 * gib,
+        minimumInstall: 32 * gib, minimumContainer: container * gib)
+      XCTAssertThrowsError(
+        try InstallerAllocationRecommendation(
+          inventory: inventory([resize]), reservedBytes: reserve * gib)
+      ) {
+        XCTAssertEqual(
+          $0 as? InstallerAllocationRecommendationError,
+          .insufficientSpace(requiredBytes: expected * self.gib, availableBytes: 0))
+      }
+    }
+  }
+
   func testResizeFallbackSurvivesBothThresholdsAfterStagingReserve() throws {
     for available: UInt64 in [31, 32, 41, 42, 61, 62, 71, 72] {
       let inventory = try resizeInventory(available: available)
@@ -42,6 +60,14 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
     }
   }
 
+  func testFreeAndReplaceTranscriptsRetainRecommendations() throws {
+    for kind in ["free", "replace"] {
+      let decoded = try resizeInventory(available: 31, kind: kind)
+      XCTAssertEqual(decoded.candidates[0].recommendedInstallBytes, 62 * gib)
+      XCTAssertEqual(decoded.candidates[0].recommendedContainerBytes, 0)
+    }
+  }
+
   func testResizeTranscriptRejectsInvalidRecommendations() throws {
     for fields: [String: Any] in [
       ["recommended_install_bytes": 62 * gib],
@@ -54,22 +80,27 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
   }
 
   private func resizeInventory(
-    available: UInt64, recommendations: [String: Any]? = nil
+    available: UInt64, recommendations: [String: Any]? = nil, kind: String = "resize"
   ) throws -> ValidatedEngineInventory {
     let container = (200 - available) * gib
     var candidate: [String: Any] = [
-      "kind": "resize", "source_identifier": "disk0s2", "offset_bytes": gib,
+      "kind": kind, "source_identifier": "disk0s2", "offset_bytes": gib,
       "length_bytes": 200 * gib, "minimum_install_bytes": 32 * gib,
-      "minimum_container_bytes": min(150 * gib, container),
+      "minimum_container_bytes": kind == "resize" ? min(150 * gib, container) : 0,
     ]
     candidate.merge(
       recommendations ?? [
-        "recommended_install_bytes": 62 * gib, "recommended_container_bytes": container,
+        "recommended_install_bytes": 62 * gib,
+        "recommended_container_bytes": kind == "resize" ? container : 0,
       ], uniquingKeysWith: { _, new in new }
     )
-    let digest = InstallerDigest.lengthPrefixedSHA256([
-      "disk0", "resize", "disk0s2", String(gib), String(200 * gib),
-    ]).rawValue
+    var fields = ["disk0", kind, "disk0s2", String(gib), String(200 * gib)]
+    if kind == "replace" {
+      let identity = "sha256:" + String(repeating: "9", count: 64)
+      candidate["identity_digest"] = identity
+      fields.append(identity)
+    }
+    let digest = InstallerDigest.lengthPrefixedSHA256(fields).rawValue
     let messages: [[String: Any]] = [
       [
         "schema_version": 1, "sequence": 1, "type": "inspection",
@@ -489,7 +520,9 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       ) {
         XCTAssertEqual(
           $0 as? InstallerAllocationRecommendationError,
-          .insufficientSpace(requiredBytes: 64 * gib, availableBytes: available)
+          .insufficientSpace(
+            requiredBytes: reserve == UInt64.max ? UInt64.max - 36 * gib : 64 * gib,
+            availableBytes: available)
         )
       }
     }

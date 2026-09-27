@@ -146,6 +146,7 @@ public struct InstallerAllocationRecommendation:
     let unit = PinnedAsahiPlanRequest.allocationUnitBytes
     return inventory.candidates.compactMap { candidate -> (UInt64, UInt64)? in
       let usable: UInt64
+      var deficit: UInt64 = 0
       switch candidate.kind {
       case "free":
         usable = candidate.lengthBytes
@@ -153,14 +154,23 @@ public struct InstallerAllocationRecommendation:
         let shrinkable =
           candidate.lengthBytes - min(candidate.lengthBytes, candidate.minimumContainerBytes)
         usable = shrinkable - min(shrinkable, reservedBytes)
+        deficit = Self.saturatingAdd(
+          candidate.minimumContainerBytes
+            - min(candidate.minimumContainerBytes, candidate.lengthBytes),
+          reservedBytes - min(reservedBytes, shrinkable))
       default:
         return nil
       }
       return (
-        alignUp(candidate.minimumInstallBytes, unit: unit),
+        Self.saturatingAdd(alignUp(candidate.minimumInstallBytes, unit: unit), deficit),
         usable - (usable % unit)
       )
-    }.max { $0.1 < $1.1 }
+    }.min { ($0.0 - min($0.0, $0.1)) < ($1.0 - min($1.0, $1.1)) }
+  }
+
+  private static func saturatingAdd(_ left: UInt64, _ right: UInt64) -> UInt64 {
+    let (result, overflow) = left.addingReportingOverflow(right)
+    return overflow ? UInt64.max : result
   }
 
   private static func alignUp(

@@ -575,7 +575,7 @@ def _validate_candidate(candidate):
     }
     if (
         isinstance(candidate, dict)
-        and candidate.get("kind") == "resize"
+        and candidate.get("kind") in ("resize", "free", "replace")
         and recommendation_keys & candidate.keys()
     ):
         keys.update(recommendation_keys)

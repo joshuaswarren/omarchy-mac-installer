@@ -6,6 +6,21 @@
 
   @MainActor
   final class InstallerSimulationTests: XCTestCase {
+    func testGenericAndQuantifiedPlanningFailuresRemainDistinct() async {
+      for (scenario, headline) in [
+        (InstallerSimulationScenario.planFailure, "There isn’t enough usable disk space"),
+        (.insufficientSpace, "Free up at least 6 GB to install Omarchy"),
+      ] {
+        let session = InstallerSession(
+          environment: InstallerSimulationEnvironment(scenario: scenario, delay: .zero))
+        await session.inspect()
+        await session.continueToPlan()
+        guard case .failed(let failure) = session.phase else { return XCTFail(scenario.title) }
+        XCTAssertEqual(failure.headline, headline)
+        XCTAssertFalse(session.hasExecutionStarted)
+      }
+    }
+
     func testDiskAlignmentDoesNotClaimSelected180GBIsACapacityLimit() async throws {
       let environment = InstallerSimulationEnvironment(scenario: .allocationAligned, delay: .zero)
       let session = InstallerSession(environment: environment)
@@ -91,6 +106,7 @@
         await session.continueToPlan()
         switch scenario {
         case .downloadFailure, .invalidDownload, .outdatedInstaller, .planFailure,
+          .insufficientSpace,
           .noMacRelease, .modelNotOnChannel, .channelUnreachable:
           guard case .failed = session.phase else { return XCTFail(scenario.title) }
           XCTAssertFalse(session.hasExecutionStarted)

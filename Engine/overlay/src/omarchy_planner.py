@@ -70,26 +70,38 @@ def _minimum_that_fits(length, floor, recommended):
     return floor
 
 
-def _diskutil_container_floor(part, bounds, container):
-    """Use diskutil's recommended minimum when Asahi's reserve is stricter."""
-    diskutil_min = bounds.get("diskutil_minimum_bytes")
-    if isinstance(diskutil_min, bool) or not isinstance(diskutil_min, int):
-        return None
-    if not (0 < diskutil_min < container and part.size > diskutil_min):
-        return None
-    return diskutil_min
+MACOS_RECOMMENDED_FREE_BYTES = 38_000_000_000
 
 
-def _resize_offer(part, bounds, floor):
-    available = bounds["available_bytes"]
-    container = bounds["minimum_size_bytes"]
-    relaxed = _diskutil_container_floor(part, bounds, container)
-    if available <= 0 and relaxed is None:
-        return None
-    # Keep safety limits independent of available space. Swift chooses the
-    # recommendations after subtracting staging space; live admission must
-    # not revoke that fallback just because macOS has freed more space.
-    return floor, relaxed if relaxed is not None else container
+def _resize_offer(installer, part, bounds, floor, part_align):
+    """Keep an explicit macOS reserve as well as diskutil's APFS limit."""
+    disk = installer.dutil.get_disk_size(installer.sys_disk)
+    total = bounds.get("total_bytes")
+    free = bounds.get("free_bytes")
+    preferred = bounds.get("diskutil_minimum_bytes")
+    values = (disk, total, free, preferred, part.size, part_align)
+    if any(type(value) is not int or not 0 <= value < 2**64 for value in values):
+        raise PlanningError("invalid macOS resize metrics")
+    if not (
+        0 < total == part.size <= disk
+        and free <= total
+        and 0 < preferred <= total
+        and part_align > 0
+    ):
+        raise PlanningError("inconsistent macOS resize metrics")
+    used = total - free
+    reserve = min((disk + 19) // 20, MACOS_RECOMMENDED_FREE_BYTES)
+
+    def container_for(headroom):
+        value = used + headroom
+        aligned = (value + part_align - 1) // part_align * part_align
+        if aligned >= 2**64:
+            raise PlanningError("macOS resize floor overflow")
+        return max(preferred, aligned)
+
+    # Report even an exhausted container: planning/admission will refuse it,
+    # while Swift can account for the full reserve deficit in its shortfall.
+    return floor, container_for(reserve), container_for(MACOS_RECOMMENDED_FREE_BYTES)
 
 
 def collect_inventory(
@@ -129,6 +141,8 @@ def collect_inventory(
                         length, floor, recommended
                     ),
                     "minimum_container_bytes": 0,
+                    "recommended_install_bytes": recommended,
+                    "recommended_container_bytes": 0,
                 }
             )
     for part in resizable_parts:
@@ -136,10 +150,9 @@ def collect_inventory(
         # A container that cannot give up enough space is still reported, so
         # the installer can say how much is missing before it downloads
         # anything. Planning and execution reject it by the same minimums.
-        offer = _resize_offer(part, bounds, floor)
-        if offer is None:
-            continue
-        minimum_install, minimum_container = offer
+        minimum_install, minimum_container, recommended_container = _resize_offer(
+            installer, part, bounds, floor, part_align
+        )
         candidates.append(
             {
                 "kind": "resize",
@@ -149,7 +162,7 @@ def collect_inventory(
                 "minimum_install_bytes": minimum_install,
                 "minimum_container_bytes": minimum_container,
                 "recommended_install_bytes": recommended,
-                "recommended_container_bytes": bounds["minimum_size_bytes"],
+                "recommended_container_bytes": recommended_container,
             }
         )
     candidates.extend(
@@ -240,6 +253,8 @@ def collect_existing_installs(
                 "length_bytes": length,
                 "minimum_install_bytes": replace_minimum,
                 "minimum_container_bytes": 0,
+                "recommended_install_bytes": recommended_install,
+                "recommended_container_bytes": 0,
                 "identity_digest": replace_identity_digest(
                     members,
                     os_label,

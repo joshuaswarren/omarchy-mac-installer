@@ -277,6 +277,12 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     // Sampled before the engine reads free space, so a download that moves on
     // during inspection only makes the reserve more cautious.
     let payloadBytesOnDisk = prefetch.bytesOnDisk(for: release.assets.payload)
+    let planningReserve = release.assets.planningReserveBytes(
+      payloadBytesOnDisk: payloadBytesOnDisk)
+    let freshHost = try await Task.detached(priority: .userInitiated) {
+      try AppleSiliconHostInspector().inspect()
+    }.value
+    guard freshHost.identity == host.identity else { throw InstallerAppError.hostChanged }
     let stagedEngine = release.assets.engine
     let archive = try PinnedAsahiEngineArchive(
       fileURL: stagedEngine.fileURL,
@@ -306,7 +312,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     let recommendation = try InstallerAllocationRecommendation(
       inventory: inventory,
       targetBytes: omarchyBytes ?? InstallerAllocationRecommendation.balancedTargetBytes,
-      reservedBytes: release.assets.planningReserveBytes(payloadBytesOnDisk: payloadBytesOnDisk),
+      reservedBytes: planningReserve,
       snapshotConstraint: {
         APFSSnapshotInspector().constraint(in: host.storage)
       }
@@ -337,7 +343,8 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
     return .plan(
       Self.planDisplay(
-        review: prepared.review, host: host, recommendation: recommendation,
+        review: prepared.review, host: freshHost, recommendation: recommendation,
+        reservedBytes: planningReserve,
         release:
           "\(channel.rawValue.capitalized) · \(release.assets.payload.fileURL.lastPathComponent)"
       ))
@@ -649,6 +656,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     review: InstallerPlanReview,
     host: AppleSiliconHostInspection,
     recommendation: InstallerAllocationRecommendation,
+    reservedBytes: UInt64 = 0,
     release: String
   ) -> PlanDisplay {
     let length = review.plan.lengthBytes
@@ -667,7 +675,13 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
       releaseDescription: release,
       targetDescription:
         "Internal storage · \(review.plan.candidateKind == "free" ? "Use free space" : "Resize macOS")",
-      fixedMacOSBytes: review.plan.candidateKind == "free" ? host.storage.containerSizeBytes : nil
+      fixedMacOSBytes: review.plan.candidateKind == "free" ? host.storage.containerSizeBytes : nil,
+      macOSFreeBeforeAllocationBytes:
+        review.plan.candidateKind == "resize"
+        && recommendation.candidate.sourceIdentifier == host.storage.physicalStoreIdentifier
+        ? host.storage.containerFreeBytes - min(host.storage.containerFreeBytes, reservedBytes)
+        : nil,
+      recommendedOmarchyBytes: recommendation.candidate.recommendedInstallBytes
     )
   }
 

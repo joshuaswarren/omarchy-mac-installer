@@ -145,10 +145,19 @@ class EngineRuntime:
                 ),
             )
         else:
+            is_gpt = (
+                installer.dutil.disks[installer.cur_disk]["Content"]
+                == "GUID_partition_scheme"
+            )
             collected = omarchy_planner.collect_inventory(
                 installer,
                 free_parts,
-                resizable_parts,
+                # Upstream filters out containers below its 38GB reserve.
+                # Keep them here so the engine can report an exact shortfall.
+                [
+                    part for part in installer.parts
+                    if part.type == "Apple_APFS" and part.container is not None
+                ] if is_gpt else [],
                 stub_size,
                 part_align,
             )

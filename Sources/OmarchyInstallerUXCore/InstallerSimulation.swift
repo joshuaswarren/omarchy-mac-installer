@@ -4,7 +4,8 @@
 
   public enum InstallerSimulationScenario: String, CaseIterable, Identifiable, Sendable {
     case success, freeSpace, unsupported, engineUnavailable, existingInstall, missingHelper
-    case downloadFailure, invalidDownload, outdatedInstaller, planFailure
+    case downloadFailure, invalidDownload, outdatedInstaller, planFailure, insufficientSpace,
+      tightDisk
     case noMacRelease, modelNotOnChannel, channelUnreachable
     case allocationClamped, allocationAligned, approvalChanged, credentialsRejected, connectionLost
     case emptyReply, helperFailure, degradedProgress, recoveryRetry, manualRecovery
@@ -25,7 +26,9 @@
       case .noMacRelease: "Channel has no Mac release yet"
       case .modelNotOnChannel: "Channel doesn’t include this Mac"
       case .channelUnreachable: "Channel release list missing (404)"
-      case .planFailure: "Not enough usable space"
+      case .planFailure: "No eligible disk allocation"
+      case .insufficientSpace: "Not enough space · quantified shortfall"
+      case .tightDisk: "Tight disk · live space cautions"
       case .allocationClamped: "Disk size adjusted during review"
       case .allocationAligned: "Disk alignment · whole GB unchanged"
       case .approvalChanged: "Plan changes before approval"
@@ -193,8 +196,20 @@
           expected: "simulation-expected", actual: "simulation-corrupt")
       }
       if scenario == .planFailure {
+        throw InstallerAllocationRecommendationError.noEligibleCandidate
+      }
+      if scenario == .insufficientSpace {
         throw InstallerAllocationRecommendationError.insufficientSpace(
           requiredBytes: 40_000_000_000, availableBytes: 34_500_000_000)
+      }
+      if scenario == .tightDisk {
+        let chosen = min(55_000_000_000, max(40_000_000_000, omarchyBytes ?? 40_000_000_000))
+        return .plan(
+          PlanDisplay(
+            diskTotalBytes: 245_000_000_000, omarchyBytes: chosen,
+            bindingDigest: "simulation-tight-\(chosen)", minimumBytes: 40_000_000_000,
+            maximumBytes: 55_000_000_000, macOSFreeBeforeAllocationBytes: 80_000_000_000,
+            recommendedOmarchyBytes: 77_000_000_000))
       }
       progress(AssetProgressUpdate(stage: .planning))
       try await tick()

@@ -191,7 +191,7 @@
         failure.headline, "Free up at least 4 GB to install Omarchy")
       XCTAssertEqual(
         failure.remedy,
-        "Free up at least 4 GB in macOS and empty the Trash, then choose Check again. The installer will check the available space again before allowing installation."
+        "Remove files you no longer need in macOS and empty the Trash, then choose Check again. The installer will check the available space again before allowing installation."
       )
 
       await session.continueToPlan()

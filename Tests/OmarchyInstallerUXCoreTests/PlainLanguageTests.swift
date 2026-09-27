@@ -6,6 +6,30 @@
   @testable import OmarchyInstallerUXCore
 
   final class PlainLanguageTests: XCTestCase {
+    func testSpaceCautionsFollowAllocationAndReserveBoundary() {
+      let plan = PlanDisplay(
+        diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
+        bindingDigest: "test", macOSFreeBeforeAllocationBytes: 80_000_000_000,
+        recommendedOmarchyBytes: 77_000_000_000)
+      XCTAssertEqual(plan.recommendedMacOSContainerBytes, 203_000_000_000)
+      XCTAssertTrue(plan.spaceCautions(for: 40_000_000_000)[0].contains("minimum size, 40 GB"))
+      XCTAssertEqual(plan.spaceCautions(for: 42_000_000_000).count, 1)
+      XCTAssertTrue(
+        plan.spaceCautions(for: 42_000_000_001)[0].contains("about 37 GB instead of 38 GB"))
+      let warnings = plan.spaceCautions(for: 43_000_000_000)
+      XCTAssertEqual(warnings.count, 2)
+      XCTAssertTrue(warnings[0].contains("about 37 GB instead of 38 GB"))
+      XCTAssertTrue(warnings[1].contains("recommended 77 GB"))
+      XCTAssertEqual(plan.spaceCautions(for: 77_000_000_000).count, 1)
+      let free = PlanDisplay(
+        diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
+        bindingDigest: "free", fixedMacOSBytes: 180_000_000_000,
+        recommendedOmarchyBytes: 77_000_000_000)
+      XCTAssertNil(free.recommendedMacOSContainerBytes)
+      XCTAssertEqual(free.spaceCautions(for: 40_000_000_000).count, 1)
+      XCTAssertTrue(free.spaceCautions(for: 77_000_000_000).isEmpty)
+    }
+
     func testChannelBadgesNameEveryChannel() {
       XCTAssertEqual(PlainLanguage.badge(for: .stable), "Stable")
       XCTAssertEqual(PlainLanguage.badge(for: .rc), "Release candidate")

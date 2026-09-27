@@ -76,6 +76,7 @@ struct DiskBar: View {
   let macOSBytes: UInt64
   let omarchyBytes: UInt64
   var unallocatedBytes: UInt64 = 0
+  var recommendedMacOSContainerBytes: UInt64?
   /// When set, the divider between the segments is draggable and reports the
   /// Omarchy share of the disk (0...1) as it moves.
   var onAdjustOmarchyFraction: ((Double) -> Void)?
@@ -106,6 +107,14 @@ struct DiskBar: View {
             background: OmarchyTheme.accent,
             foreground: OmarchyTheme.accentText
           )
+        }
+        if let reserveLine = recommendedMacOSContainerBytes, Double(reserveLine) <= total {
+          Rectangle()
+            .fill(OmarchyTheme.caution)
+            .frame(width: 2)
+            .offset(x: min(width - 2, width * Double(reserveLine) / total))
+            .help("Recommended macOS free space: 38 GB")
+            .allowsHitTesting(false)
         }
         if onAdjustOmarchyFraction != nil {
           RoundedRectangle(cornerRadius: 3)
