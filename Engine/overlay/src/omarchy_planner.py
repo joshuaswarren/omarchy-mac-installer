@@ -43,6 +43,65 @@ class PlanningError(ValueError):
     pass
 
 
+def _install_bounds(stub_size, os_installer):
+    """Partition floor, then the larger size Asahi recommends for upgrades.
+
+    An expandable root reports min_recommended_size as twice min_size. The
+    floor is what the images actually fit in. Disks that cannot give up the
+    doubled size can still install at the floor.
+    """
+    recommended = stub_size + os_installer.min_recommended_size
+    floor = stub_size + getattr(
+        os_installer, "min_size", os_installer.min_recommended_size
+    )
+    if (
+        isinstance(floor, bool)
+        or not isinstance(floor, int)
+        or floor <= 0
+        or floor > recommended
+    ):
+        floor = recommended
+    return floor, recommended
+
+
+def _minimum_that_fits(length, floor, recommended):
+    if length >= recommended:
+        return recommended
+    return floor
+
+
+def _diskutil_container_floor(part, bounds, floor, container):
+    """diskutil's own recommended macOS minimum, when it still fits Omarchy.
+
+    Asahi keeps an extra 38GB on top of that. On a tight disk that extra
+    reserve is what hides a layout the images fit in and diskutil will
+    shrink to. Never go below diskutil's recommended minimum.
+    """
+    diskutil_min = bounds.get("diskutil_minimum_bytes")
+    if isinstance(diskutil_min, bool) or not isinstance(diskutil_min, int):
+        return None
+    if not (0 < diskutil_min < container and part.size > diskutil_min):
+        return None
+    if part.size - diskutil_min < floor:
+        return None
+    return diskutil_min
+
+
+def _resize_offer(part, bounds, floor, recommended):
+    available = bounds["available_bytes"]
+    container = bounds["minimum_size_bytes"]
+    relaxed = _diskutil_container_floor(part, bounds, floor, container)
+    if available <= 0 and relaxed is None:
+        return None
+    if available >= recommended:
+        return recommended, container
+    if available >= floor:
+        return floor, container
+    if relaxed is not None:
+        return floor, relaxed
+    return recommended, container
+
+
 def collect_inventory(
     installer,
     free_parts,
@@ -65,18 +124,20 @@ def collect_inventory(
         installer.data,
         templates[0],
     )
-    minimum_install = stub_size + os_installer.min_recommended_size
+    floor, recommended = _install_bounds(stub_size, os_installer)
     candidates = []
     for part in free_parts:
         length = align_down(part.size, part_align)
-        if length >= minimum_install:
+        if length >= floor:
             candidates.append(
                 {
                     "kind": "free",
                     "source_identifier": part.name,
                     "offset_bytes": part.offset,
                     "length_bytes": length,
-                    "minimum_install_bytes": minimum_install,
+                    "minimum_install_bytes": _minimum_that_fits(
+                        length, floor, recommended
+                    ),
                     "minimum_container_bytes": 0,
                 }
             )
@@ -85,25 +146,27 @@ def collect_inventory(
         # A container that cannot give up enough space is still reported, so
         # the installer can say how much is missing before it downloads
         # anything. Planning and execution reject it by the same minimums.
-        if bounds["available_bytes"] > 0:
-            candidates.append(
-                {
-                    "kind": "resize",
-                    "source_identifier": part.name,
-                    "offset_bytes": part.offset,
-                    "length_bytes": part.size,
-                    "minimum_install_bytes": minimum_install,
-                    "minimum_container_bytes": bounds[
-                        "minimum_size_bytes"
-                    ],
-                }
-            )
+        offer = _resize_offer(part, bounds, floor, recommended)
+        if offer is None:
+            continue
+        minimum_install, minimum_container = offer
+        candidates.append(
+            {
+                "kind": "resize",
+                "source_identifier": part.name,
+                "offset_bytes": part.offset,
+                "length_bytes": part.size,
+                "minimum_install_bytes": minimum_install,
+                "minimum_container_bytes": minimum_container,
+            }
+        )
     candidates.extend(
         collect_existing_installs(
             installer,
             templates[0].get("default_os_name"),
-            minimum_install,
+            floor,
             part_align,
+            recommended,
         )
     )
     candidates.sort(
@@ -118,7 +181,9 @@ def collect_inventory(
     }
 
 
-def collect_existing_installs(installer, os_label, minimum_install, part_align):
+def collect_existing_installs(
+    installer, os_label, minimum_install, part_align, recommended_install=None
+):
     """Detect complete existing Omarchy installs as replace candidates.
 
     A complete install is exactly four consecutive partitions: the Omarchy
@@ -131,6 +196,8 @@ def collect_existing_installs(installer, os_label, minimum_install, part_align):
     """
     if not isinstance(os_label, str) or not os_label:
         return []
+    if recommended_install is None:
+        recommended_install = minimum_install
     parts = list(getattr(installer, "parts", None) or [])
     candidates = []
     for index, part in enumerate(parts):
@@ -170,13 +237,16 @@ def collect_existing_installs(installer, os_label, minimum_install, part_align):
         length = align_down(end - start, part_align)
         if length < minimum_install:
             continue
+        replace_minimum = _minimum_that_fits(
+            length, minimum_install, recommended_install
+        )
         candidates.append(
             {
                 "kind": "replace",
                 "source_identifier": part.name,
                 "offset_bytes": start,
                 "length_bytes": length,
-                "minimum_install_bytes": minimum_install,
+                "minimum_install_bytes": replace_minimum,
                 "minimum_container_bytes": 0,
                 "identity_digest": replace_identity_digest(
                     members,

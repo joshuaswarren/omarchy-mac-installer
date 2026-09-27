@@ -10,6 +10,7 @@ import unittest
 class FakeOSInstaller:
     def __init__(self, dutil, data, template):
         self.min_recommended_size = template["minimum_size"]
+        self.min_size = template.get("floor_size", template["minimum_size"])
 
 
 sys.modules["osinstall"] = SimpleNamespace(OSInstaller=FakeOSInstaller)
@@ -97,6 +98,87 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(resize["kind"], "resize")
         self.assertEqual(resize["minimum_install_bytes"], 66 * 1024**3)
         self.assertEqual(resize["minimum_container_bytes"], 460 * 1024**3)
+
+    def test_tight_disk_installs_at_the_partition_floor(self):
+        self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
+        self.installer.resize_bounds = {
+            "available_bytes": 40 * 1024**3,
+            "minimum_size_bytes": 460 * 1024**3,
+        }
+
+        inventory = collect_inventory(
+            self.installer,
+            [],
+            self.resize,
+            stub_size=2 * 1024**3,
+            part_align=1024**2,
+        )
+
+        (resize,) = inventory["candidates"]
+        self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
+        self.assertEqual(resize["minimum_container_bytes"], 460 * 1024**3)
+
+    def test_diskutil_floor_admits_a_disk_the_extra_reserve_blocks(self):
+        # Asahi's 38GB reserve leaves less than the partition floor, but
+        # diskutil's own recommended minimum still releases enough.
+        self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
+        self.resize[0].size = 200 * 1024**3
+        self.installer.resize_bounds = {
+            "available_bytes": 20 * 1024**3,
+            "minimum_size_bytes": 180 * 1024**3,
+            "total_bytes": 200 * 1024**3,
+            "diskutil_minimum_bytes": 150 * 1024**3,
+        }
+
+        inventory = collect_inventory(
+            self.installer,
+            [],
+            self.resize,
+            stub_size=2 * 1024**3,
+            part_align=1024**2,
+        )
+
+        (resize,) = inventory["candidates"]
+        self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
+        self.assertEqual(resize["minimum_container_bytes"], 150 * 1024**3)
+
+    def test_diskutil_floor_is_not_used_when_it_cannot_hold_omarchy(self):
+        self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
+        self.resize[0].size = 200 * 1024**3
+        self.installer.resize_bounds = {
+            "available_bytes": 20 * 1024**3,
+            "minimum_size_bytes": 180 * 1024**3,
+            "diskutil_minimum_bytes": 190 * 1024**3,
+        }
+
+        inventory = collect_inventory(
+            self.installer,
+            [],
+            self.resize,
+            stub_size=2 * 1024**3,
+            part_align=1024**2,
+        )
+
+        (resize,) = inventory["candidates"]
+        self.assertEqual(resize["minimum_install_bytes"], 66 * 1024**3)
+        self.assertEqual(resize["minimum_container_bytes"], 180 * 1024**3)
+
+    def test_free_extent_between_floor_and_recommended_is_offered(self):
+        self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
+        self.free[0].size = 40 * 1024**3
+
+        inventory = collect_inventory(
+            self.installer,
+            self.free,
+            [],
+            stub_size=2 * 1024**3,
+            part_align=1024**2,
+        )
+
+        (free,) = inventory["candidates"]
+        self.assertEqual(free["kind"], "free")
+        self.assertEqual(free["minimum_install_bytes"], 32 * 1024**3)
+        self.assertEqual(free["length_bytes"], 40 * 1024**3)
 
     def test_inventory_omits_a_container_with_nothing_to_give(self):
         self.installer.resize_bounds = {
