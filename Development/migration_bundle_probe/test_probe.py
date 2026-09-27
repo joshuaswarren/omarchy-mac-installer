@@ -1,0 +1,272 @@
+"""Behavioral experiments using fake data and the verified real age executable."""
+
+import copy
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+import tracemalloc
+import unittest
+from unittest.mock import patch
+
+from Development.migration_bundle_probe import probe
+
+
+AGE = Path(os.environ["OMARCHY_TEST_AGE"]) if os.environ.get("OMARCHY_TEST_AGE") else None
+# Public, deliberately synthetic test input. Never used for a real export.
+SECRET = b"synthetic-only-otter-maple-window-cobalt"
+
+
+class BundleProbe(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if AGE is None:
+            raise unittest.SkipTest("set OMARCHY_TEST_AGE and OMARCHY_TEST_AGE_SHA256 for real age tests")
+        expected = os.environ.get("OMARCHY_TEST_AGE_SHA256", "")
+        if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
+            raise RuntimeError("OMARCHY_TEST_AGE_SHA256 must identify the independently verified executable")
+        if not AGE.is_absolute() or probe.digest_file(AGE) != expected:
+            raise RuntimeError("age path or executable differs from the verified dependency")
+        version = subprocess.run(
+            [str(AGE), "--version"], check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if version not in ("1.3.2", "v1.3.2"):
+            raise RuntimeError("this disposable probe requires age 1.3.2")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="migration-bundle-probe-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.root = Path(cls.temporary.name)
+        cls.files = {}
+        examples = {
+            ".config/example-theme/selected": b"catppuccin\n",
+            "Projects/demo/changed.txt": b"modified tracked file\n",
+            "Projects/demo/untracked \u03bb.txt": b"local untracked draft\n",
+            "Projects/demo/run": b"#!/bin/bash\nexit 0\n",
+            ".ssh/id_example": b"FAKE-SSH-SECRET-NOT-A-PRIVATE-KEY\n",
+            ".config/BraveSoftware/Brave-Origin/Default/example": b"FAKE-BROWSER-TOKEN\n",
+            ".config/1Password/example": b"FAKE-VAULT-NOT-REAL-DATA\n",
+            ".codex/auth.json": b'{"synthetic": "FAKE-CODEX-CREDENTIAL"}\n',
+        }
+        for index, (name, content) in enumerate(examples.items()):
+            file = cls.root / f"source-{index}"
+            file.write_bytes(content)
+            file.chmod(0o750 if name.endswith("/run") else 0o600)
+            os.utime(file, ns=(1720000000123456789, 1720000000123456789))
+            cls.files[name] = file
+        cls.manifest = probe.make_manifest(cls.files)
+        cls.bundle = cls.root / "complete.age"
+        cls.receipt = probe.encrypt(
+            AGE, SECRET, cls.bundle,
+            lambda stream: probe.write_archive(stream, cls.manifest, cls.files),
+        )
+
+    def test_roundtrip_validates_all_bytes_and_metadata(self):
+        decoded = probe.decode(AGE, SECRET, self.bundle)
+        self.assertEqual(decoded, self.manifest)
+        for entry in decoded["entries"]:
+            source = self.files[entry["path"]]
+            self.assertEqual(entry["sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(entry["mode"], source.stat().st_mode & 0o777)
+            self.assertEqual(entry["mtime_ns"], source.stat().st_mtime_ns)
+        self.assertEqual(self.bundle.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.receipt["sha256"], probe.digest_file(self.bundle))
+        ciphertext = self.bundle.read_bytes()
+        for sentinel in (b"FAKE-CODEX-CREDENTIAL", b"manifest.json", b"catppuccin", b"Projects/demo"):
+            self.assertNotIn(sentinel, ciphertext)
+
+    def test_default_selection_excludes_fixture_credentials_before_serialization(self):
+        selected = probe.selected_files(self.files)
+        self.assertEqual(set(selected), {name for name in self.files if name.startswith(("Projects/", ".config/example-theme/"))})
+        manifest = probe.make_manifest(selected)
+        output = self.root / "opted-out.age"
+        probe.encrypt(AGE, SECRET, output, lambda stream: probe.write_archive(stream, manifest, selected))
+        self.assertEqual(probe.decode(AGE, SECRET, output), manifest)
+        self.assertEqual(probe.selected_files(self.files, include_credentials=True), self.files)
+
+    def test_wrong_passphrase_has_no_completed_decode(self):
+        with self.assertRaises(probe.Rejected):
+            probe.decode(AGE, b"wrong-synthetic-passphrase", self.bundle)
+
+    def test_header_work_limit_is_checked_before_a_crypto_process_starts(self):
+        lines = self.bundle.read_bytes().split(b"\n", 4)
+        for factor in (b"1", b"19", b"30", b"999999999999", b"018", b"+18"):
+            altered = list(lines)
+            altered[1] = altered[1].rsplit(b" ", 1)[0] + b" " + factor
+            source = self.root / "expensive.age"
+            source.write_bytes(b"\n".join(altered))
+            with self.subTest(factor=factor), patch.object(probe, "AgeProcess") as process:
+                with self.assertRaisesRegex(probe.Rejected, "work factor"):
+                    probe.decode(AGE, SECRET, source)
+                process.assert_not_called()
+
+    def test_header_encoding_recipients_and_size_are_bounded_before_decryption(self):
+        original = self.bundle.read_bytes().split(b"\n", 4)
+        malformed = []
+        for index, replacement in (
+            (0, b"age-encryption.org/v999"),
+            (1, original[1].replace(b"-> scrypt", b"-> plugin-example")),
+            (1, original[1].replace(b" 18", b"= 18")),
+            (2, b"A" * 10000),
+            (2, original[2] + b"="),
+            (3, original[1]),
+            (3, b"--- " + b"A" * 42),
+        ):
+            lines = list(original)
+            lines[index] = replacement
+            malformed.append(b"\n".join(lines))
+        for index, data in enumerate(malformed):
+            source = self.root / "malformed-header.age"
+            source.write_bytes(data)
+            with self.subTest(case=index), patch.object(probe, "AgeProcess") as process:
+                with self.assertRaises(probe.Rejected):
+                    probe.decode(AGE, SECRET, source)
+                process.assert_not_called()
+        oversized = io.BytesIO(b"age-encryption.org/v1\n" + b"A" * 100000)
+        with self.assertRaises(probe.Rejected):
+            probe.checked_age_header(oversized)
+        self.assertLess(oversized.tell(), 128)
+
+    def test_decryptor_receives_checked_header_even_if_source_changes_later(self):
+        source = self.root / "header-race.age"
+        original = self.bundle.read_bytes()
+        source.write_bytes(original)
+        create = probe.AgeProcess
+
+        def replace_header(*args, **kwargs):
+            lines = original.split(b"\n", 4)
+            lines[1] = lines[1].rsplit(b" ", 1)[0] + b" 30"
+            source.write_bytes(b"\n".join(lines))
+            return create(*args, **kwargs)
+
+        with patch.object(probe, "AgeProcess", side_effect=replace_header):
+            self.assertEqual(probe.decode(AGE, SECRET, source), self.manifest)
+
+    def test_oversize_and_nonregular_ciphertext_are_refused_before_age(self):
+        alias = self.root / "ciphertext-link"
+        alias.symlink_to(self.bundle)
+        fifo = self.root / "ciphertext-fifo"
+        os.mkfifo(fifo, 0o600)
+        with patch.object(probe, "AgeProcess") as process:
+            with self.assertRaises(probe.Rejected):
+                probe.decode(AGE, SECRET, self.bundle, limit=1)
+            with self.assertRaises(OSError):
+                probe.decode(AGE, SECRET, alias)
+            with self.assertRaises(probe.Rejected):
+                probe.decode(AGE, SECRET, fifo)
+            process.assert_not_called()
+
+    def test_changed_final_tag_is_rejected_after_valid_tar_content(self):
+        data = bytearray(self.bundle.read_bytes())
+        data[-1] ^= 1
+        altered = self.root / "altered.age"
+        altered.write_bytes(data)
+        with self.assertRaises(probe.Rejected):
+            probe.decode(AGE, SECRET, altered)
+
+    def test_missing_final_bytes_is_rejected(self):
+        altered = self.root / "truncated.age"
+        altered.write_bytes(self.bundle.read_bytes()[:-16])
+        with self.assertRaises(probe.Rejected):
+            probe.decode(AGE, SECRET, altered)
+
+    def test_unsupported_encrypted_schema_is_rejected(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["schema"] = "omarchy-migration-probe/999"
+        output = self.root / "future.age"
+        probe.encrypt(AGE, SECRET, output, lambda stream: probe.write_archive(stream, manifest, self.files))
+        with self.assertRaises(probe.Rejected):
+            probe.decode(AGE, SECRET, output)
+
+    def test_cancelled_writer_never_publishes_ciphertext(self):
+        def cancelled(stream):
+            stream.write(b"incomplete synthetic source")
+            raise RuntimeError("synthetic capture cancellation")
+        output = self.root / "cancelled.age"
+        with self.assertRaisesRegex(RuntimeError, "synthetic capture cancellation"):
+            probe.encrypt(AGE, SECRET, output, cancelled)
+        self.assertFalse(output.exists())
+        self.assertEqual(list(self.root.glob(".partial-*")), [])
+
+    def test_publish_does_not_overwrite_existing_file(self):
+        output = self.root / "already-exists.age"
+        output.write_bytes(b"prior completed export")
+        with self.assertRaises(FileExistsError):
+            probe.encrypt(AGE, SECRET, output, lambda stream: stream.write(b"replacement"))
+        self.assertEqual(output.read_bytes(), b"prior completed export")
+        self.assertEqual(list(self.root.glob(".partial-*")), [])
+
+    def test_manifest_rejects_paths_and_conflicting_entries(self):
+        for path in ("../escape", "/absolute", "a/../b", "a//b", "./name", "nul\0name"):
+            with self.subTest(path=repr(path)):
+                manifest = copy.deepcopy(self.manifest)
+                manifest["entries"][0]["path"] = path
+                with self.assertRaises(probe.Rejected):
+                    probe.validate_manifest(manifest)
+        for pair in (("duplicate", "duplicate"), ("parent", "parent/child")):
+            manifest = copy.deepcopy(self.manifest)
+            manifest["entries"][0]["path"], manifest["entries"][1]["path"] = pair
+            with self.assertRaises(probe.Rejected):
+                probe.validate_manifest(manifest)
+
+    def test_hardlinks_symlinks_devices_and_pax_are_rejected_before_payload(self):
+        for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE, tarfile.XHDTYPE):
+            with self.subTest(kind=kind):
+                member = tarfile.TarInfo("manifest.json")
+                member.type = kind
+                member.linkname = "../escape"
+                with self.assertRaises(probe.Rejected):
+                    probe.validate_archive(io.BytesIO(member.tobuf()))
+
+    def test_oversized_header_rejected_before_read_or_allocation(self):
+        member = tarfile.TarInfo("manifest.json")
+        member.size = probe.MAX_MANIFEST + 1
+        with self.assertRaisesRegex(probe.Rejected, "metadata"):
+            probe.validate_archive(io.BytesIO(member.tobuf()))
+        manifest = copy.deepcopy(self.manifest)
+        manifest["entries"][0]["bytes"] = probe.MAX_TOTAL + 1
+        with self.assertRaises(probe.Rejected):
+            probe.validate_manifest(manifest)
+
+    def test_payload_digest_mismatch_and_nonzero_trailing_data(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["entries"][0]["sha256"] = "0" * 64
+        archive = io.BytesIO()
+        probe.write_archive(archive, manifest, self.files)
+        archive.seek(0)
+        with self.assertRaisesRegex(probe.Rejected, "digest"):
+            probe.validate_archive(archive)
+        archive = io.BytesIO()
+        probe.write_archive(archive, self.manifest, self.files)
+        archive.write(b"unexpected second archive")
+        archive.seek(0)
+        with self.assertRaisesRegex(probe.Rejected, "trailing"):
+            probe.validate_archive(archive)
+
+    def test_duplicate_json_fields_rejected(self):
+        with self.assertRaises(probe.Rejected):
+            json.loads('{"schema":"one","schema":"two"}', object_pairs_hook=probe.unique_json_pairs)
+
+    def test_large_stream_does_not_buffer_whole_archive_in_python(self):
+        source = self.root / "large-source"
+        with source.open("wb") as stream:
+            for _ in range(512):
+                stream.write(b"synthetic" * 8192)  # 36 MiB; no compression.
+        files = {"Projects/demo/large.bin": source}
+        manifest = probe.make_manifest(files)
+        output = self.root / "large.age"
+        tracemalloc.start()
+        try:
+            probe.encrypt(AGE, SECRET, output, lambda stream: probe.write_archive(stream, manifest, files))
+            self.assertEqual(probe.decode(AGE, SECRET, output), manifest)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 * 1024 * 1024)
+        print(f"probe_stream_bytes={source.stat().st_size} python_peak_bytes={peak}")
+
+
+if __name__ == "__main__":
+    unittest.main()

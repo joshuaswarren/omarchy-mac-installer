@@ -1,5 +1,7 @@
 # Omarchy Mac Installer
 
+This exploration branch shares [Try Omarchy migration prototypes and the collaboration plan](docs/try-omarchy-migration/README.md). The code exercises synthetic encrypted bundles and target-staging components; it does not enable migration in the installer.
+
 Development source for the Apple Silicon macOS installer, extracted from [maralcbr/omarchy-mx-mac](https://github.com/maralcbr/omarchy-mx-mac) into [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer).
 
 This first extraction preserves the installer behavior and Git attribution. The app is now named **Omarchy Installer**; it keeps the original `com.omarchy.mx.*` identifiers, download keys and release configuration, and the package removes a copy left under the old name, Omarchy MX Mac Installer. Integration with the shared Omarchy packages and Linux installation image is the next, separate change. This candidate is not an installation release.
