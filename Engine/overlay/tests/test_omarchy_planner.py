@@ -142,7 +142,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
         self.assertEqual(resize["minimum_container_bytes"], 150 * 1024**3)
 
-    def test_diskutil_floor_is_not_used_when_it_cannot_hold_omarchy(self):
+    def test_invalid_diskutil_floor_keeps_asahi_container_minimum(self):
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3
         self.resize[0].size = 200 * 1024**3
         self.installer.resize_bounds = {
@@ -160,8 +160,55 @@ class PlannerTests(unittest.TestCase):
         )
 
         (resize,) = inventory["candidates"]
-        self.assertEqual(resize["minimum_install_bytes"], 66 * 1024**3)
+        self.assertEqual(resize["minimum_install_bytes"], 32 * 1024**3)
         self.assertEqual(resize["minimum_container_bytes"], 180 * 1024**3)
+
+    def test_resize_limits_do_not_jump_when_more_space_is_freed(self):
+        gib = 1024**3
+        self.installer.data["os_list"][0].update(
+            floor_size=30 * gib, minimum_size=60 * gib
+        )
+        self.resize[0].size = 200 * gib
+        previous_container = 200 * gib
+        for available in (31, 32, 41, 42, 61, 62, 71, 72):
+            with self.subTest(available_gib=available):
+                container = (200 - available) * gib
+                self.installer.resize_bounds = {
+                    "available_bytes": available * gib,
+                    "minimum_size_bytes": container,
+                    "diskutil_minimum_bytes": min(150 * gib, container),
+                }
+                inventory = collect_inventory(
+                    self.installer, [], self.resize, 2 * gib, 1024**2
+                )
+                (resize,) = inventory["candidates"]
+                self.assertEqual(resize["minimum_install_bytes"], 32 * gib)
+                self.assertLessEqual(
+                    resize["minimum_container_bytes"], previous_container
+                )
+                self.assertEqual(resize["recommended_install_bytes"], 62 * gib)
+                self.assertEqual(resize["recommended_container_bytes"], container)
+                previous_container = resize["minimum_container_bytes"]
+
+                # The same plan remains admissible as Asahi crosses the
+                # old fallback thresholds between inspect and plan.
+                journal = Journal(str(self.root / f"space-{available}.jsonl"))
+                journal.inspection("apple,j314s", "supported")
+                layout = journal.inventory("disk0", [resize])
+                journal.plan(
+                    device_identifier="apple,j314s",
+                    layout_digest=layout,
+                    candidate_kind="resize",
+                    source_identifier=resize["source_identifier"],
+                    requested_length_bytes=38 * gib,
+                    engine_version="test",
+                    engine_digest="sha256:" + "d" * 64,
+                    metadata_digest="sha256:" + "e" * 64,
+                    payload_digest="sha256:" + "f" * 64,
+                    required_human_steps=[
+                        "enterOneTrueRecovery", "authenticateMachineOwner"
+                    ],
+                )
 
     def test_free_extent_between_floor_and_recommended_is_offered(self):
         self.installer.data["os_list"][0]["floor_size"] = 30 * 1024**3

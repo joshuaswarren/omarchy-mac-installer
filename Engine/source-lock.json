@@ -171,22 +171,22 @@
       {
         "path": "overlay/src/omarchy_asahi.py",
         "destination": "src/omarchy_asahi.py",
-        "sha256": "9970fe43e9182b11cc4ea6669967575f8cb3a3df8f5f75a66f3c37786fd5b6be"
+        "sha256": "74bed0f998c906afc6fe72ef8c9f0d6fd6baac330e206e084d7ef2879840ab16"
       },
       {
         "path": "overlay/src/omarchy_contract.py",
         "destination": "src/omarchy_contract.py",
-        "sha256": "823819832b103f34a6221af3e775179bedba5dd04217202dbf08153359b4ed0f"
+        "sha256": "6ddffbd1d69ab4ea1959819d6128a794954185d2bf24a3178386585e624c738c"
       },
       {
         "path": "overlay/src/omarchy_execution.py",
         "destination": "src/omarchy_execution.py",
-        "sha256": "1f42d9017353d0ee0d069b97d9cdde0217b5e1b901e2e7b7384465a124461d23"
+        "sha256": "14f58b596d24f67d66860721e92d23608e94a999e0247bb9d38a303d8b520c1e"
       },
       {
         "path": "overlay/src/omarchy_planner.py",
         "destination": "src/omarchy_planner.py",
-        "sha256": "a3202243e26290d2dcd3cb421e922ea3c6edf36c152fe70945513c8cd3b64c88"
+        "sha256": "d2ce2c922b9f46fa99443c5887e29837cd568290eb19172078ba6c3b686a7c6f"
       },
       {
         "path": "overlay/src/omarchy_repair.py",
@@ -206,22 +206,22 @@
       {
         "path": "overlay/tests/test_omarchy_asahi.py",
         "destination": "tests/test_omarchy_asahi.py",
-        "sha256": "305afd9654feb32684959e047e3c757e9633ef72df368384e113482f7a290420"
+        "sha256": "b5c07f8a61273d25cfd1ef3fb76208241ebdb29ff2e2832ee16c2d63d01e9e00"
       },
       {
         "path": "overlay/tests/test_omarchy_contract.py",
         "destination": "tests/test_omarchy_contract.py",
-        "sha256": "5f7a31803653baf2ebe048a85ea761c1ec804d28c3a6e03d9adc44f0eb514154"
+        "sha256": "095382c3c596ac69989493dee5e49cbf73400381db8a19b533c46964b173aa1c"
       },
       {
         "path": "overlay/tests/test_omarchy_execution.py",
         "destination": "tests/test_omarchy_execution.py",
-        "sha256": "4f619afa84be43b50024fdf1e6031474bacb6cfbe6a3bbe007b59b94d8b468c6"
+        "sha256": "43206cbbe5dbd83f0e72bbf79d8ee21851f3388928bf2882a4ffed1f644e67b1"
       },
       {
         "path": "overlay/tests/test_omarchy_planner.py",
         "destination": "tests/test_omarchy_planner.py",
-        "sha256": "f569f256ccd8ebd519d138b80c0e3ad2c44f23939ff57bd7aafeecb53324eb07"
+        "sha256": "475d3c312ef45304c91018a469198a868b6cd6791237933d92b37ba4d44f3811"
       },
       {
         "path": "overlay/tests/test_omarchy_repair.py",

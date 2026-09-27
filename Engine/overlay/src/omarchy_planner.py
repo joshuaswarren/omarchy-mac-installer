@@ -70,36 +70,26 @@ def _minimum_that_fits(length, floor, recommended):
     return floor
 
 
-def _diskutil_container_floor(part, bounds, floor, container):
-    """diskutil's own recommended macOS minimum, when it still fits Omarchy.
-
-    Asahi keeps an extra 38GB on top of that. On a tight disk that extra
-    reserve is what hides a layout the images fit in and diskutil will
-    shrink to. Never go below diskutil's recommended minimum.
-    """
+def _diskutil_container_floor(part, bounds, container):
+    """Use diskutil's recommended minimum when Asahi's reserve is stricter."""
     diskutil_min = bounds.get("diskutil_minimum_bytes")
     if isinstance(diskutil_min, bool) or not isinstance(diskutil_min, int):
         return None
     if not (0 < diskutil_min < container and part.size > diskutil_min):
         return None
-    if part.size - diskutil_min < floor:
-        return None
     return diskutil_min
 
 
-def _resize_offer(part, bounds, floor, recommended):
+def _resize_offer(part, bounds, floor):
     available = bounds["available_bytes"]
     container = bounds["minimum_size_bytes"]
-    relaxed = _diskutil_container_floor(part, bounds, floor, container)
+    relaxed = _diskutil_container_floor(part, bounds, container)
     if available <= 0 and relaxed is None:
         return None
-    if available >= recommended:
-        return recommended, container
-    if available >= floor:
-        return floor, container
-    if relaxed is not None:
-        return floor, relaxed
-    return recommended, container
+    # Keep safety limits independent of available space. Swift chooses the
+    # recommendations after subtracting staging space; live admission must
+    # not revoke that fallback just because macOS has freed more space.
+    return floor, relaxed if relaxed is not None else container
 
 
 def collect_inventory(
@@ -146,7 +136,7 @@ def collect_inventory(
         # A container that cannot give up enough space is still reported, so
         # the installer can say how much is missing before it downloads
         # anything. Planning and execution reject it by the same minimums.
-        offer = _resize_offer(part, bounds, floor, recommended)
+        offer = _resize_offer(part, bounds, floor)
         if offer is None:
             continue
         minimum_install, minimum_container = offer
@@ -158,6 +148,8 @@ def collect_inventory(
                 "length_bytes": part.size,
                 "minimum_install_bytes": minimum_install,
                 "minimum_container_bytes": minimum_container,
+                "recommended_install_bytes": recommended,
+                "recommended_container_bytes": bounds["minimum_size_bytes"],
             }
         )
     candidates.extend(

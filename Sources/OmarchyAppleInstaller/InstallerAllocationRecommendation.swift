@@ -40,7 +40,7 @@ public struct InstallerAllocationRecommendation:
   ) throws {
     let unit = PinnedAsahiPlanRequest.allocationUnitBytes
     let ranked = inventory.candidates.compactMap { candidate -> Ranked? in
-      let minimum = Self.alignUp(
+      var minimum = Self.alignUp(
         candidate.minimumInstallBytes,
         unit: unit
       )
@@ -56,7 +56,25 @@ public struct InstallerAllocationRecommendation:
         guard available > reservedBytes else {
           return nil
         }
-        let usable = available - reservedBytes
+        var usable = available - reservedBytes
+        // Keep Asahi's extra macOS reserve when the partition floor still
+        // fits after staging. Prefer the larger Linux minimum only when it
+        // also fits. Older engines supply only the mandatory minimums.
+        if let preferredContainer = candidate.recommendedContainerBytes {
+          let preferredAvailable =
+            candidate.lengthBytes - min(candidate.lengthBytes, preferredContainer)
+          if preferredAvailable >= reservedBytes,
+            preferredAvailable - reservedBytes >= minimum
+          {
+            usable = preferredAvailable - reservedBytes
+          }
+        }
+        if let recommended = candidate.recommendedInstallBytes {
+          let alignedRecommended = Self.alignUp(recommended, unit: unit)
+          if alignedRecommended <= usable - (usable % unit) {
+            minimum = alignedRecommended
+          }
+        }
         let margin = min(
           usable / Self.resizeDriftMarginDivisor,
           Self.maximumResizeDriftMarginBytes
