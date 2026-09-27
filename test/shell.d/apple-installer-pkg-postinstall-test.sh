@@ -13,8 +13,8 @@ grep -Fq 'remove_legacy_app "/Applications/$INSTALLER_LEGACY_APP_NAME.app"' "$po
   fail "postinstall removes the app installed under the legacy name"
 
 # Run the real function against disposable bundles, with PlistBuddy and pgrep
-# replaced by stubs: PlistBuddy prints the fixture's identifier file and pgrep
-# reports a running app when the fixture carries a running marker.
+# replaced by stubs: PlistBuddy prints the fixture's identifier file, and pgrep
+# reports a running app for a running marker and fails for an error marker.
 sed -n '/^remove_legacy_app() {$/,/^}$/p' "$postinstall" >"$test_tmp/function.sh"
 [[ -s $test_tmp/function.sh ]] || fail "postinstall defines remove_legacy_app"
 cat >"$test_tmp/plistbuddy" <<'STUB'
@@ -23,7 +23,10 @@ cat "$3"
 STUB
 cat >"$test_tmp/pgrep" <<'STUB'
 #!/bin/bash
-[[ -e ${2%/Contents/}/running ]]
+bundle=${2%/Contents/}
+[[ -e $bundle/pgrep-error ]] && exit 2
+[[ -e $bundle/running ]] && exit 0
+exit 1
 STUB
 chmod +x "$test_tmp/plistbuddy" "$test_tmp/pgrep"
 
@@ -60,6 +63,15 @@ run_removal "$legacy" 2>"$test_tmp/log" || fail "a refusal still succeeds"
 grep -Fq "it is running" "$test_tmp/log" || fail "the refusal is logged" "$(cat "$test_tmp/log")"
 rm -rf "$legacy"
 pass "a running legacy app is kept"
+
+make_bundle "$legacy" "$INSTALLER_APP_IDENTIFIER"
+touch "$legacy/pgrep-error"
+run_removal "$legacy" 2>"$test_tmp/log" || fail "a failed running check still succeeds"
+[[ -d $legacy ]] || fail "a legacy app is kept when pgrep fails"
+grep -Fq "could not check whether it is running (pgrep exit 2)" "$test_tmp/log" ||
+  fail "the failed check is logged" "$(cat "$test_tmp/log")"
+rm -rf "$legacy"
+pass "a legacy app is kept when the running check fails"
 
 make_bundle "$test_tmp/target.app" "$INSTALLER_APP_IDENTIFIER"
 ln -s "$test_tmp/target.app" "$legacy"
