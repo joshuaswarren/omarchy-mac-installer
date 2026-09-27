@@ -19,6 +19,11 @@ descriptor  a build directory whose IMAGE names the lane, platform, builder
             commit, candidate set, package set digest, each payload member's
             sha256 and the inputs digest, matching the bytes and records
             beside it.
+
+image and tree refuse lab access (builder/lab_access.py) in every subvolume,
+@factory and the initramfs, unless --profile lab names an edge lab image; a lab
+image must then carry exactly the lab overlay. IMAGE and PROVENANCE record a
+lab image as profile=lab, which only the edge lane accepts.
 """
 
 from __future__ import annotations
@@ -64,6 +69,9 @@ PAYLOAD_NAME = re.compile(
     r"^omarchy-\d{4}\.\d{2}\.\d{2}-aarch64-apple-silicon-mac-(edge|rc|stable)-os-package\.zip$"
 )
 LANES = ("edge", "rc", "stable")
+PROFILES = ("release", "lab")
+# The only lane a lab image may be built for.
+LAB_LANE = "edge"
 IMAGE_LINKS = {
     "etc/systemd/system/multi-user.target.wants/omarchy-vendor-firmware.service":
         "/etc/systemd/system/omarchy-vendor-firmware.service",
@@ -87,6 +95,13 @@ NODE_PIN = ROOT / "builder/node.pin"
 
 def _inspection():
     spec = importlib.util.spec_from_file_location("inspection", ROOT / "builder/inspection.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _module(name: str):
+    spec = importlib.util.spec_from_file_location(name, ROOT / f"builder/{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -427,15 +442,45 @@ def check_secret_material(root: Path, where: str) -> None:
     require(not human_users(root), f"{where} has a user: {human_users(root)}")
 
 
-def check_tree(root: Path, factory: Path | None = None) -> None:
+def check_profile(lane: str, profile: str) -> None:
+    require(profile in PROFILES, f"{profile} is not an image profile")
+    require(profile != "lab" or lane == LAB_LANE, f"a lab image is refused on the {lane} lane")
+
+
+def check_lab_access(root: Path, where: str, profile: str) -> None:
+    lab = _module("lab_access")
+    try:
+        lab.check(root, where, profile == "lab")
+    except (lab.LabAccessError, OSError) as error:
+        raise CheckError(str(error)) from None
+
+
+def check_initramfs_lab_access(root: Path) -> None:
+    lab = _module("lab_access")
+    limine = _module("apple_limine")
+    try:
+        initrd = limine.pe_sections(root / f"boot/efi/EFI/Linux/omarchy_{KERNEL}.efi").get(".initrd") or b""
+        chunks = limine.initramfs_archives(initrd)
+        members = [member for chunk in chunks for member in limine._bsdtar(chunk, "-t").decode(errors="replace").splitlines()]
+        contents = b"".join(limine._bsdtar(chunk, "-xO") for chunk in chunks)
+    except (limine.ContractError, OSError, ValueError) as error:
+        raise CheckError(f"cannot read the UKI's initramfs: {error}") from None
+    found = lab.initramfs_findings(members, contents)
+    require(not found, "the initramfs carries " + "; ".join(f"{path} ({what})" for path, what, _ in found))
+
+
+def check_tree(root: Path, factory: Path | None = None, profile: str = "release") -> None:
     require(root.is_dir(), f"{root} is not a directory")
     check_fstab(root)
     check_boot(root)
     check_state(root)
     check_secret_material(root, "the image")
+    check_lab_access(root, "the image", profile)
+    check_initramfs_lab_access(root)
     if factory is not None:
         require(factory.is_dir(), "@factory is missing")
         check_secret_material(factory, "@factory")
+        check_lab_access(factory, "@factory", profile)
 
 
 def inspect_tree(lane: str, root: Path, factory: Path | None, candidates: Path, report: Path | None) -> None:
@@ -462,7 +507,9 @@ def check_subvolumes(listed: list[str]) -> None:
             f"root.img holds subvolumes {sorted(listed)}, not {list(SUBVOLUMES)} and optionally {list(NESTED_SUBVOLUMES)}")
 
 
-def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candidates: Path, report: Path | None) -> None:
+def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candidates: Path, report: Path | None,
+                profile: str = "release") -> None:
+    check_profile(lane, profile)
     require(os.geteuid() == 0, "image checks mount the images and need root")
     for image, capacity in ((root_image, ROOT_SIZE), (boot_image, BOOT_SIZE)):
         size = image.stat().st_size
@@ -497,10 +544,14 @@ def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candid
             factory.mkdir()
             run("mount", "-o", "ro,subvol=@factory", root_loop, str(factory))
             mounts.append(str(factory))
-            check_tree(tree, factory)
+            check_tree(tree, factory, profile)
             for subvolume, point in (("@", tree), ("@home", tree / "home"), ("@log", tree / "var/log"),
                                      ("@pkg", tree / "var/cache/pacman/pkg"), ("@factory", factory)):
                 check_secret_material(point, subvolume)
+            # Each subvolume unmounted too, so nothing hides under a mount point.
+            # The lab overlay lives in @ (and @factory); the others carry none.
+            for subvolume in ("@", "@home", "@log", "@pkg"):
+                check_lab_access(top / subvolume, f"{subvolume} (unmounted)", profile if subvolume == "@" else "release")
             inspect_tree(lane, tree, factory, candidates, report)
         finally:
             for mount in reversed(mounts):
@@ -579,6 +630,21 @@ def check_provenance(lane: str, directory: Path) -> None:
             "INSPECTION is not the one PROVENANCE names")
     require(json.loads(inspection.read_text()).get("result") == "passed", "INSPECTION did not pass")
     check_payload(lane, payload, installer_data)
+    check_recorded_profile(lane, fields, "PROVENANCE")
+
+
+def check_recorded_profile(lane: str, fields: dict[str, list[str]], where: str) -> str:
+    """A lab image says so (profile=lab, lab_access_sha256=); anything else is a release image."""
+    recorded = fields.get("profile")
+    if recorded is None:
+        require("lab_access_sha256" not in fields, f"{where} names lab access on a release image")
+        return "release"
+    require(recorded == ["lab"], f"{where} records the profile {recorded}, not one profile=lab")
+    check_profile(lane, "lab")
+    digests = fields.get("lab_access_sha256", [])
+    require(len(digests) == 1 and re.fullmatch(r"[0-9a-f]{64}", digests[0]) is not None,
+            f"{where} names no lab access digest")
+    return "lab"
 
 
 IMAGE_INPUTS = ("candidate_set", "candidate_source_commit", "candidate_signer", "candidate_receipt_sha256",
@@ -609,6 +675,9 @@ def check_descriptor(lane: str, directory: Path) -> None:
     require(provenance_fields.get("inputs_sha256") == [digest], "IMAGE input_digest does not match PROVENANCE")
     for key in ("package_set_sha256", "hardware_setup", "builder_commit", "builder_tree_clean"):
         require(provenance_fields.get(key) == fields[key], f"IMAGE {key} does not match PROVENANCE")
+    check_recorded_profile(lane, fields, "IMAGE")
+    for key in ("profile", "lab_access_sha256"):
+        require(provenance_fields.get(key) == fields.get(key), f"IMAGE {key} does not match PROVENANCE")
     payload = payload_in(directory, lane)
     installer_data = directory / "installer_data.json"
     require(installer_data.is_file(), "installer_data.json is not beside IMAGE")
@@ -624,8 +693,8 @@ def check_descriptor(lane: str, directory: Path) -> None:
 
 
 USAGE = """Usage: mac-image-check payload <edge|rc|stable> PAYLOAD.zip INSTALLER_DATA.json
-       mac-image-check image <edge|rc|stable> ROOT.img BOOT.img ESP_DIR --candidates DIR [--report FILE]
-       mac-image-check tree <edge|rc|stable> ROOT_TREE [FACTORY_TREE] --candidates DIR [--report FILE]
+       mac-image-check image <edge|rc|stable> ROOT.img BOOT.img ESP_DIR --candidates DIR [--report FILE] [--profile lab]
+       mac-image-check tree <edge|rc|stable> ROOT_TREE [FACTORY_TREE] --candidates DIR [--report FILE] [--profile lab]
        mac-image-check provenance <edge|rc|stable> BUILD_DIR
        mac-image-check descriptor <edge|rc|stable> BUILD_DIR"""
 
@@ -633,14 +702,18 @@ USAGE = """Usage: mac-image-check payload <edge|rc|stable> PAYLOAD.zip INSTALLER
 def main(argv: list[str]) -> int:
     rest: list[str] = []
     options: dict[str, Path] = {}
+    profile = "release"
     arguments = iter(argv[1:])
     for arg in arguments:
-        if arg in ("--candidates", "--report"):
+        if arg in ("--candidates", "--report", "--profile"):
             value = next(arguments, None)
-            if value is None:
+            if value is None or (arg == "--profile" and value not in PROFILES):
                 print(USAGE, file=sys.stderr)
                 return 64
-            options[arg[2:]] = Path(value)
+            if arg == "--profile":
+                profile = value
+            else:
+                options[arg[2:]] = Path(value)
         else:
             rest.append(arg)
     arity = {"payload": 2, "image": 3, "tree": None, "provenance": 1, "descriptor": 1}
@@ -655,17 +728,19 @@ def main(argv: list[str]) -> int:
     elif len(paths) != arity[mode]:
         print(USAGE, file=sys.stderr)
         return 64
-    if mode in ("image", "tree") and "candidates" not in options:
+    if (mode in ("image", "tree") and "candidates" not in options) or (mode not in ("image", "tree") and profile != "release"):
         print(USAGE, file=sys.stderr)
         return 64
     try:
         if mode == "payload":
             check_payload(lane, Path(paths[0]), Path(paths[1]))
         elif mode == "image":
-            check_image(lane, Path(paths[0]), Path(paths[1]), Path(paths[2]), options["candidates"], options.get("report"))
+            check_image(lane, Path(paths[0]), Path(paths[1]), Path(paths[2]), options["candidates"], options.get("report"),
+                        profile)
         elif mode == "tree":
             factory = Path(paths[1]) if len(paths) == 2 else None
-            check_tree(Path(paths[0]), factory)
+            check_profile(lane, profile)
+            check_tree(Path(paths[0]), factory, profile)
             inspect_tree(lane, Path(paths[0]), factory, options["candidates"], options.get("report"))
         elif mode == "provenance":
             check_provenance(lane, Path(paths[0]))
@@ -674,7 +749,7 @@ def main(argv: list[str]) -> int:
     except CheckError as error:
         print(f"mac-image-check: {error}", file=sys.stderr)
         return 1
-    print(f"ok - the {lane} mac image {mode} meets the contract")
+    print(f"ok - the {lane} {'lab ' if profile == 'lab' else ''}mac image {mode} meets the contract")
     return 0
 
 
