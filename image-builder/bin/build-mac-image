@@ -709,9 +709,11 @@ install_settings() {
 # The profile the image records: lab (--lab-access), test for a candidate-only
 # set (every set the importer accepts today), release otherwise.
 image_profile() {
+  local candidate_only
+  candidate_only=$(jq -r '.candidate_only' "$candidates/import.json") || return 1
   if [[ $profile == lab ]]; then
     echo lab
-  elif [[ $(jq -r '.candidate_only' "$candidates/import.json") == true ]]; then
+  elif [[ $candidate_only == true ]]; then
     echo test
   else
     echo release
@@ -726,17 +728,17 @@ image_profile() {
 # the image it came from. The image's own digest is not here, since root.img
 # holds this file: IMAGE, PROVENANCE and the catalog carry it.
 write_image_target() {
-  local set source_commit image_profile
-  set=$(field candidate_set)
+  local set_name source_commit image_profile
+  set_name=$(field candidate_set)
   source_commit=$(field candidate_source_commit)
   image_profile=$(image_profile) || fail "could not read the candidate set's kind"
-  [[ $set =~ ^[A-Za-z0-9._-]+$ && $source_commit =~ ^[0-9a-f]{40}$ ]] ||
+  [[ $set_name =~ ^[A-Za-z0-9._-]+$ && $source_commit =~ ^[0-9a-f]{40}$ ]] ||
     fail "the inputs name no candidate set and source commit for the image target"
   [[ ${MAC_IMAGE_BUILDER_COMMIT:-} =~ ^[0-9a-f]{40}$ && ${MAC_IMAGE_BUILDER_CLEAN:-} =~ ^(true|false)$ ]] ||
     fail "the build names no builder commit for the image target"
   install -d -m 0755 "$target/var/lib/omarchy" "$target/var/lib/omarchy/image"
   printf 'format=1\nplatform=%s\ncandidate_set=%s\ncandidate_source_commit=%s\nbuilder_commit=%s\nbuilder_tree_clean=%s\nimage_profile=%s\n' \
-    "$PLATFORM" "$set" "$source_commit" "$MAC_IMAGE_BUILDER_COMMIT" "$MAC_IMAGE_BUILDER_CLEAN" "$image_profile" \
+    "$PLATFORM" "$set_name" "$source_commit" "$MAC_IMAGE_BUILDER_COMMIT" "$MAC_IMAGE_BUILDER_CLEAN" "$image_profile" \
     >"$target/var/lib/omarchy/image/target"
   chmod 0644 "$target/var/lib/omarchy/image/target"
   chown root:root "$target/var/lib/omarchy" "$target/var/lib/omarchy/image" "$target/var/lib/omarchy/image/target"

@@ -216,6 +216,13 @@ image_profile_of() {
   fail "the image profile is lab for a lab image, else test for a candidate-only set, else release"
 pass "the image profile is lab for a lab image, else test for a candidate-only set, else release"
 
+mv "$candidates/import.json" "$scratch/import.json.keep"
+if (chown() { :; }; fail() { builder_fail "$@"; }; write_image_target) >/dev/null 2>&1; then
+  fail "the image-target manifest is refused when the candidate set cannot be read"
+fi
+mv "$scratch/import.json.keep" "$candidates/import.json"
+pass "the image-target manifest is refused when the candidate set cannot be read"
+
 for unset_variable in MAC_IMAGE_BUILDER_COMMIT MAC_IMAGE_BUILDER_CLEAN; do
   if (unset "$unset_variable"; chown() { :; }; fail() { builder_fail "$@"; }; write_image_target) >/dev/null 2>&1; then
     fail "the image-target manifest is refused without $unset_variable"
