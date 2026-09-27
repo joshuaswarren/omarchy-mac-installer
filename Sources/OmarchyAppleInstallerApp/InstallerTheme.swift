@@ -31,12 +31,12 @@ enum OmarchyTheme {
   // Try Omarchy's button feedback: in dark mode a primary button brightens to
   // pale cyan under the pointer and turns cyan while pressed; in light mode it
   // deepens instead, so its white label keeps its contrast. A secondary button
-  // takes an accent border and pale text on hover and a lighter surface when
-  // pressed.
+  // takes an accent border and brighter text on hover and a tinted surface
+  // when pressed; every label stays at 4.5:1 or better.
   static let buttonHover = dynamic(light: 0x2A_6FD6, dark: 0xB4_F9F8)
   static let buttonPressed = dynamic(light: 0x00_7197, dark: 0x7D_CFFF)
-  static let buttonHoverText = dynamic(light: 0x2E_7DE9, dark: 0xB4_F9F8)
-  static let buttonPressedSurface = dynamic(light: 0xC4_C8DA, dark: 0x41_4868)
+  static let buttonHoverText = dynamic(light: 0x25_63C9, dark: 0xB4_F9F8)
+  static let buttonPressedSurface = dynamic(light: 0xE6_E8EF, dark: 0x41_4868)
 
   // MARK: Metrics
 
