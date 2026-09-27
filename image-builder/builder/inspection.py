@@ -37,6 +37,10 @@ PLYMOUTH_THEME_FILE = f"usr/share/plymouth/themes/{PLYMOUTH_THEME}/{PLYMOUTH_THE
 SPLASH_WORDS = ("quiet", "splash", "plymouth.ignore-serial-consoles")
 # The m1n1 options update-m1n1 copies from /etc/m1n1.conf into stage 2.
 M1N1_OPTION = re.compile(r"(chosen\.[^=]*|display|mitigations)=.*")
+# What the image-target manifest records, in the order the builder writes it.
+# The runtime reads format and platform; the rest ties a Mac to its image.
+TARGET_FIELDS = ("format", "platform", "candidate_set", "candidate_source_commit", "builder_commit",
+                 "builder_tree_clean", "image_profile")
 
 
 def _load(name: str, file: str):
@@ -358,14 +362,51 @@ def root_owned(path: Path, mode: int) -> None:
     require(stat.S_IMODE(status.st_mode) == mode, f"{path} is not mode {mode:o}")
 
 
-def check_image_target(root: Path) -> str:
+def image_profile(profile: str, candidates: Candidates) -> str:
+    """The profile the image records: lab, else test for a candidate-only set, else release."""
+    if profile == "lab":
+        return "lab"
+    return "test" if candidates.summary.get("candidate_only") is True else "release"
+
+
+def read_image_target(path: Path) -> dict[str, str]:
+    """TARGET_FIELDS from a manifest read as the runtime reads it: comments and
+    unknown keys ignored, any other line refused. Each known key appears once."""
+    fields: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        require("=" in line, f"/var/lib/omarchy/image/target is malformed: {line}")
+        key, value = line.split("=", 1)
+        if key in TARGET_FIELDS:
+            require(key not in fields, f"/var/lib/omarchy/image/target names {key} twice")
+            fields[key] = value
+    missing = [key for key in TARGET_FIELDS if key not in fields]
+    require(not missing, f"/var/lib/omarchy/image/target does not record {', '.join(missing)}")
+    return fields
+
+
+def check_image_target(root: Path, candidates: Candidates, profile: str, report: dict) -> str:
     directory = root / "var/lib/omarchy/image"
     root_owned(directory, 0o755)
     path = directory / "target"
     require(path.is_file(), "/var/lib/omarchy/image/target is missing")
     root_owned(path, 0o644)
-    require(path.read_text() == f"format=1\nplatform={PLATFORM}\n", f"/var/lib/omarchy/image/target does not name {PLATFORM}")
-    return f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned"
+    fields = read_image_target(path)
+    require(fields["format"] == "1" and fields["platform"] == PLATFORM,
+            f"/var/lib/omarchy/image/target does not name {PLATFORM}")
+    require(fields["candidate_set"] == candidates.summary["set"]
+            and fields["candidate_source_commit"] == candidates.summary["source_commit"],
+            "/var/lib/omarchy/image/target records another candidate set")
+    require(re.fullmatch(r"[0-9a-f]{40}", fields["builder_commit"]) is not None,
+            "/var/lib/omarchy/image/target names no builder commit")
+    require(fields["builder_tree_clean"] in ("true", "false"),
+            "/var/lib/omarchy/image/target does not say whether the builder tree was clean")
+    expected = image_profile(profile, candidates)
+    require(fields["image_profile"] == expected, f"/var/lib/omarchy/image/target does not record the {expected} profile")
+    report["image_target"] = {key: fields[key] for key in TARGET_FIELDS if key not in ("format", "platform")}
+    return (f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned, {expected} image of "
+            f"{fields['candidate_set']} from builder {fields['builder_commit'][:12]}")
 
 
 def empty_marker(path: Path, what: str) -> None:
@@ -428,7 +469,7 @@ def check_installed_system(root: Path, report: dict) -> str:
     return f"{len(verification.checks)} installed-system checks"
 
 
-def check_factory(factory: Path, candidates: Candidates) -> str:
+def check_factory(factory: Path, root: Path, candidates: Candidates) -> str:
     sealed = factory / "var/lib/omarchy/factory-sealed"
     require(sealed.is_file() and not sealed.is_symlink(), "@factory is not sealed")
     body = sealed.read_text()
@@ -440,11 +481,15 @@ def check_factory(factory: Path, candidates: Candidates) -> str:
         require(not (factory / rel).exists(), f"@factory carries /{rel}")
     for rel in ("var/lib/omarchy/image/target", "var/lib/omarchy/limine.enabled", "etc/default/limine"):
         require((factory / rel).is_file(), f"@factory lacks /{rel}")
+    target = factory / "var/lib/omarchy/image/target"
+    root_owned(target, 0o644)
+    require(target.read_bytes() == (root / "var/lib/omarchy/image/target").read_bytes(),
+            "@factory's image target is not the image's")
     return "sealed for the set, without fresh-image or owner state, keeping the image target and Limine setup"
 
 
 def inspect(root: Path, candidates_dir: Path, channel: str, factory: Path | None = None,
-            trust: Path = candidate_set.TRUST) -> dict:
+            trust: Path = candidate_set.TRUST, profile: str = "release") -> dict:
     policy = candidate_set.load_policy(trust)
     candidates = Candidates(candidates_dir)
     report: dict = {
@@ -468,14 +513,14 @@ def inspect(root: Path, candidates_dir: Path, channel: str, factory: Path | None
         ("embedded-initramfs", lambda: check_embedded_initramfs(root, report)),
         ("boot-splash", lambda: check_boot_splash(root, report)),
         ("boot-maintenance", lambda: check_maintenance(root)),
-        ("image-target", lambda: check_image_target(root)),
+        ("image-target", lambda: check_image_target(root, candidates, profile, report)),
         ("first-boot", lambda: check_first_boot(root, report)),
         ("snapshots", lambda: check_snapshots(root)),
         ("pacman-config", lambda: check_pacman_config(root, channel, candidates)),
         ("installed-system", lambda: check_installed_system(root, report)),
     ]
     if factory is not None:
-        checks.append(("factory", lambda: check_factory(factory, candidates)))
+        checks.append(("factory", lambda: check_factory(factory, root, candidates)))
     for identifier, check in checks:
         try:
             detail = check()

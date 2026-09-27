@@ -157,6 +157,11 @@ done
 pass "the pre-check refuses a set package resolved elsewhere, a refused package, and a base name that does not resolve"
 
 # ── install order ──────────────────────────────────────────────────────────
+source_commit=$(printf 'a%.0s' {1..40})
+builder_commit=$(printf 'c%.0s' {1..40})
+printf 'candidate_set=apple-test-fixture\ncandidate_source_commit=%s\n' "$source_commit" >>"$scratch/inputs"
+jq '. + {candidate_only: true}' "$candidates/import.json" >"$scratch/import.json" && mv "$scratch/import.json" "$candidates/import.json"
+export MAC_IMAGE_BUILDER_COMMIT=$builder_commit MAC_IMAGE_BUILDER_CLEAN=false
 target=$scratch/target
 mkdir -p "$target"
 mount_api() { :; }
@@ -185,12 +190,38 @@ done
 pass "omarchy-settings installs alone, then the manifest, the runtime and the Apple set, set packages by qualified name"
 pass "the Apple set carries the speaker stack's model profiles and DSP chain"
 
-[[ $(<"$target/var/lib/omarchy/image/target") == $'format=1\nplatform=apple-silicon' ]] ||
-  fail "the image-target manifest names the platform"
+expected_target="format=1
+platform=apple-silicon
+candidate_set=apple-test-fixture
+candidate_source_commit=$source_commit
+builder_commit=$builder_commit
+builder_tree_clean=false
+image_profile=test"
+[[ $(<"$target/var/lib/omarchy/image/target") == "$expected_target" ]] ||
+  fail "the image-target manifest names the platform, then the set, the builder and the profile" \
+    "$(<"$target/var/lib/omarchy/image/target")"
 [[ $(stat -c %a "$target/var/lib/omarchy/image/target" 2>/dev/null || stat -f %Lp "$target/var/lib/omarchy/image/target") == 644 ]] ||
   fail "the image-target manifest is mode 0644"
 [[ ! -e $target/var/lib/omarchy/image-target ]] || fail "only the one manifest path is written"
 pass "the image-target manifest names apple-silicon, mode 0644, at /var/lib/omarchy/image/target"
+pass "the image-target manifest records the candidate set, its source commit, the builder commit and tree state, and the test profile"
+
+image_profile_of() {
+  (profile=$1; jq "$2" "$candidates/import.json" >"$scratch/import.json.new" &&
+    cp "$candidates/import.json" "$scratch/import.json.keep" && mv "$scratch/import.json.new" "$candidates/import.json" &&
+    image_profile; mv "$scratch/import.json.keep" "$candidates/import.json")
+}
+[[ $(image_profile_of lab .) == lab && $(image_profile_of release .) == test &&
+  $(image_profile_of release '. + {candidate_only: false}') == release ]] ||
+  fail "the image profile is lab for a lab image, else test for a candidate-only set, else release"
+pass "the image profile is lab for a lab image, else test for a candidate-only set, else release"
+
+for unset_variable in MAC_IMAGE_BUILDER_COMMIT MAC_IMAGE_BUILDER_CLEAN; do
+  if (unset "$unset_variable"; chown() { :; }; fail() { builder_fail "$@"; }; write_image_target) >/dev/null 2>&1; then
+    fail "the image-target manifest is refused without $unset_variable"
+  fi
+done
+pass "the image-target manifest is not written without the builder commit and tree state"
 
 # ── first boot ─────────────────────────────────────────────────────────────
 make_first_boot() {

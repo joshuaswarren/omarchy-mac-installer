@@ -55,7 +55,7 @@ def package_set(packages) -> str:
 
 
 def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
-          profile=(), provenance_profile=None, name=None, inspection_digest=None) -> None:
+          profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None) -> None:
     lab = "profile=lab" in profile
     name = name or (LAB_NAME if lab else NAME)
     payload = out / "payload"
@@ -81,7 +81,13 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     subprocess.run(["bsdtar", "--format", "zip", "-cf", str(zip_path), "esp", "boot.img", "root.img",
                     "omarchy-volume.icns"], cwd=payload, check=True)
     (out / "installer_data.json").write_text(json.dumps(check.expected_metadata(name)))
+    target = {"candidate_set": INPUTS["candidate_set"], "candidate_source_commit": INPUTS["candidate_source_commit"],
+              "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "lab" if lab else "test"}
+    if target_edit:
+        target = target_edit(target)
     report = {"result": inspection}
+    if target is not None:
+        report["image_target"] = target
     digest = inspection_digest or next((l.split("=", 1)[1] for l in profile if l.startswith("lab_access_sha256=")), None)
     if digest:
         report.update(profile="lab", lab_access_sha256=digest)
@@ -155,6 +161,23 @@ class BuildDirectoryTest(unittest.TestCase):
                                                   else l for l in lines])
         with self.assertRaisesRegex(check.CheckError, "package_set_sha256"):
             check.check_descriptor("edge", self.out)
+
+    def test_inspection_must_read_this_builds_provenance_in_the_image(self):
+        cases = {
+            "does not record the image target": lambda t: None,
+            "candidate_set does not match": lambda t: {**t, "candidate_set": "apple-test-other"},
+            "candidate_source_commit does not match": lambda t: {**t, "candidate_source_commit": "b" * 40},
+            "builder_commit does not match": lambda t: {**t, "builder_commit": "d" * 40},
+            "builder_tree_clean does not match": lambda t: {**t, "builder_tree_clean": "false"},
+            "profile does not match": lambda t: {**t, "image_profile": "lab"},
+        }
+        for message, edit in cases.items():
+            with self.subTest(message):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, target_edit=edit)
+                with self.assertRaisesRegex(check.CheckError, message):
+                    check.check_provenance("edge", self.out)
 
     def test_a_changed_payload(self):
         build(self.out)
