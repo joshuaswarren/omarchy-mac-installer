@@ -117,6 +117,24 @@ def check_candidate_versions(root: Path, candidates: Candidates, report: dict) -
     return f"all {len(candidates.packages)} candidate packages installed at the set's versions"
 
 
+def check_apple_packages(root: Path, report: dict) -> str:
+    """Every package the image's Apple list names is installed, reading the list
+    build-mac-image took: omarchy-apple-silicon.packages, else an older
+    runtime's omarchy-apple.packages, never a link."""
+    path = next((root / name for name in candidate_set.APPLE_LISTS
+                 if (root / name).is_file() and not (root / name).is_symlink()), None)
+    require(path is not None,
+            "the image ships no Apple package list (omarchy-apple-silicon.packages or omarchy-apple.packages)")
+    names = [fields[0] for fields in map(str.split, path.read_text().splitlines())
+             if fields and not fields[0].startswith("#")]
+    require(bool(names), f"{path.name} names no package")
+    versions = installed_versions(root)
+    report["apple_package_list"] = path.name
+    missing = [name for name in names if name not in versions]
+    require(not missing, f"{path.name} names packages that are not installed: {' '.join(missing)}")
+    return f"all {len(names)} packages of {path.name} installed"
+
+
 def check_minimum_versions(root: Path, policy: dict) -> str:
     versions = installed_versions(root)
     details = []
@@ -516,6 +534,7 @@ def inspect(root: Path, candidates_dir: Path, channel: str, factory: Path | None
         ("candidate-versions", lambda: check_candidate_versions(root, candidates, report)),
         ("minimum-versions", lambda: check_minimum_versions(root, policy)),
         ("refused-packages", lambda: check_refused(root, policy)),
+        ("apple-packages", lambda: check_apple_packages(root, report)),
         ("installed-boot-payloads", lambda: check_installed_payloads(root, candidates)),
         ("candidate-files", lambda: check_candidate_files(root, candidates, report)),
         ("m1n1-stage2", lambda: m1n1_stage2(root, candidates, report)),

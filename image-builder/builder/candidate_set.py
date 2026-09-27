@@ -33,6 +33,9 @@ TRUST = Path(__file__).resolve().parent / 'candidate-trust'
 HEX40 = re.compile(r'[0-9a-f]{40}')
 HEX64 = re.compile(r'[0-9a-f]{64}')
 ARCHIVE = re.compile(r'[A-Za-z0-9@._+:-]+\.pkg\.tar\.(xz|zst)')
+# The runtime's Apple package list, by upstream's name, then an older runtime's.
+APPLE_LISTS = ('usr/share/omarchy/install/omarchy-apple-silicon.packages',
+               'usr/share/omarchy/install/omarchy-apple.packages')
 # Where each runtime package records the commit it was built from.
 REVISION_FILES = {
     'omarchy': 'usr/share/doc/omarchy/source-revision',
@@ -159,6 +162,17 @@ def verify_signature(home, path, policy):
 
 def member(package, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(package), name])
+
+
+def apple_list(package):
+    """The Apple package list the runtime archive ships, as (member, text). A
+    link is passed over: bsdtar reads it as empty, and the list it names is a
+    member of its own."""
+    for name in APPLE_LISTS:
+        entry = subprocess.run(['bsdtar', '-tvf', str(package), name], capture_output=True, text=True)
+        if entry.returncode == 0 and entry.stdout.startswith('-'):
+            return name, member(package, name).decode()
+    raise ValueError('the runtime ships no Apple package list (omarchy-apple-silicon.packages or omarchy-apple.packages)')
 
 
 def payload_paths(package):
@@ -291,8 +305,7 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
             pins = [d for d in fields_of[name].get('depend', []) if d.startswith('omarchy=')]
             require(all(pin[len('omarchy='):] in (versions['omarchy'], versions['omarchy'].rsplit('-', 1)[0])
                         for pin in pins), f'{name} pins another omarchy')
-        apple = member(destination / next(p['filename'] for p in packages if p['name'] == 'omarchy'),
-                       'usr/share/omarchy/install/omarchy-apple.packages').decode()
+        _, apple = apple_list(destination / next(p['filename'] for p in packages if p['name'] == 'omarchy'))
         require({'omarchy-mac', 'omarchy-mac-boot'} <= {line.strip() for line in apple.splitlines()},
                 'the Apple package list lacks the add-on or boot package')
     summary = {
