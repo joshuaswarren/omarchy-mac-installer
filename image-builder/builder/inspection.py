@@ -445,20 +445,31 @@ def check_first_boot(root: Path, report: dict) -> str:
     return f"first boot and owner provisioning armed, Limine gate set, {contract}, hardware setup {report['hardware_setup']}"
 
 
+def pacman_templates(root: Path, channel: str) -> tuple[str, Path, Path]:
+    # The Apple template as build-mac-image picks it: omarchy-mac's, else an
+    # older runtime's apple-silicon one, else an even older runtime's aarch64
+    # one; and the runtime's aarch64 mirror list, per channel or single.
+    runtime = root / "usr/share/omarchy/default/pacman"
+    choices = (("omarchy-mac's apple-silicon", root / f"usr/share/omarchy-mac/pacman/pacman-{channel}.conf"),
+               ("the runtime's apple-silicon", runtime / f"apple-silicon/pacman-{channel}.conf"),
+               ("the runtime's aarch64", runtime / f"aarch64/pacman-{channel}.conf"))
+    kind, template = next((choice for choice in choices if choice[1].is_file()), choices[-1])
+    mirrorlist = runtime / f"aarch64/mirrorlist-{channel}"
+    if not mirrorlist.is_file():
+        mirrorlist = runtime / "mirrorlist-aarch64"
+    return kind, template, mirrorlist
+
+
 def check_pacman_config(root: Path, channel: str, candidates: Candidates) -> str:
-    # As the runtime stages it on an Apple Silicon Mac: the apple-silicon
-    # repositories (an older runtime's aarch64 ones), the aarch64 mirror list.
-    templates = root / "usr/share/omarchy/default/pacman"
-    kind = "apple-silicon" if (templates / f"apple-silicon/pacman-{channel}.conf").is_file() else "aarch64"
-    template = templates / f"{kind}/pacman-{channel}.conf"
-    mirrorlist = templates / f"aarch64/mirrorlist-{channel}"
+    kind, template, mirrorlist = pacman_templates(root, channel)
+    require(template.is_file(), f"the image ships no Apple Silicon pacman configuration for {channel}")
     pinned = test_image_pin.pinned(candidates.summary)
     require((root / "etc/pacman.conf").read_bytes() == test_image_pin.render(limine.regular(template), pinned),
-            f"/etc/pacman.conf is not the runtime's {kind} {channel} configuration"
+            f"/etc/pacman.conf is not {kind} {channel} configuration"
             + (" with the test image's pin" if pinned else ""))
     require((root / "etc/pacman.d/mirrorlist").read_bytes() == limine.regular(mirrorlist),
             f"/etc/pacman.d/mirrorlist is not the runtime's aarch64 {channel} mirror list")
-    return (f"the runtime's {kind} {channel} pacman.conf and aarch64 mirror list"
+    return (f"{kind} {channel} pacman.conf and the runtime's aarch64 mirror list"
             + (f"; test image pin: IgnorePkg = {' '.join(pinned)}" if pinned else ""))
 
 
