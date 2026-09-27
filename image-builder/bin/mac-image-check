@@ -490,9 +490,9 @@ def check_tree(root: Path, factory: Path | None = None, profile: str = "release"
 
 
 def inspect_tree(lane: str, root: Path, factory: Path | None, candidates: Path, report: Path | None,
-                 lab_digest: str = "") -> None:
+                 lab_digest: str = "", profile: str = "release") -> None:
     inspection = _inspection()
-    result = inspection.inspect(root, candidates, lane, factory)
+    result = inspection.inspect(root, candidates, lane, factory, profile=profile)
     if lab_digest:
         result["profile"] = "lab"
         result["lab_access_sha256"] = lab_digest
@@ -562,7 +562,7 @@ def check_image(lane: str, root_image: Path, boot_image: Path, esp: Path, candid
             # The lab overlay lives in @ (and @factory); the others carry none.
             for subvolume in ("@", "@home", "@log", "@pkg"):
                 check_lab_access(top / subvolume, f"{subvolume} (unmounted)", profile if subvolume == "@" else "release")
-            inspect_tree(lane, tree, factory, candidates, report, digest)
+            inspect_tree(lane, tree, factory, candidates, report, digest, profile)
         finally:
             for mount in reversed(mounts):
                 subprocess.run(["umount", mount], check=False)
@@ -644,7 +644,21 @@ def check_provenance(lane: str, directory: Path) -> None:
     profile = check_recorded_profile(lane, fields, "PROVENANCE")
     require(report.get("lab_access_sha256") == fields.get("lab_access_sha256", [None])[0],
             "INSPECTION's lab access digest does not match PROVENANCE")
+    check_image_target_record(report, fields, profile)
     check_payload(lane, payload, installer_data, profile)
+
+
+def check_image_target_record(report: dict, fields: dict[str, list[str]], profile: str) -> None:
+    """The provenance the image's target manifest carries, as INSPECTION read it, is this build's."""
+    target = report.get("image_target")
+    require(isinstance(target, dict), "INSPECTION does not record the image target's provenance")
+    for key, field in (("candidate_set", "input.candidate_set"), ("candidate_source_commit", "input.candidate_source_commit"),
+                       ("builder_commit", "builder_commit"), ("builder_tree_clean", "builder_tree_clean")):
+        require(target.get(key) is not None and [target[key]] == fields.get(field),
+                f"the image target's {key} does not match PROVENANCE")
+    require((target.get("image_profile") == "lab") == (profile == "lab")
+            and target.get("image_profile") in ("lab", "test", "release"),
+            "the image target's profile does not match PROVENANCE")
 
 
 def check_recorded_profile(lane: str, fields: dict[str, list[str]], where: str) -> str:
@@ -755,7 +769,7 @@ def main(argv: list[str]) -> int:
             factory = Path(paths[1]) if len(paths) == 2 else None
             check_profile(lane, profile)
             digest = check_tree(Path(paths[0]), factory, profile)
-            inspect_tree(lane, Path(paths[0]), factory, options["candidates"], options.get("report"), digest)
+            inspect_tree(lane, Path(paths[0]), factory, options["candidates"], options.get("report"), digest, profile)
         elif mode == "provenance":
             check_provenance(lane, Path(paths[0]))
         else:

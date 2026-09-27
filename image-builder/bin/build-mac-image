@@ -166,7 +166,7 @@ record_field() {
 }
 
 host_main() {
-  local inputs="" candidates="" cache="" lab_access="" out commit clean=true started=$SECONDS dry_run=false
+  local inputs="" candidates="" cache="" lab_access="" out commit status clean=true started=$SECONDS dry_run=false
   local cache_mounts=() lab_mounts=()
   while (($#)); do
     case $1 in
@@ -229,7 +229,9 @@ host_main() {
 
   commit=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null) || commit=${GITHUB_SHA:-}
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail "cannot tell which commit is building"
-  [[ -z $(git -C "$ROOT" status --porcelain -- . 2>/dev/null) ]] || clean=false
+  # A tree git cannot read is not known to be clean.
+  status=$(git -C "$ROOT" status --porcelain -- . 2>/dev/null) || clean=false
+  [[ -z $status ]] || clean=false
 
   local rootfs_args=("$inputs" "$host_work/rootfs.tar.gz") db_args=("$inputs" "$host_work/dbs")
   if [[ -n $cache ]]; then
@@ -704,12 +706,40 @@ install_settings() {
   unmount_api
 }
 
+# The profile the image records: lab (--lab-access), test for a candidate-only
+# set (every set the importer accepts today), release otherwise.
+image_profile() {
+  local candidate_only
+  candidate_only=$(jq -r '.candidate_only' "$candidates/import.json") || return 1
+  if [[ $profile == lab ]]; then
+    echo lab
+  elif [[ $candidate_only == true ]]; then
+    echo test
+  else
+    echo release
+  fi
+}
+
 # The root-owned image-target manifest, written once the settings package's
 # guard is resident and before any platform package. Deferred hardware setup
-# (omacom/omarchy-mac#528) and the pacman platform guard (#539) both read it.
+# (omacom/omarchy-mac#528) and the pacman platform guard (#539) both read
+# format and platform and ignore the rest: the candidate set, the builder and
+# the profile, which tie a booted Mac (target.booted after its first boot) to
+# the image it came from. The image's own digest is not here, since root.img
+# holds this file: IMAGE, PROVENANCE and the catalog carry it.
 write_image_target() {
+  local set_name source_commit image_profile
+  set_name=$(field candidate_set)
+  source_commit=$(field candidate_source_commit)
+  image_profile=$(image_profile) || fail "could not read the candidate set's kind"
+  [[ $set_name =~ ^[A-Za-z0-9._-]+$ && $source_commit =~ ^[0-9a-f]{40}$ ]] ||
+    fail "the inputs name no candidate set and source commit for the image target"
+  [[ ${MAC_IMAGE_BUILDER_COMMIT:-} =~ ^[0-9a-f]{40}$ && ${MAC_IMAGE_BUILDER_CLEAN:-} =~ ^(true|false)$ ]] ||
+    fail "the build names no builder commit for the image target"
   install -d -m 0755 "$target/var/lib/omarchy" "$target/var/lib/omarchy/image"
-  printf 'format=1\nplatform=%s\n' "$PLATFORM" >"$target/var/lib/omarchy/image/target"
+  printf 'format=1\nplatform=%s\ncandidate_set=%s\ncandidate_source_commit=%s\nbuilder_commit=%s\nbuilder_tree_clean=%s\nimage_profile=%s\n' \
+    "$PLATFORM" "$set_name" "$source_commit" "$MAC_IMAGE_BUILDER_COMMIT" "$MAC_IMAGE_BUILDER_CLEAN" "$image_profile" \
+    >"$target/var/lib/omarchy/image/target"
   chmod 0644 "$target/var/lib/omarchy/image/target"
   chown root:root "$target/var/lib/omarchy" "$target/var/lib/omarchy/image" "$target/var/lib/omarchy/image/target"
 }
