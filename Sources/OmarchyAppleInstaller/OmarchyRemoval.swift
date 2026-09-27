@@ -1,18 +1,62 @@
 #if os(macOS)
   import Foundation
-  import OpenDirectory
+
+  public enum OmarchyRemovalKind: String, Codable, Equatable, Sendable {
+    /// A startup container, its EFI partition and its Linux partitions.
+    case installation
+    /// No installation left; only unallocated space directly after macOS.
+    case freeSpace
+  }
+
+  public struct OmarchyRemovalItem: Codable, Equatable, Sendable {
+    public let title: String
+    public let detail: String
+    public let bytes: UInt64
+    public init(title: String, detail: String, bytes: UInt64) {
+      self.title = title
+      self.detail = detail
+      self.bytes = bytes
+    }
+  }
 
   /// The helper owns the disk plan. The client can only return this expiring ticket.
   public struct OmarchyRemovalTicket: Codable, Equatable, Sendable {
     public let id: UUID
+    public let kind: OmarchyRemovalKind
     public let reclaimBytes: UInt64
     public let macOSBytesAfter: UInt64
-    public init(id: UUID, reclaimBytes: UInt64, macOSBytesAfter: UInt64) {
+    public let deletions: [OmarchyRemovalItem]
+    public let kept: [OmarchyRemovalItem]
+    public let notes: [String]
+    public init(
+      id: UUID, kind: OmarchyRemovalKind = .installation, reclaimBytes: UInt64,
+      macOSBytesAfter: UInt64, deletions: [OmarchyRemovalItem] = [],
+      kept: [OmarchyRemovalItem] = [], notes: [String] = []
+    ) {
       self.id = id
+      self.kind = kind
       self.reclaimBytes = reclaimBytes
       self.macOSBytesAfter = macOSBytesAfter
+      self.deletions = deletions
+      self.kept = kept
+      self.notes = notes
+    }
+    /// A helper older than the app sends tickets without the plan fields.
+    public init(from decoder: any Decoder) throws {
+      let values = try decoder.container(keyedBy: CodingKeys.self)
+      id = try values.decode(UUID.self, forKey: .id)
+      kind = try values.decodeIfPresent(OmarchyRemovalKind.self, forKey: .kind) ?? .installation
+      reclaimBytes = try values.decode(UInt64.self, forKey: .reclaimBytes)
+      macOSBytesAfter = try values.decode(UInt64.self, forKey: .macOSBytesAfter)
+      deletions = try values.decodeIfPresent([OmarchyRemovalItem].self, forKey: .deletions) ?? []
+      kept = try values.decodeIfPresent([OmarchyRemovalItem].self, forKey: .kept) ?? []
+      notes = try values.decodeIfPresent([String].self, forKey: .notes) ?? []
+    }
+    public var confirmation: String {
+      kind == .freeSpace ? Self.freeSpaceConfirmation : Self.confirmation
     }
     public static let confirmation = "delete omarchy installation and data"
+    public static let freeSpaceConfirmation = "return free space to macos"
   }
 
   public struct OmarchyRemovalReply: Codable, Sendable {
@@ -55,6 +99,20 @@
     let uuid: String
     let name: String
     let roles: [String]
+    let group: String?
+    let identifier: String
+    init(uuid: String, name: String, roles: [String], group: String? = nil, identifier: String = "")
+    {
+      self.uuid = uuid
+      self.name = name
+      self.roles = roles
+      self.group = group
+      self.identifier = identifier
+    }
+    static func == (lhs: Self, rhs: Self) -> Bool {
+      lhs.uuid == rhs.uuid && lhs.name == rhs.name && lhs.roles == rhs.roles
+        && lhs.group == rhs.group
+    }
   }
 
   struct RemovalContainer: Codable, Equatable, Sendable {
@@ -73,57 +131,139 @@
     var containers: [RemovalContainer]
   }
 
+  /// One installation made by the Asahi installer engine: this app's own
+  /// layout, older omarchy-mac installs and plain Asahi installs alike.
+  struct RemovalInstallation: Codable, Equatable, Sendable {
+    let name: String
+    let stub: RemovalPartition
+    let system: RemovalVolume
+    let esp: RemovalPartition
+    let linux: [RemovalPartition]
+    var members: [RemovalPartition] { [stub, esp] + linux }
+
+    /// The same partitions and volume with the BSD identifiers they have now.
+    func live(in snapshot: RemovalSnapshot) -> RemovalInstallation? {
+      func current(_ part: RemovalPartition) -> RemovalPartition? {
+        snapshot.partitions.first { $0 == part }
+      }
+      guard let stub = current(stub), let esp = current(esp),
+        let system = snapshot.containers.first(where: { $0.storeUUID == stub.uuid })?.volumes
+          .first(where: { $0 == system })
+      else { return nil }
+      let linux = self.linux.compactMap(current)
+      guard linux.count == self.linux.count else { return nil }
+      return RemovalInstallation(name: name, stub: stub, system: system, esp: esp, linux: linux)
+    }
+  }
+
+  enum RemovalStartup: Equatable, Sendable {
+    case macOS
+    case other(String)
+    case nextStartupOverride
+    case unknown
+  }
+
   struct OmarchyRemovalPlan: Codable, Equatable, Sendable {
+    let kind: OmarchyRemovalKind
     let snapshot: RemovalSnapshot
+    let installation: RemovalInstallation?
+    let evidence: RemovalEvidence?
     let members: [RemovalPartition]
     let macOS: RemovalPartition
     let targetMacOSBytes: UInt64
 
-    init(snapshot: RemovalSnapshot) throws {
-      let parts = snapshot.partitions.sorted { $0.offset < $1.offset }
-      // A deliberately narrow layout: Apple ISC, booted macOS, exactly one complete
-      // Omarchy installation, Apple Recovery. Unknown and partial layouts are refused.
-      guard parts.count == 7,
-        parts[0].type == "Apple_APFS_ISC", parts[6].type == "Apple_APFS_Recovery",
-        parts[1].type == "Apple_APFS", parts[1].uuid == snapshot.macOSStoreUUID,
-        parts[2].type == "Apple_APFS", parts[2].size <= 4 * 1_024 * 1_024 * 1_024,
-        parts[3].type == "EFI", parts[3].name == "EFI - OMARC",
-        parts[4].type == "Linux Filesystem", parts[5].type == "Linux Filesystem",
-        Set(parts.map(\.uuid)).count == parts.count,
-        zip(parts, parts.dropFirst()).allSatisfy({ $0.end <= $1.offset }),
-        (2...4).allSatisfy({ parts[$0].end == parts[$0 + 1].offset }),
-        parts.last!.end <= snapshot.diskSize
-      else {
-        throw RemovalFailure(
-          message:
-            "No complete Omarchy installation with space that can be returned to this macOS partition was found. Partial installations and unfamiliar disk layouts need a separate review. Nothing was changed."
-        )
-      }
-      guard let stub = snapshot.containers.first(where: { $0.storeUUID == parts[2].uuid }),
-        stub.volumes.count == 4,
-        Set(stub.volumes.map(\.uuid)).count == 4,
-        stub.volumes.filter({ $0.roles == ["System"] && $0.name == "Omarchy" }).count == 1,
-        stub.volumes.filter({
-          $0.roles == ["Data"] && ["Omarchy - Data", "Omarchy-Data"].contains($0.name)
-        }).count == 1,
-        stub.volumes.filter({ $0.roles == ["Preboot"] && $0.name == "Preboot" }).count == 1,
-        stub.volumes.filter({ $0.roles == ["Recovery"] && $0.name == "Recovery" }).count == 1,
-        snapshot.containers.filter({
-          $0.storeUUID == parts[1].uuid && $0.uuid == snapshot.macOSContainerUUID
-        }).count == 1
-      else {
-        throw RemovalFailure(
-          message:
-            "The Omarchy startup container could not be identified unambiguously. Nothing was changed."
-        )
-      }
+    /// Read-only. Every check that can refuse happens here, before a ticket exists.
+    init(disks: any RemovalDiskOperating) throws {
+      let snapshot = try disks.snapshot()
       self.snapshot = snapshot
-      members = Array(parts[2...5])
-      macOS = parts[1]
-      targetMacOSBytes = parts[6].offset - parts[1].offset
+      switch try RemovalLayout.recognize(snapshot) {
+      case .freeSpace(let macOS, let target):
+        let limit = try disks.growLimit(macOS, disk: snapshot.disk)
+        guard limit.addingReportingOverflow(1_048_576).partialValue >= target else {
+          throw RemovalFailure(
+            message: RemovalText.growthLimited(free: target - macOS.size, limit: limit))
+        }
+        kind = .freeSpace
+        installation = nil
+        evidence = nil
+        members = []
+        self.macOS = macOS
+        targetMacOSBytes = target
+      case .installation(let found, let macOS, let target):
+        let evidence: RemovalEvidence
+        do { evidence = try disks.evidence(for: found, disk: snapshot.disk) } catch {
+          let detail = (error as? RemovalFailure)?.message ?? "macOS couldn't read them"
+          throw RemovalFailure(message: RemovalText.unreadable(found, detail: detail))
+        }
+        if let reason = evidence.problem(for: found) {
+          throw RemovalFailure(message: RemovalText.unconfirmed(found, reason: reason))
+        }
+        try RemovalText.requireMacOSStartup(disks.startup(snapshot))
+        kind = .installation
+        installation = found
+        self.evidence = evidence
+        members = found.members
+        self.macOS = macOS
+        targetMacOSBytes = target
+      }
     }
 
     var reclaimBytes: UInt64 { targetMacOSBytes - macOS.size }
+
+    var summary: String {
+      if let installation {
+        return
+          "Found “\(installation.name)”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
+      }
+      return
+        "No installation was found, but \(RemovalText.size(reclaimBytes)) directly after macOS is unallocated. macOS can take it back. Nothing will be deleted."
+    }
+
+    func ticket(id: UUID) -> OmarchyRemovalTicket {
+      let parts = snapshot.partitions.sorted { $0.offset < $1.offset }
+      var deletions = [OmarchyRemovalItem]()
+      var notes = [String]()
+      if let installation {
+        deletions.append(
+          OmarchyRemovalItem(
+            title: "Startup container “\(installation.name)”",
+            detail: "\(installation.stub.identifier) · APFS", bytes: installation.stub.size))
+        let espName = installation.esp.name.isEmpty ? "" : " “\(installation.esp.name)”"
+        deletions.append(
+          OmarchyRemovalItem(
+            title: "EFI partition\(espName)", detail: installation.esp.identifier,
+            bytes: installation.esp.size))
+        for part in installation.linux {
+          deletions.append(
+            OmarchyRemovalItem(title: "Linux partition", detail: part.identifier, bytes: part.size))
+        }
+        if installation.linux.isEmpty {
+          notes.append(
+            "This installation has no Linux partitions of its own. If a Linux system elsewhere, for example on an external disk, starts through it, that system won’t start after removal. Its data isn’t touched."
+          )
+        }
+      } else {
+        notes.append(
+          "macOS takes all the unallocated space directly after it, whatever put it there.")
+      }
+      let macOSName =
+        snapshot.containers.first { $0.uuid == snapshot.macOSContainerUUID }?.volumes
+        .first { $0.roles == ["System"] }?.name ?? "macOS"
+      let kept = [
+        OmarchyRemovalItem(
+          title: "macOS “\(macOSName)”",
+          detail: "\(macOS.identifier) · grows to \(RemovalText.size(targetMacOSBytes))",
+          bytes: macOS.size),
+        OmarchyRemovalItem(
+          title: "Apple system container", detail: parts[0].identifier, bytes: parts[0].size),
+        OmarchyRemovalItem(
+          title: "Apple Recovery", detail: parts[parts.count - 1].identifier,
+          bytes: parts[parts.count - 1].size),
+      ]
+      return OmarchyRemovalTicket(
+        id: id, kind: kind, reclaimBytes: reclaimBytes, macOSBytesAfter: targetMacOSBytes,
+        deletions: deletions, kept: kept, notes: notes)
+    }
 
     /// Every intermediate state must be exactly the approved layout minus the
     /// partitions already removed. This also proves the gap is adjacent to macOS.
@@ -152,189 +292,78 @@
         throw RemovalFailure(message: "The disk layout changed unexpectedly. Removal stopped.")
       }
     }
+
+    func live(_ part: RemovalPartition, in current: RemovalSnapshot) throws -> RemovalPartition {
+      guard let found = current.partitions.first(where: { $0 == part }) else {
+        throw RemovalFailure(message: "The disk layout changed unexpectedly. Removal stopped.")
+      }
+      return found
+    }
   }
 
   protocol RemovalDiskOperating: Sendable {
     func snapshot() throws -> RemovalSnapshot
-    func deleteContainer(storeUUID: String) throws
-    func erasePartition(uuid: String) throws
-    func growContainer(storeUUID: String) throws
+    func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence
+    func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup
+    func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64
+    func deleteContainer(_ stub: RemovalPartition, disk: String) throws
+    func erasePartition(_ partition: RemovalPartition, disk: String) throws
+    func growContainer(_ macOS: RemovalPartition, disk: String) throws
   }
 
   struct OmarchyRemovalExecutor: Sendable {
     let disks: any RemovalDiskOperating
 
     func execute(_ plan: OmarchyRemovalPlan, record: (String) throws -> Void) throws {
-      try plan.validate(disks.snapshot(), removed: [])
+      let first = try disks.snapshot()
+      try plan.validate(first, removed: [])
+      if let installation = plan.installation {
+        // The ticket may be minutes old: the files that proved this is one
+        // installation, and the startup choice, must still be exactly as approved.
+        guard let live = installation.live(in: first),
+          try disks.evidence(for: live, disk: first.disk) == plan.evidence
+        else {
+          throw RemovalFailure(
+            message:
+              "The installation changed since you reviewed it. Close this window and review removal again."
+          )
+        }
+        try RemovalText.requireMacOSStartup(disks.startup(first))
+      }
       var removed = Set<String>()
       // Delete the startup container first: if a volume is busy, diskutil refuses
       // before the Linux partitions are touched. No force-unmount or -force fallback.
       for (index, member) in plan.members.enumerated() {
-        try plan.validate(disks.snapshot(), removed: removed)
+        let current = try disks.snapshot()
+        try plan.validate(current, removed: removed)
+        let target = try plan.live(member, in: current)
         try record("removing-\(member.uuid)")
         if index == 0 {
           // Without a new name, current macOS deletes the physical store too.
-          try disks.deleteContainer(storeUUID: member.uuid)
+          try disks.deleteContainer(target, disk: current.disk)
         } else {
-          try disks.erasePartition(uuid: member.uuid)
+          try disks.erasePartition(target, disk: current.disk)
         }
         removed.insert(member.uuid)
         try plan.validate(disks.snapshot(), removed: removed)
       }
-      try record("returning-space-to-macos")
-      try plan.validate(disks.snapshot(), removed: removed)
-      try disks.growContainer(storeUUID: plan.macOS.uuid)
-      try plan.validate(disks.snapshot(), removed: removed, expanded: true)
-      try record("complete")
-    }
-  }
-
-  /// All executable paths and verbs are fixed here, never supplied by the XPC peer.
-  struct MacRemovalDiskOperator: RemovalDiskOperating {
-    var commands: @Sendable ([String]) throws -> Data = Self.systemRun
-    var targetType: @Sendable () throws -> String = {
-      try SysctlHardwarePropertyReader().string(named: "hw.targettype")
-    }
-
-    func snapshot() throws -> RemovalSnapshot {
-      let target = try targetType().lowercased()
-      guard target != "j614s", target != "apple,j614s" else {
-        throw RemovalFailure(message: "Removal is not supported on this Mac model.")
-      }
-      let root = try plist(["info", "-plist", "/"])
-      guard root["Internal"] as? Bool == true,
-        let stores = root["APFSPhysicalStores"] as? [[String: Any]], stores.count == 1,
-        let store = stores.first?["APFSPhysicalStore"] as? String,
-        let rootReference = root["APFSContainerReference"] as? String
-      else { throw invalid() }
-      let physical = try plist(["info", "-plist", store])
-      let disk = try string(physical, "ParentWholeDisk")
-      let diskInfo = try plist(["info", "-plist", disk])
-      guard diskInfo["Internal"] as? Bool == true,
-        diskInfo["WholeDisk"] as? Bool == true,
-        ["Physical", "Unknown"].contains(diskInfo["VirtualOrPhysical"] as? String ?? ""),
-        diskInfo["Content"] as? String == "GUID_partition_scheme"
-      else { throw invalid() }
-      // Apple NVMe disks can report VirtualOrPhysical=Unknown in `info`.
-      // Require membership in diskutil's independent internal/physical listing;
-      // never infer that Unknown alone means a physical disk.
-      let list = try plist(["list", "-plist", "internal", "physical"])
-      guard let whole = list["AllDisksAndPartitions"] as? [[String: Any]],
-        whole.filter({ $0["DeviceIdentifier"] as? String == disk }).count == 1,
-        let entry = whole.first(where: { $0["DeviceIdentifier"] as? String == disk }),
-        entry["Content"] as? String == "GUID_partition_scheme",
-        let records = entry["Partitions"] as? [[String: Any]], records.count <= 32
-      else { throw invalid() }
-      let parts = try records.map { item -> RemovalPartition in
-        let info = try plist(["info", "-plist", try string(item, "DeviceIdentifier")])
-        guard try string(info, "ParentWholeDisk") == disk else { throw invalid() }
-        let offset = try number(info, "PartitionMapPartitionOffset")
-        let size = try number(info, "Size")
-        guard size > 0, !offset.addingReportingOverflow(size).overflow else { throw invalid() }
-        return RemovalPartition(
-          identifier: try string(info, "DeviceIdentifier"), uuid: try uuid(info, "DiskUUID"),
-          type: try string(info, "Content"), offset: offset, size: size,
-          name: info["VolumeName"] as? String ?? "")
-      }.sorted { $0.offset < $1.offset }
-      let apfs = try plist(["apfs", "list", "-plist"])
-      guard let rawContainers = apfs["Containers"] as? [[String: Any]] else { throw invalid() }
-      var containers = [RemovalContainer]()
-      var rootUUID: String?
-      for raw in rawContainers {
-        guard let physicalStores = raw["PhysicalStores"] as? [[String: Any]] else {
-          throw invalid()
-        }
-        let matching = physicalStores.compactMap { item in
-          parts.first { $0.identifier == item["DeviceIdentifier"] as? String }
-        }
-        if matching.isEmpty { continue }
-        guard matching.count == 1, physicalStores.count == 1,
-          let volumes = raw["Volumes"] as? [[String: Any]]
-        else { throw invalid() }
-        let parsed = try volumes.map { item -> RemovalVolume in
-          guard let roles = item["Roles"] as? [String] else { throw invalid() }
-          return RemovalVolume(
-            uuid: try uuid(item, "APFSVolumeUUID"), name: try string(item, "Name"),
-            roles: roles.sorted())
-        }.sorted { $0.uuid < $1.uuid }
-        let containerUUID = try uuid(raw, "APFSContainerUUID")
-        if raw["ContainerReference"] as? String == rootReference { rootUUID = containerUUID }
-        containers.append(
-          RemovalContainer(uuid: containerUUID, storeUUID: matching[0].uuid, volumes: parsed))
-      }
-      guard let rootUUID else { throw invalid() }
-      return RemovalSnapshot(
-        disk: disk, devicePath: try string(diskInfo, "DeviceTreePath"),
-        diskSize: try number(diskInfo, "Size"), macOSStoreUUID: try uuid(physical, "DiskUUID"),
-        macOSContainerUUID: rootUUID, partitions: parts,
-        containers: containers.sorted { $0.uuid < $1.uuid })
-    }
-
-    func deleteContainer(storeUUID: String) throws {
-      try mutate(["apfs", "deleteContainer", storeUUID])
-    }
-    func erasePartition(uuid: String) throws { try mutate(["eraseVolume", "free", "none", uuid]) }
-    func growContainer(storeUUID: String) throws {
-      try mutate(["apfs", "resizeContainer", storeUUID, "0"])
-    }
-
-    private func mutate(_ arguments: [String]) throws { _ = try run(arguments) }
-    private func plist(_ arguments: [String]) throws -> [String: Any] {
-      guard
-        let value = try PropertyListSerialization.propertyList(from: run(arguments), format: nil)
-          as? [String: Any]
-      else { throw invalid() }
-      return value
-    }
-    private func run(_ arguments: [String]) throws -> Data { try commands(arguments) }
-
-    private static func systemRun(_ arguments: [String]) throws -> Data {
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-      process.arguments = arguments
-      process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"]
-      let pipe = Pipe()
-      process.standardOutput = pipe
-      process.standardError = FileHandle.nullDevice
-      process.standardInput = FileHandle.nullDevice
-      try process.run()
-      let result = pipe.fileHandleForReading.readDataToEndOfFile()
-      process.waitUntilExit()
-      guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+      // With nothing deleted yet (free space only), a refused preflight must
+      // not leave a journal behind that blocks later installs.
+      if !plan.members.isEmpty { try record("returning-space-to-macos") }
+      let current = try disks.snapshot()
+      try plan.validate(current, removed: removed)
+      let macOS = try plan.live(plan.macOS, in: current)
+      let limit = try disks.growLimit(macOS, disk: current.disk)
+      guard limit.addingReportingOverflow(1_048_576).partialValue >= plan.targetMacOSBytes else {
         throw RemovalFailure(
           message:
-            "macOS could not complete the disk operation (code \(process.terminationStatus)).")
+            "macOS reports it can only grow to \(RemovalText.size(limit)), not \(RemovalText.size(plan.targetMacOSBytes))."
+        )
       }
-      guard result.count <= 8 * 1_024 * 1_024 else {
-        throw RemovalFailure(message: "The disk response was too large.")
-      }
-      return result
-    }
-    private func string(_ value: [String: Any], _ key: String) throws -> String {
-      guard let result = value[key] as? String, !result.isEmpty else { throw invalid() }
-      return result
-    }
-    private func uuid(_ value: [String: Any], _ key: String) throws -> String {
-      guard let result = UUID(uuidString: try string(value, key)) else { throw invalid() }
-      return result.uuidString
-    }
-    private func number(_ value: [String: Any], _ key: String) throws -> UInt64 {
-      guard let result = value[key] as? NSNumber, result.int64Value >= 0 else { throw invalid() }
-      return result.uint64Value
-    }
-    private func invalid() -> RemovalFailure {
-      RemovalFailure(
-        message: "The internal macOS disk layout could not be verified.")
-    }
-  }
-
-  func requireRemovalAdministrator(_ authorization: MachineOwnerAuthorization) throws {
-    let node = try ODNode(session: ODSession.default(), type: UInt32(kODNodeTypeLocalNodes))
-    let user = try node.record(
-      withRecordType: kODRecordTypeUsers, name: authorization.username, attributes: nil)
-    let admin = try node.record(withRecordType: kODRecordTypeGroups, name: "admin", attributes: nil)
-    do { try admin.isMemberRecord(user) } catch {
-      throw RemovalFailure(message: "Use a macOS administrator account to remove Omarchy.")
+      if plan.members.isEmpty { try record("returning-space-to-macos") }
+      try disks.growContainer(macOS, disk: current.disk)
+      try plan.validate(disks.snapshot(), removed: removed, expanded: true)
+      try record("complete")
     }
   }
 #endif

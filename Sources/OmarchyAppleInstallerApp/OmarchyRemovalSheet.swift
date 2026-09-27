@@ -23,13 +23,13 @@ struct OmarchyRemovalSheet: View {
   #endif
 
   private var canRemove: Bool {
-    ticket != nil && !busy && !submitted && phrase == OmarchyRemovalTicket.confirmation
+    ticket != nil && !busy && !submitted && phrase == ticket?.confirmation
       && (isSimulation || (!username.isEmpty && !password.isEmpty))
   }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
-      Text(completed ? "Omarchy removed" : "Remove Omarchy")
+      Text(heading)
         .font(OmarchyTheme.title)
         .foregroundStyle(OmarchyTheme.accent)
       #if DEBUG
@@ -51,21 +51,32 @@ struct OmarchyRemovalSheet: View {
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityIdentifier("removal-message")
       if let ticket, !submitted {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
+          if !ticket.deletions.isEmpty {
+            planSection("Deleted", items: ticket.deletions)
+          }
           summaryRow("Space returned to macOS", value: PlainLanguage.bytes(ticket.reclaimBytes))
           summaryRow("macOS after removal", value: PlainLanguage.bytes(ticket.macOSBytesAfter))
+          planSection("Stays as it is", items: ticket.kept)
         }
         .padding(14)
         .background(OmarchyTheme.card, in: RoundedRectangle(cornerRadius: 8))
+        ForEach(ticket.notes, id: \.self) { note in
+          Text(note)
+            .font(OmarchyTheme.body)
+            .fixedSize(horizontal: false, vertical: true)
+        }
         Text(
-          "macOS, your macOS files, and Apple Recovery stay as they are. All Omarchy data will be deleted. Removal can’t be undone."
+          ticket.kind == .freeSpace
+            ? "Your macOS files stay as they are. This can’t be undone."
+            : "Your macOS files stay as they are. Everything in the deleted partitions is lost. Removal can’t be undone."
         )
         .font(OmarchyTheme.body)
         .fixedSize(horizontal: false, vertical: true)
         VStack(alignment: .leading, spacing: 7) {
           Text("Type this to confirm:")
             .foregroundStyle(OmarchyTheme.secondaryText)
-          Text(OmarchyRemovalTicket.confirmation)
+          Text(ticket.confirmation)
             .font(OmarchyTheme.heading)
             .textSelection(.enabled)
           TextField("Confirmation phrase", text: $phrase)
@@ -107,11 +118,12 @@ struct OmarchyRemovalSheet: View {
         .keyboardShortcut(.cancelAction)
         .focusEffectDisabled()
         .disabled(busy)
-        if ticket != nil && !submitted {
-          Button("Remove Omarchy", role: .destructive) { Task { await remove() } }
-            .omarchyDangerButton()
-            .disabled(!canRemove)
-            .accessibilityIdentifier("remove-omarchy")
+        if let ticket, !submitted {
+          Button(ticket.kind == .freeSpace ? "Return Space" : "Remove Omarchy", role: .destructive)
+          { Task { await remove() } }
+          .omarchyDangerButton()
+          .disabled(!canRemove)
+          .accessibilityIdentifier("remove-omarchy")
         }
       }
       .padding(.top, 4)
@@ -125,6 +137,30 @@ struct OmarchyRemovalSheet: View {
     .task { await prepare() }
     .onDisappear { password = "" }
     .onChange(of: busy) { _, value in onBusyChanged(value) }
+  }
+
+  private var heading: String {
+    if ticket?.kind == .freeSpace { return completed ? "Space returned" : "Return free space" }
+    return completed ? "Omarchy removed" : "Remove Omarchy"
+  }
+
+  private func planSection(_ title: String, items: [OmarchyRemovalItem]) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(title).foregroundStyle(OmarchyTheme.secondaryText)
+      ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+        HStack(alignment: .firstTextBaseline) {
+          VStack(alignment: .leading, spacing: 1) {
+            Text(item.title)
+            Text(item.detail)
+              .font(OmarchyTheme.detail)
+              .foregroundStyle(OmarchyTheme.secondaryText)
+          }
+          Spacer()
+          Text(PlainLanguage.bytes(item.bytes)).fontWeight(.medium)
+        }
+      }
+    }
+    .font(OmarchyTheme.body)
   }
 
   private func summaryRow(_ label: String, value: String) -> some View {
@@ -151,9 +187,7 @@ struct OmarchyRemovalSheet: View {
         if scenario == .none || scenario == .ambiguous || scenario == .helperUnavailable {
           message = scenario.message
         } else {
-          ticket = OmarchyRemovalTicket(
-            id: UUID(), reclaimBytes: 275_000_000_000, macOSBytesAfter: 995_000_000_000)
-          message = "Omarchy and all files stored in it will be permanently deleted."
+          (ticket, message) = scenario.previewTicket
         }
         return
       }
@@ -196,7 +230,7 @@ struct OmarchyRemovalSheet: View {
           connectionLost()
           return
         }
-        completed = scenario == .success
+        completed = [.success, .asahi, .freeSpace].contains(scenario)
         if [.interrupted, .reclaimFailed, .disconnected].contains(scenario) { onRequiresReview() }
         message = scenario.message
         return
@@ -224,6 +258,8 @@ struct OmarchyRemovalSheet: View {
 #if DEBUG
   private enum RemovalPreviewScenario: String, CaseIterable {
     case success = "Complete removal"
+    case asahi = "Older omarchy-mac installation"
+    case freeSpace = "Free space only"
     case none = "No installation"
     case ambiguous = "Unfamiliar or partial layout"
     case helperUnavailable = "Helper unavailable"
@@ -233,12 +269,70 @@ struct OmarchyRemovalSheet: View {
     case reclaimFailed = "macOS resize failed"
     case disconnected = "Connection lost"
 
+    var previewTicket: (OmarchyRemovalTicket, String) {
+      let kept = [
+        OmarchyRemovalItem(
+          title: "macOS “Macintosh HD”", detail: "disk0s2 · grows to 494.4 GB",
+          bytes: 461_600_000_000),
+        OmarchyRemovalItem(title: "Apple system container", detail: "disk0s1", bytes: 524_288_000),
+        OmarchyRemovalItem(title: "Apple Recovery", detail: "disk0s6", bytes: 5_368_664_064),
+      ]
+      switch self {
+      case .freeSpace:
+        return (
+          OmarchyRemovalTicket(
+            id: UUID(), kind: .freeSpace, reclaimBytes: 32_800_505_856,
+            macOSBytesAfter: 494_400_505_856, kept: kept,
+            notes: [
+              "macOS takes all the unallocated space directly after it, whatever put it there."
+            ]),
+          "No installation was found, but 32.8 GB directly after macOS is unallocated. macOS can take it back. Nothing will be deleted."
+        )
+      case .asahi:
+        return (
+          OmarchyRemovalTicket(
+            id: UUID(), reclaimBytes: 32_800_505_856, macOSBytesAfter: 494_400_505_856,
+            deletions: [
+              OmarchyRemovalItem(
+                title: "Startup container “Arch Linux ARM”", detail: "disk0s3 · APFS",
+                bytes: 2_499_805_184),
+              OmarchyRemovalItem(
+                title: "EFI partition “EFI - ARCH”", detail: "disk0s4", bytes: 524_288_000),
+              OmarchyRemovalItem(
+                title: "Linux partition", detail: "disk0s5", bytes: 29_776_412_672),
+            ], kept: kept),
+          "Found “Arch Linux ARM”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
+        )
+      default:
+        return (
+          OmarchyRemovalTicket(
+            id: UUID(), reclaimBytes: 275_000_000_000, macOSBytesAfter: 995_000_000_000,
+            deletions: [
+              OmarchyRemovalItem(
+                title: "Startup container “Omarchy”", detail: "disk0s3 · APFS",
+                bytes: 2_499_805_184),
+              OmarchyRemovalItem(
+                title: "EFI partition “EFI - OMARC”", detail: "disk0s4", bytes: 524_288_000),
+              OmarchyRemovalItem(title: "Linux partition", detail: "disk0s5", bytes: 2_147_483_648),
+              OmarchyRemovalItem(
+                title: "Linux partition", detail: "disk0s6", bytes: 269_828_710_400),
+            ], kept: kept),
+          "Found “Omarchy”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
+        )
+      }
+    }
+
     var message: String {
       switch self {
-      case .success: "Omarchy and its data have been removed. The freed space is now part of macOS."
-      case .none: "No existing Omarchy installation was found. Nothing was changed."
+      case .success:
+        "“Omarchy” and its data have been removed. The freed space is now part of macOS."
+      case .asahi:
+        "“Arch Linux ARM” and its data have been removed. The freed space is now part of macOS."
+      case .freeSpace: "The free space is now part of macOS."
+      case .none:
+        "No Omarchy installation, or other installation made with the Asahi installer, was found, and there’s no unallocated space after macOS. Nothing was changed."
       case .ambiguous:
-        "The installation or disk layout could not be identified safely. Partial installations need a separate review. Nothing was changed."
+        "Found disk0s4 (EFI partition, “EFI - ARCH”, 524.3 MB); disk0s5 (Linux partition, 29.8 GB) without the startup container every installation made with the Asahi installer has. This looks like a partly removed installation, which needs a manual review. Nothing was changed."
       case .helperUnavailable:
         "The removal service isn’t available. Run the downloaded \(PlainLanguage.installerPackage) again, then try again. No disk changes were made."
       case .credentials:
