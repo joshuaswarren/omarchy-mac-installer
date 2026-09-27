@@ -87,7 +87,8 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       transcript.append(try JSONSerialization.data(withJSONObject: message))
       transcript.append(0x0A)
     }
-    return try XCTUnwrap(AppleInstallerTrustCore().validateEngineTranscript(transcript).inventory)
+    let validated = try AppleInstallerTrustCore().validateEngineTranscript(transcript)
+    return try XCTUnwrap(validated.inventory)
   }
 
   func testResizeCeilingWithholdsADriftMargin() throws {
