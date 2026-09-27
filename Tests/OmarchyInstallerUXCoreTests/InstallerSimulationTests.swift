@@ -23,6 +23,40 @@
       XCTAssertFalse(acknowledged)
     }
 
+    func testTheThreeChannelStatesPreviewDistinctly() async throws {
+      let expected: [(InstallerSimulationScenario, ReleaseChannelAvailability, String, String)] = [
+        (
+          .noMacRelease, .noRelease, "Edge — No Mac release yet",
+          "No Mac release on this channel yet"
+        ),
+        (
+          .modelNotOnChannel,
+          .modelUnavailable(
+            supportedDeviceIdentifiers: InstallerSimulationEnvironment.simulatedCatalogDevices),
+          "Edge — Not available for this Mac", PlainLanguage.blockedHeadline
+        ),
+        (
+          .channelUnreachable, .checkFailed(.network), "Edge — Couldn’t load",
+          "This channel’s release list wasn’t found"
+        ),
+      ]
+      for (scenario, availability, menuItem, headline) in expected {
+        let session = InstallerSession(
+          environment: InstallerSimulationEnvironment(scenario: scenario, delay: .zero))
+        await session.inspect()
+        await session.refreshChannelAvailability()
+        XCTAssertEqual(session.channelAvailability[.edge], availability, scenario.title)
+        XCTAssertEqual(session.channelAvailability[.stable], .noRelease, scenario.title)
+        let item = PlainLanguage.channelMenuItem(.edge, availability: availability)
+        XCTAssertEqual(item, menuItem, scenario.title)
+        await session.continueToPlan()
+        guard case .failed(let failure) = session.phase else {
+          return XCTFail(scenario.title)
+        }
+        XCTAssertEqual(failure.headline, headline, scenario.title)
+      }
+    }
+
     func testSyntheticJournalPassesRealDecoder() throws {
       let data = InstallerSimulationEnvironment.journalLines.reduce(into: Data()) { $0.append($1) }
       let transcript = try AppleInstallerTrustCore().validateEngineTranscript(data)
@@ -56,7 +90,8 @@
         }
         await session.continueToPlan()
         switch scenario {
-        case .downloadFailure, .invalidDownload, .outdatedInstaller, .emptyChannel, .planFailure:
+        case .downloadFailure, .invalidDownload, .outdatedInstaller, .planFailure,
+          .noMacRelease, .modelNotOnChannel, .channelUnreachable:
           guard case .failed = session.phase else { return XCTFail(scenario.title) }
           XCTAssertFalse(session.hasExecutionStarted)
           XCTAssertTrue(session.canInspect)

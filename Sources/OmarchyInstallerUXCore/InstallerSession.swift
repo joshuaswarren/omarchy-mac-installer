@@ -58,6 +58,22 @@
     public let allowsEncryption: Bool
     public private(set) var prefetchState: PayloadPrefetchState = .verified
 
+    /// What each channel offers this Mac, for the channel menu. Empty until
+    /// the first check finishes; a channel missing here was not checked.
+    public private(set) var channelAvailability = [ReleaseChannel: ReleaseChannelAvailability]()
+    private var channelAvailabilityRequest = 0
+
+    /// Re-reads every channel's signed catalog. Separate from `inspect()` so
+    /// a slow or offline channel never holds up the page. Only the latest
+    /// request's answer is kept, so a slow earlier one cannot overwrite it.
+    public func refreshChannelAvailability() async {
+      channelAvailabilityRequest += 1
+      let request = channelAvailabilityRequest
+      let availability = await environment.channelAvailability()
+      guard request == channelAvailabilityRequest else { return }
+      channelAvailability = availability
+    }
+
     public var isSimulation: Bool { environment.isSimulation }
     public var canInspect: Bool { !isBusy && !isExecuting && !hasExecutionStarted }
     public var canChangeChannel: Bool {

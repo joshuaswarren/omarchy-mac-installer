@@ -194,7 +194,7 @@ ENV_FILE="$WORK_DIR/cutover-state.env"
 # shellcheck source=../Packaging/identity.conf
 source "$APP_DIR/Packaging/identity.conf"
 KEY_SERVICE="$INSTALLER_CATALOG_KEY_SERVICE"
-PUBLIC_BASE="$INSTALLER_PUBLIC_BASE"
+PUBLIC_BASE="$INSTALLER_PUBLIC_BASE/$INSTALLER_STREAM_PATH"
 R2_BUCKET="$INSTALLER_R2_BUCKET"
 R2_ENDPOINT="$INSTALLER_R2_ENDPOINT"
 SOURCE_TAG="v4.0.2-mac.1.19.090426"
@@ -355,7 +355,7 @@ else
     for entry in "${MISSING_ASSETS[@]}"; do
       asset=${entry%%:*}
       local_path=${entry#*:}
-      run aws s3 cp "$local_path" "s3://$R2_BUCKET/releases/$OS_TAG/$asset" \
+      run aws s3 cp "$local_path" "s3://$R2_BUCKET/$INSTALLER_STREAM_PATH/releases/$OS_TAG/$asset" \
         --endpoint-url "$R2_ENDPOINT" --region auto --only-show-errors
     done
     echo
@@ -445,7 +445,7 @@ elif confirm "Publish the catalog objects?"; then
   r2_env
   for asset in catalog.json catalog.json.sig catalog.signed.json; do
     run aws s3 cp "$WORK_DIR/catalog/$asset" \
-      "s3://$R2_BUCKET/releases/$OS_TAG/$asset" \
+      "s3://$R2_BUCKET/$INSTALLER_STREAM_PATH/releases/$OS_TAG/$asset" \
       --endpoint-url "$R2_ENDPOINT" --region auto --only-show-errors
   done
   say "Published. Verifying it reads back:"

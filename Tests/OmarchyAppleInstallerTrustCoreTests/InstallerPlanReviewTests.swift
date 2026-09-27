@@ -248,6 +248,9 @@
           .rc: URL(
             string: "https://releases.example.com/channels/rc/catalog.signed.json"
           )!,
+          .edge: URL(
+            string: "https://releases.example.com/channels/edge/catalog.signed.json"
+          )!,
         ])!,
         defaultChannel: .stable,
         trustRoot: trustRoot,

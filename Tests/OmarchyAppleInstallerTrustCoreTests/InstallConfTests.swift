@@ -12,7 +12,8 @@
     }
 
     func testSerializesOptOutAndEveryAppChannel() throws {
-      for lane in ["stable", "rc"] {
+      XCTAssertEqual(InstallConf.allowedLanes, Set(ReleaseChannel.allCases.map(\.rawValue)))
+      for lane in ["stable", "rc", "edge"] {
         let conf = try InstallConf(encrypt: false, lane: lane)
         XCTAssertEqual(conf.serialized, "format=1\nencrypt=0\nlane=\(lane)\n")
         XCTAssertEqual(try InstallConf.parse(conf.serialized).lane, lane)
@@ -21,8 +22,10 @@
     }
 
     func testRejectsUnknownLanesAndMalformedDocuments() {
-      XCTAssertThrowsError(try InstallConf(encrypt: true, lane: "edge")) {
-        XCTAssertEqual($0 as? InstallConfError, .invalidLane)
+      for lane in ["dev", "rc-aurora", ""] {
+        XCTAssertThrowsError(try InstallConf(encrypt: true, lane: lane)) {
+          XCTAssertEqual($0 as? InstallConfError, .invalidLane)
+        }
       }
       XCTAssertThrowsError(try InstallConf.parse("format=1\nencrypt=1\n")) {
         XCTAssertEqual($0 as? InstallConfError, .invalidDocument)

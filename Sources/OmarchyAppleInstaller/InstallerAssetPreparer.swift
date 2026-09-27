@@ -91,6 +91,9 @@
   public enum InstallerAssetPreparationError: Error, Equatable, Sendable {
     case hostBlocked(String)
     case unsupportedDevice(String)
+    /// The channel's verified catalog admits no Mac at all: the channel has
+    /// no Mac release yet, whatever this Mac is.
+    case noMacRelease
     /// The signed catalog does not list this Mac. Carries the Mac's model
     /// identifier (hw.model) and the catalog's admitted device identifiers so
     /// the app can say which Macs this release supports.
@@ -147,6 +150,9 @@
           minimum: compatibility.minimumVersion,
           downloadURL: compatibility.downloadURL
         )
+      }
+      guard !catalog.deviceIdentifiers.isEmpty else {
+        throw InstallerAssetPreparationError.noMacRelease
       }
       guard
         case .admitted(let installer) = catalog.admission(

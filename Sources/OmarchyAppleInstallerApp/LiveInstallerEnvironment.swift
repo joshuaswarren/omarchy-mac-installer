@@ -149,6 +149,67 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     )
   }
 
+  /// Every channel's catalog, checked side by side for this Mac. A channel
+  /// whose rollback state cannot be read counts as unverifiable rather than
+  /// skipping the rollback check.
+  func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability] {
+    guard let host = lock.withLock({ hostInspection }) else { return [:] }
+    let deviceIdentifier = host.identity.deviceIdentifier
+    let everyChannelFailed = { (error: any Error) in
+      Dictionary(
+        uniqueKeysWithValues: ReleaseChannel.allCases.map {
+          ($0, ReleaseChannelAvailability(checkError: error))
+        })
+    }
+    let configuration: InstallerReleaseConfiguration
+    do {
+      configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
+    } catch {
+      return everyChannelFailed(error)
+    }
+    // A sealed catalog answers for every channel alike, so it says nothing
+    // about what each channel offers.
+    guard configuration.sealedCatalogDocuments == nil else { return [:] }
+    let stateDirectory: URL
+    do {
+      stateDirectory = try installerWorkspace().state
+    } catch {
+      return everyChannelFailed(error)
+    }
+    return await withTaskGroup(
+      of: (ReleaseChannel, ReleaseChannelAvailability).self
+    ) { group in
+      for channel in ReleaseChannel.allCases {
+        group.addTask {
+          let previouslyAccepted: AcceptedCatalogIdentity?
+          do {
+            previouslyAccepted = try AcceptedCatalogIdentityStore(
+              directory: stateDirectory,
+              channel: channel
+            ).load()
+          } catch {
+            return (channel, ReleaseChannelAvailability(checkError: error))
+          }
+          return (
+            channel,
+            await InstallerReleaseAssetCoordinator().availability(
+              configuration: configuration,
+              channel: channel,
+              deviceIdentifier: deviceIdentifier,
+              validationTime: Date(),
+              previouslyAcceptedCatalog: previouslyAccepted
+            )
+          )
+        }
+      }
+      var result = [ReleaseChannel: ReleaseChannelAvailability]()
+      for await (channel, availability) in group {
+        result[channel] = availability
+      }
+      return result
+    }
+  }
+
   // MARK: Plan preparation
 
   func preparePlan(

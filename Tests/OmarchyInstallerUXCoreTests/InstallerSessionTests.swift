@@ -7,6 +7,32 @@
 
   @MainActor
   final class InstallerSessionTests: XCTestCase {
+    func testChannelAvailabilityKeepsTheLatestCheck() async {
+      let environment = MockInstallerEnvironment()
+      let slow = OperationGate()
+      environment.availabilityGates = [slow, nil]
+      let unreachable = ReleaseChannelAvailability.checkFailed(.network)
+      let current: [ReleaseChannel: ReleaseChannelAvailability] = [
+        .stable: .noRelease, .rc: .noRelease, .edge: .available,
+      ]
+      environment.availabilityAnswers = [
+        [.stable: unreachable, .rc: unreachable, .edge: unreachable],
+        current,
+      ]
+      let session = InstallerSession(environment: environment)
+      XCTAssertEqual(session.channelAvailability, [:])
+
+      let first = Task { await session.refreshChannelAvailability() }
+      await slow.waitUntilEntered()
+      await session.refreshChannelAvailability()
+      XCTAssertEqual(session.channelAvailability[.edge], .available)
+
+      await slow.release()
+      await first.value
+      // The slow, older check finished last but does not overwrite the newer one.
+      XCTAssertEqual(session.channelAvailability, current)
+    }
+
     func testPrivateLimineProfileSubmitsExplicitEncryptionChoice() async throws {
       for encrypt in [false, true] {
         let environment = MockInstallerEnvironment()
@@ -1115,6 +1141,18 @@
 
     var hasApprovedPlan: Bool { approved }
     var helperStatus: HelperDisplay { helper }
+
+    /// One answer per channel check, in order; a gate holds that check open.
+    var availabilityAnswers = [[ReleaseChannel: ReleaseChannelAvailability]]()
+    var availabilityGates = [OperationGate?]()
+    private var availabilityChecks = 0
+
+    func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability] {
+      let check = availabilityChecks
+      availabilityChecks += 1
+      if check < availabilityGates.count { await availabilityGates[check]?.wait() }
+      return check < availabilityAnswers.count ? availabilityAnswers[check] : [:]
+    }
 
     func inspect() async throws -> HostDisplay {
       await inspectGate?.wait()

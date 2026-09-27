@@ -167,11 +167,25 @@ struct OmarchyAppleInstallerApp: App {
       }
       if InstallerBuildProfile.current.showsReleaseChannels {
         CommandMenu(PlainLanguage.channelMenuTitle) {
-          Picker(PlainLanguage.channelMenuTitle, selection: channelBinding) {
-            Text(PlainLanguage.channelStable).tag(ReleaseChannel?.some(.stable))
-            Text(PlainLanguage.channelRC).tag(ReleaseChannel?.some(.rc))
+          // One toggle per channel rather than an inline picker, so a channel
+          // with nothing for this Mac can be shown but not chosen.
+          ForEach(ReleaseChannel.allCases, id: \.self) { option in
+            let availability = liveSession?.channelAvailability[option]
+            Toggle(
+              PlainLanguage.channelMenuItem(option, availability: availability),
+              isOn: channelBinding(option)
+            )
+            .disabled(
+              !PlainLanguage.channelMenuItemEnabled(
+                option, selected: channel, availability: availability))
           }
-          .pickerStyle(.inline)
+          .disabled(
+            removalNeedsReview || showsRemoval || liveSession?.canChangeChannel != true
+              || isSimulation || channel == nil)
+          Divider()
+          Button(PlainLanguage.channelMenuCheckAgain) {
+            Task { await liveSession?.refreshChannelAvailability() }
+          }
           .disabled(
             removalNeedsReview || showsRemoval || liveSession?.canChangeChannel != true
               || isSimulation || channel == nil)
@@ -180,15 +194,20 @@ struct OmarchyAppleInstallerApp: App {
     }
   }
 
-  private var channelBinding: Binding<ReleaseChannel?> {
+  private func channelBinding(_ option: ReleaseChannel) -> Binding<Bool> {
     Binding(
-      get: { channel },
-      set: { selected in
-        guard let selected, liveSession?.canChangeChannel == true && !isSimulation else {
+      get: { channel == option },
+      set: { isOn in
+        guard isOn, option != channel,
+          liveSession?.canChangeChannel == true && !isSimulation,
+          PlainLanguage.channelMenuItemEnabled(
+            option, selected: channel,
+            availability: liveSession?.channelAvailability[option])
+        else {
           return
         }
-        ReleaseChannelPreference().select(selected)
-        channel = selected
+        ReleaseChannelPreference().select(option)
+        channel = option
       }
     )
   }

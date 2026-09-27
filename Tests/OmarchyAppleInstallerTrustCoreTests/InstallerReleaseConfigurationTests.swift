@@ -39,9 +39,54 @@
         trustRootPublicKey: key
       )
 
-      // The retired rc-aurora lane is no channel any more.
+      // Omarchy's channels in menu order. The retired rc-aurora lane is no
+      // channel, and dev is a developer choice made after installation.
       XCTAssertNil(ReleaseChannel(rawValue: "rc-aurora"))
-      XCTAssertEqual(ReleaseChannel.allCases, [.stable, .rc])
+      XCTAssertNil(ReleaseChannel(rawValue: "dev"))
+      XCTAssertEqual(ReleaseChannel.allCases, [.stable, .rc, .edge])
+      XCTAssertEqual(
+        configuration.catalogURL(for: .edge).absoluteString,
+        "https://releases.omarchy.example/channels/edge/catalog.signed.json"
+      )
+    }
+
+    func testADescriptorWithoutEdgeFailsClosed() throws {
+      try assertDescriptorRejected { value in
+        var channels = value["channels"] as! [String: Any]
+        channels["edge"] = nil
+        value["channels"] = channels
+      }
+    }
+
+    func testADescriptorNamingTheDevChannelFailsClosed() throws {
+      try assertDescriptorRejected { value in
+        var channels = value["channels"] as! [String: Any]
+        channels["dev"] = ["catalog_url": "https://releases.omarchy.example/d.json"]
+        value["channels"] = channels
+      }
+    }
+
+    /// The descriptor this repository ships: edge by default, and every
+    /// channel inside the release stream, away from the MX Mac feeds at the
+    /// root of the same host.
+    func testTheShippedDescriptorDefaultsToEdgeInsideTheReleaseStream() throws {
+      let release = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Release")
+      let configuration = try InstallerReleaseConfigurationLoader().load(
+        descriptor: Data(contentsOf: release.appendingPathComponent("release.json")),
+        trustRootPublicKey: Data(
+          contentsOf: release.appendingPathComponent("trust-root.ed25519.pub"))
+      )
+
+      XCTAssertEqual(configuration.defaultChannel, .edge)
+      for channel in ReleaseChannel.allCases {
+        XCTAssertEqual(
+          configuration.catalogURL(for: channel).absoluteString,
+          "\(InstallerBuildConfiguration.publicBase)/\(InstallerBuildConfiguration.streamPath)/channels/\(channel.rawValue)/catalog.signed.json"
+        )
+      }
+      XCTAssertFalse(InstallerBuildConfiguration.streamPath.isEmpty)
     }
 
     func testSchemaTwoDescriptorIsRejected() throws {
@@ -132,6 +177,7 @@
       value["channels"] = [
         "stable": ["catalog_url": shared],
         "rc": ["catalog_url": shared],
+        "edge": ["catalog_url": "https://releases.omarchy.example/e.json"],
       ]
       let altered = try JSONSerialization.data(withJSONObject: value)
 
@@ -158,6 +204,7 @@
       value["channels"] = [
         "stable": ["catalog_url": "http://releases.omarchy.example/s.json"],
         "rc": ["catalog_url": "https://releases.omarchy.example/b.json"],
+        "edge": ["catalog_url": "https://releases.omarchy.example/e.json"],
       ]
       let altered = try JSONSerialization.data(withJSONObject: value)
 
@@ -278,6 +325,23 @@
         configuration: configuration,
         channel: .rc
       )
+
+      XCTAssertEqual(result.payload, catalog)
+    }
+
+    func testEdgeChannelReadsTheEdgeObject() async throws {
+      let configuration = try configuration()
+      let catalog = Data("edge catalog".utf8)
+      let fetcher = InstallerReleaseCatalogFetcher(
+        downloader: FixtureReleaseDownloader(values: [
+          configuration.catalogURL(for: .edge): envelope(
+            catalog: catalog,
+            signature: Data(repeating: 5, count: 64)
+          )
+        ])
+      )
+
+      let result = try await fetcher.fetch(configuration: configuration, channel: .edge)
 
       XCTAssertEqual(result.payload, catalog)
     }
@@ -490,7 +554,7 @@
     private func descriptor(fingerprint: String) -> Data {
       Data(
         """
-        {"schema_version":3,"default_channel":"stable","channels":{"stable":{"catalog_url":"https://releases.omarchy.example/channels/stable/catalog.signed.json"},"rc":{"catalog_url":"https://releases.omarchy.example/channels/rc/catalog.signed.json"}},"trust_root_fingerprint":"\(fingerprint)","helper_mach_service_name":"\(helper)","helper_code_signing_requirement":"identifier \\"\(helper)\\""}
+        {"schema_version":3,"default_channel":"stable","channels":{"stable":{"catalog_url":"https://releases.omarchy.example/channels/stable/catalog.signed.json"},"rc":{"catalog_url":"https://releases.omarchy.example/channels/rc/catalog.signed.json"},"edge":{"catalog_url":"https://releases.omarchy.example/channels/edge/catalog.signed.json"}},"trust_root_fingerprint":"\(fingerprint)","helper_mach_service_name":"\(helper)","helper_code_signing_requirement":"identifier \\"\(helper)\\""}
         """.utf8
       )
     }
