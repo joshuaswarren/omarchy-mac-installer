@@ -193,7 +193,8 @@
           expected: "simulation-expected", actual: "simulation-corrupt")
       }
       if scenario == .planFailure {
-        throw InstallerAllocationRecommendationError.noEligibleCandidate
+        throw InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 40_000_000_000, availableBytes: 34_500_000_000)
       }
       progress(AssetProgressUpdate(stage: .planning))
       try await tick()
