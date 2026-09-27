@@ -24,7 +24,7 @@
       let descriptor: [String: Any] = [
         "schema_version": 3, "default_channel": "rc",
         "channels": Dictionary(
-          uniqueKeysWithValues: ["stable", "rc"].map {
+          uniqueKeysWithValues: ["stable", "rc", "edge"].map {
             ($0, ["catalog_url": "https://quattro-development.invalid/\($0)/catalog.signed.json"])
           }),
         "trust_root_fingerprint": SHA256Digest(hashing: publicKey).rawValue,

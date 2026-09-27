@@ -1,9 +1,13 @@
 #!/bin/bash
 # Publish and promote the installer's release channels on Cloudflare R2.
 #
-# Two kinds of object live in the bucket. Everything under releases/ and
+# Everything this tool touches lives under the release stream's path
+# (INSTALLER_STREAM_PATH); keys below are relative to it. The MX Mac feeds at
+# the root of the bucket are never read, written or pruned here.
+#
+# Two kinds of object live in the stream. Everything under releases/ and
 # installer/<version>/ is immutable and never overwritten. Exactly four keys
-# are rewritten in place, and only through this tool:
+# per channel are rewritten in place, and only through this tool:
 #
 #   channels/<channel>/catalog.signed.json
 #   channels/<channel>/channel.json
@@ -24,6 +28,10 @@ script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 R2_BUCKET="${OMARCHY_R2_BUCKET:-$INSTALLER_R2_BUCKET}"
 R2_ENDPOINT="${OMARCHY_R2_ENDPOINT:-$INSTALLER_R2_ENDPOINT}"
 PUBLIC_BASE="${OMARCHY_PUBLIC_BASE:-$INSTALLER_PUBLIC_BASE}"
+STREAM_PATH="${OMARCHY_STREAM_PATH:-$INSTALLER_STREAM_PATH}"
+[[ $STREAM_PATH =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "the stream path must be one lowercase path segment: $STREAM_PATH"
+STREAM_BASE="$PUBLIC_BASE/$STREAM_PATH"
+CHANNELS="stable rc edge"
 TRUST_ROOT="${OMARCHY_TRUST_ROOT:-$script_directory/../Release/trust-root.ed25519.pub}"
 SIGNING_TOOL="${OMARCHY_CATALOG_SIGNING_TOOL:-xcrun swift $script_directory/catalog-signing.swift}"
 PKG_FILE_NAME="$INSTALLER_FILE_STEM.pkg"
@@ -45,10 +53,16 @@ channels_usage() {
   cat <<'USAGE'
 Usage:
   publish-channels envelope --catalog FILE --signature FILE --output FILE
-  publish-channels os-promote --tag TAG --to stable|rc|rc-aurora [--minimum-sequence N] [--no-prune]
-  publish-channels app-publish --pkg FILE --version X.Y.Z [--to stable|rc]
-  publish-channels channel-status [--channel stable|rc|rc-aurora|all]
+  publish-channels empty-catalog --sequence N --output FILE
+  publish-channels os-promote --tag TAG --to stable|rc|edge [--minimum-sequence N] [--no-prune]
+  publish-channels app-publish --pkg FILE --version X.Y.Z [--to stable|rc|edge]
+  publish-channels channel-status [--channel stable|rc|edge|all]
   publish-channels prune [--confirm]
+
+Keys are relative to the release stream, PUBLIC_BASE/STREAM_PATH. empty-catalog
+writes the unsigned catalog of a channel with no Mac release yet: sign it,
+wrap it with envelope, stage it as releases/TAG/catalog.signed.json and
+os-promote it like any other release.
 
 Credentials come from AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or the Keychain
 items omarchy-r2-access-key-id and omarchy-r2-secret-access-key.
@@ -57,15 +71,14 @@ USAGE
 }
 
 validate_os_tag() {
-  # A trailing -<lane> names a parallel payload lane (rc-aurora's kernel) built
-  # from the same release train.
+  # A trailing -<lane> names a parallel payload lane built from the same
+  # release train.
   [[ $1 =~ ^os-v[0-9]+\.[0-9]+\.[0-9]+-mac\.[0-9]+\.[0-9]{8}(\.[0-9]+)?(-[a-z][a-z0-9]*)?$ ]] ||
     die "invalid OS release tag: $1 (expected os-vX.Y.Z-mac.N.YYYYMMDD[-lane])"
 }
 
 validate_channel() {
-  [[ $1 == "stable" || $1 == "rc" || $1 == "rc-aurora" ]] ||
-    die "invalid channel: $1"
+  [[ " $CHANNELS " == *" $1 "* ]] || die "invalid channel: $1"
 }
 
 validate_installer_version() {
@@ -73,13 +86,47 @@ validate_installer_version() {
 }
 
 mutable_key_allowed() {
-  case $1 in
-    channels/stable/catalog.signed.json | channels/rc/catalog.signed.json | channels/rc-aurora/catalog.signed.json) return 0 ;;
-    channels/stable/channel.json | channels/rc/channel.json | channels/rc-aurora/channel.json) return 0 ;;
-    installer/stable/$PKG_FILE_NAME | installer/rc/$PKG_FILE_NAME) return 0 ;;
-    installer/stable/installer.json | installer/rc/installer.json) return 0 ;;
-    *) return 1 ;;
-  esac
+  local channel
+  for channel in $CHANNELS; do
+    case $1 in
+      "channels/$channel/catalog.signed.json" | "channels/$channel/channel.json") return 0 ;;
+      "installer/$channel/$PKG_FILE_NAME" | "installer/$channel/installer.json") return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# The bucket key of a stream-relative key.
+bucket_key() {
+  printf '%s/%s\n' "$STREAM_PATH" "$1"
+}
+
+# A channel with no Mac release yet still serves a signed catalog, so the app
+# can tell "nothing here yet" from a channel it cannot reach or verify.
+write_empty_catalog() {
+  local sequence=$1 output=$2
+  [[ $sequence =~ ^[1-9][0-9]*$ ]] || die "the sequence must be a positive integer: $sequence"
+  [[ ! -e $output ]] || die "refusing to overwrite $output"
+  python3 - "$sequence" "$output" <<'PY'
+import datetime
+import json
+import sys
+
+sequence, output = int(sys.argv[1]), sys.argv[2]
+catalog = {
+    "schemaVersion": 4,
+    "sequence": sequence,
+    "issuedAt": datetime.datetime.now(datetime.timezone.utc)
+    .replace(microsecond=0)
+    .strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "models": [],
+}
+with open(output, "x", encoding="utf-8") as stream:
+    json.dump(catalog, stream, indent=2)
+    stream.write("\n")
+PY
+  echo "empty_catalog=$output"
+  echo "catalog_sequence=$sequence"
 }
 
 build_envelope() {
@@ -138,7 +185,7 @@ catalog_field() {
 # Every artifact a catalog names must already sit under the immutable prefix of
 # the tag being promoted, at exactly the size the catalog claims.
 assert_catalog_artifacts_published() {
-  local catalog=$1 tag=$2 expected_prefix="$PUBLIC_BASE/releases/$tag/"
+  local catalog=$1 tag=$2 expected_prefix="$STREAM_BASE/releases/$tag/"
   local url size actual
   while read -r url size; do
     [[ $url == "$expected_prefix"* ]] ||
@@ -174,7 +221,7 @@ PY
 fetch_public() {
   local path=$1 output=$2 status
   status=$(curl -fsSL -H 'Cache-Control: no-cache' -o "$output" \
-    -w '%{http_code}' "$PUBLIC_BASE/$path" 2>/dev/null) || status=""
+    -w '%{http_code}' "$STREAM_BASE/$path" 2>/dev/null) || status=""
   [[ $status == "200" ]] || return 1
   return 0
 }
@@ -182,7 +229,7 @@ fetch_public() {
 put_object() {
   local source=$1 key=$2
   shift 2
-  aws s3 cp "$source" "s3://$R2_BUCKET/$key" \
+  aws s3 cp "$source" "s3://$R2_BUCKET/$(bucket_key "$key")" \
     --endpoint-url "$R2_ENDPOINT" --region auto --only-show-errors "$@"
 }
 
@@ -199,7 +246,7 @@ put_immutable() {
   local source=$1 key=$2 remote local_size
   shift 2
   local_size=$(file_size "$source")
-  remote=$(aws s3api head-object --bucket "$R2_BUCKET" --key "$key" \
+  remote=$(aws s3api head-object --bucket "$R2_BUCKET" --key "$(bucket_key "$key")" \
     --endpoint-url "$R2_ENDPOINT" --region auto \
     --query ContentLength --output text 2>/dev/null) || remote=""
   if [[ -z $remote ]]; then
@@ -217,13 +264,13 @@ verify_back() {
   scratch=$(mktemp)
   fetch_public "$path" "$scratch" || {
     rm -f "$scratch"
-    die "could not read back $PUBLIC_BASE/$path"
+    die "could not read back $STREAM_BASE/$path"
   }
   actual=$(file_digest "$scratch")
   rm -f "$scratch"
   [[ $actual == "$expected" ]] ||
-    die "$PUBLIC_BASE/$path serves $actual, expected $expected"
-  echo "  verified $PUBLIC_BASE/$path"
+    die "$STREAM_BASE/$path serves $actual, expected $expected"
+  echo "  verified $STREAM_BASE/$path"
 }
 
 os_promote() {
@@ -283,7 +330,7 @@ for model in json.load(open(sys.argv[1]))["models"]:
   fi
 
   r2_credentials
-  confirm_publication "$tag" "r2:$R2_BUCKET/channels/$channel" "catalog.signed.json channel.json"
+  confirm_publication "$tag" "r2:$R2_BUCKET/$(bucket_key "channels/$channel")" "catalog.signed.json channel.json"
 
   python3 - "$work/channel.json" "$channel" "$tag" "$sequence" \
     "$(file_digest "$work/catalog")" "$previous_tag" <<'PY'
@@ -361,7 +408,7 @@ app_publish() {
   immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.pkg"
 
   python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$pkg")" \
-    "$PUBLIC_BASE/$immutable_key" <<'PY'
+    "$STREAM_BASE/$immutable_key" <<'PY'
 import datetime
 import json
 import sys
@@ -383,7 +430,7 @@ with open(output, "w", encoding="utf-8") as stream:
 PY
 
   r2_credentials
-  confirm_publication "installer-v$version" "r2:$R2_BUCKET/installer/$channel" \
+  confirm_publication "installer-v$version" "r2:$R2_BUCKET/$(bucket_key "installer/$channel")" \
     "$PKG_FILE_NAME installer.json"
 
   put_immutable "$pkg" "$immutable_key" --content-type application/octet-stream
@@ -411,7 +458,7 @@ channel_status() {
   local work channels channel failures=0
   work=$(make_scratch)
   if [[ $requested == "all" ]]; then
-    channels="stable rc rc-aurora"
+    channels=$CHANNELS
   else
     channels=$requested
   fi
@@ -455,7 +502,7 @@ channel_status() {
 # installer version is reachable when any channel's installer.json points at it.
 referenced_prefixes() {
   local work=$1 channel envelope catalog signature pointer
-  for channel in stable rc rc-aurora edge; do
+  for channel in $CHANNELS; do
     envelope="$work/$channel.env.json"
     if fetch_public "channels/$channel/catalog.signed.json" "$envelope"; then
       catalog="$work/$channel.catalog"; signature="$work/$channel.sig"
@@ -478,11 +525,14 @@ PY
     fi
     pointer="$work/$channel.channel.json"
     if fetch_public "channels/$channel/channel.json" "$pointer"; then
+      # The current set too: an empty catalog names no artifact, but its own
+      # release set is what the next channel promotes from.
       python3 -c '
 import json, sys
-previous = json.load(open(sys.argv[1])).get("previous_os_tag")
-if previous:
-    print(f"releases/{previous}")
+pointer = json.load(open(sys.argv[1]))
+for tag in (pointer.get("os_tag"), pointer.get("previous_os_tag")):
+    if tag:
+        print(f"releases/{tag}")
 ' "$pointer"
     fi
     pointer="$work/$channel.installer.json"
@@ -498,29 +548,33 @@ PY
   done | sort -u
 }
 
-# Bucket prefixes this tool is allowed to remove: immutable release sets and
+# Stream prefixes this tool is allowed to remove: immutable release sets and
 # immutable installer versions, and nothing else. Channel objects and the
 # stable/rc/edge installer downloads are never candidates, and neither is
-# anything published by another lane (the generic ISO folders, the dated Arch
-# Linux ARM snapshots under mirror/ that the payload build and the acceptance
-# guest read from).
+# anything outside the stream: the MX Mac feeds at the bucket root, the
+# generic ISO folders, the dated Arch Linux ARM snapshots under mirror/ that
+# the payload build and the acceptance guest read from.
 prunable_prefixes() {
-  aws s3 ls "s3://$R2_BUCKET/" --recursive --endpoint-url "$R2_ENDPOINT" --region auto 2>/dev/null |
+  aws s3 ls "s3://$R2_BUCKET/$STREAM_PATH/" --recursive --endpoint-url "$R2_ENDPOINT" --region auto 2>/dev/null |
     awk '{print $4}' |
     python3 -c '
 import re, sys
+stream = sys.argv[1] + "/"
 seen = set()
 for line in sys.stdin:
     key = line.strip()
+    if not key.startswith(stream):
+        continue
+    key = key[len(stream):]
     m = re.match(r"^(releases/(?:os-)?v[0-9][^/]*|installer/[0-9]+\.[0-9]+\.[0-9]+)/", key)
     if m and m.group(1) not in seen:
         seen.add(m.group(1))
         print(m.group(1))
-'
+' "$STREAM_PATH"
 }
 
 prefix_size() {
-  aws s3 ls "s3://$R2_BUCKET/$1/" --recursive --endpoint-url "$R2_ENDPOINT" --region auto 2>/dev/null |
+  aws s3 ls "s3://$R2_BUCKET/$(bucket_key "$1")/" --recursive --endpoint-url "$R2_ENDPOINT" --region auto 2>/dev/null |
     awk '{b+=$3} END {printf "%d", b}'
 }
 
@@ -565,7 +619,7 @@ prune() {
     echo "Dry run. Re-run with --confirm to delete."
     return 0
   fi
-  confirm_publication "prune" "r2:$R2_BUCKET" "$(tr '\n' ' ' <"$work/delete")"
+  confirm_publication "prune" "r2:$R2_BUCKET/$STREAM_PATH" "$(tr '\n' ' ' <"$work/delete")"
 
   # A bucket lock refuses one object at a time, so meeting it partway through
   # would leave the prune half applied. Ask the bucket before removing
@@ -589,7 +643,7 @@ Cloudflare R2 > $R2_BUCKET > Settings > Bucket lock, then re-run." >&2
     # The pre-flight above catches a lock rule that covers the whole bucket.
     # A narrower rule can still refuse here, so stop at the first refusal
     # rather than printing one per file.
-    if ! output=$(aws s3 rm "s3://$R2_BUCKET/$prefix/" --recursive \
+    if ! output=$(aws s3 rm "s3://$R2_BUCKET/$(bucket_key "$prefix")/" --recursive \
       --endpoint-url "$R2_ENDPOINT" --region auto --only-show-errors 2>&1); then
       if [[ $output == *ObjectLockedByBucketPolicy* ]]; then
         echo "publish-channels: $prefix is protected by the bucket's lock rule. Pruning needs that rule to \
@@ -623,6 +677,18 @@ channels_main() {
       verify_catalog "$catalog" "$signature"
       build_envelope "$catalog" "$signature" "$output"
       echo "envelope=$output"
+      ;;
+    empty-catalog)
+      local sequence="" output=""
+      while (( $# > 0 )); do
+        case $1 in
+          --sequence) sequence=${2:-}; shift 2 ;;
+          --output) output=${2:-}; shift 2 ;;
+          *) channels_usage ;;
+        esac
+      done
+      [[ -n $sequence && -n $output ]] || channels_usage
+      write_empty_catalog "$sequence" "$output"
       ;;
     os-promote) os_promote "$@" ;;
     app-publish) app_publish "$@" ;;

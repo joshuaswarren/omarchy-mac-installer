@@ -520,6 +520,9 @@
       let rcURL = URL(
         string: "https://releases.example.com/channels/rc/catalog.signed.json"
       )!
+      let edgeURL = URL(
+        string: "https://releases.example.com/channels/edge/catalog.signed.json"
+      )!
       let envelope = Data(
         """
         {"schema_version":1,"catalog":"\(payloadData.base64EncodedString())","signature":"\(deliveredSignature.base64EncodedString())"}
@@ -528,11 +531,13 @@
       let releaseDownloader = ReleaseCatalogFixtureDownloader(values: [
         stableURL: envelope,
         rcURL: envelope,
+        edgeURL: envelope,
       ])
       let releaseConfiguration = InstallerReleaseConfiguration(
         channels: ReleaseChannelEndpoints(endpoints: [
           .stable: stableURL,
           .rc: rcURL,
+          .edge: edgeURL,
         ])!,
         defaultChannel: .stable,
         trustRoot: trustRoot,

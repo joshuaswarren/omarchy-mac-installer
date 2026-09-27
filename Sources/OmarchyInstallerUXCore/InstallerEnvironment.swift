@@ -460,6 +460,9 @@
     func cancelPayloadPrefetch()
     /// Starts the planned payload's download again after it failed.
     func restartPayloadPrefetch()
+    /// What each release channel's verified catalog offers this Mac. Read
+    /// only: it never records a catalog or starts a download.
+    func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability]
   }
 
   extension InstallerEnvironment {
@@ -476,5 +479,8 @@
     public func waitUntilPayloadVerified() async throws {}
     public func cancelPayloadPrefetch() {}
     public func restartPayloadPrefetch() {}
+    public func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability] {
+      [:]
+    }
   }
 #endif

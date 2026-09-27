@@ -43,79 +43,34 @@
       XCTAssertEqual(try rc.load()?.sequence, 90)
     }
 
-    func testStableReadsThePreChannelStateFile() throws {
+    func testMXMacFloorsAreNeitherReadNorRemoved() throws {
       let directory = try privateDirectory()
       defer { try? FileManager.default.removeItem(at: directory) }
-      let identity = try catalogIdentity(sequence: 42, digit: "c")
-      try writeLegacyState(identity, in: directory)
+      // The MX Mac installer shares this workspace; its stable floor is far
+      // ahead of a new stream's first catalog.
+      for name in AcceptedCatalogIdentityStore.mxMacFileNames {
+        try writeMXMacState(
+          try catalogIdentity(sequence: 1_790_210_231, digit: "c"), named: name, in: directory)
+      }
 
-      let stable = AcceptedCatalogIdentityStore(
-        directory: directory,
-        channel: .stable
-      )
-
-      XCTAssertEqual(try stable.load(), identity)
+      for channel in ReleaseChannel.allCases {
+        let store = AcceptedCatalogIdentityStore(directory: directory, channel: channel)
+        XCTAssertNil(try store.load(), channel.rawValue)
+        try store.store(try catalogIdentity(sequence: 7, digit: "d"))
+        XCTAssertEqual(try store.load()?.sequence, 7)
+      }
+      for name in AcceptedCatalogIdentityStore.mxMacFileNames {
+        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains("1790210231"), name)
+      }
     }
 
-    func testBetaIgnoresThePreChannelStateFile() throws {
-      let directory = try privateDirectory()
-      defer { try? FileManager.default.removeItem(at: directory) }
-      try writeLegacyState(
-        try catalogIdentity(sequence: 42, digit: "c"),
-        in: directory
-      )
-
-      let rc = AcceptedCatalogIdentityStore(directory: directory, channel: .rc)
-
-      XCTAssertNil(try rc.load())
-    }
-
-    func testTheFirstStableWriteRetiresThePreChannelStateFile() throws {
-      let directory = try privateDirectory()
-      defer { try? FileManager.default.removeItem(at: directory) }
-      try writeLegacyState(
-        try catalogIdentity(sequence: 42, digit: "c"),
-        in: directory
-      )
-      let stable = AcceptedCatalogIdentityStore(
-        directory: directory,
-        channel: .stable
-      )
-
-      try stable.store(try catalogIdentity(sequence: 43, digit: "d"))
-
-      XCTAssertFalse(
-        FileManager.default.fileExists(
-          atPath: directory.appendingPathComponent(
-            AcceptedCatalogIdentityStore.legacyFileName
-          ).path
-        )
-      )
-      XCTAssertEqual(try stable.load()?.sequence, 43)
-    }
-
-    func testASymlinkedPreChannelStateFileIsRejected() throws {
-      let directory = try privateDirectory()
-      defer { try? FileManager.default.removeItem(at: directory) }
-      let external = FileManager.default.temporaryDirectory
-        .appendingPathComponent("omarchy-legacy-\(UUID().uuidString).json")
-      defer { try? FileManager.default.removeItem(at: external) }
-      try Data("{}".utf8).write(to: external, options: .withoutOverwriting)
-      try FileManager.default.createSymbolicLink(
-        at: directory.appendingPathComponent(
-          AcceptedCatalogIdentityStore.legacyFileName
-        ),
-        withDestinationURL: external
-      )
-
-      XCTAssertThrowsError(
-        try AcceptedCatalogIdentityStore(directory: directory, channel: .stable)
-          .load()
-      ) {
-        XCTAssertEqual(
-          $0 as? AcceptedCatalogIdentityStoreError,
-          .unsafeState
-        )
+    func testStateFilesAreNamedByStreamAndChannel() {
+      let names = ReleaseChannel.allCases.map(AcceptedCatalogIdentityStore.fileName(for:))
+      XCTAssertEqual(Set(names).count, ReleaseChannel.allCases.count)
+      for name in names {
+        XCTAssertTrue(name.hasPrefix("accepted-catalog-omarchy-mac-"), name)
+        XCTAssertFalse(AcceptedCatalogIdentityStore.mxMacFileNames.contains(name), name)
       }
     }
 
@@ -180,25 +135,17 @@
       }
     }
 
-    private func writeLegacyState(
+    private func writeMXMacState(
       _ identity: AcceptedCatalogIdentity,
+      named name: String,
       in directory: URL
     ) throws {
       let document = """
         {"payload_digest":"\(identity.payloadDigest)","schema_version":1,"sequence":\(identity.sequence)}
         """
-      try Data(document.utf8).write(
-        to: directory.appendingPathComponent(
-          AcceptedCatalogIdentityStore.legacyFileName
-        ),
-        options: .withoutOverwriting
-      )
-      try FileManager.default.setAttributes(
-        [.posixPermissions: 0o600],
-        ofItemAtPath: directory.appendingPathComponent(
-          AcceptedCatalogIdentityStore.legacyFileName
-        ).path
-      )
+      let url = directory.appendingPathComponent(name)
+      try Data(document.utf8).write(to: url, options: .withoutOverwriting)
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func catalogIdentity(

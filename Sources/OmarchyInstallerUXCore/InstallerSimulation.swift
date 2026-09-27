@@ -4,7 +4,8 @@
 
   public enum InstallerSimulationScenario: String, CaseIterable, Identifiable, Sendable {
     case success, freeSpace, unsupported, engineUnavailable, existingInstall, missingHelper
-    case downloadFailure, invalidDownload, outdatedInstaller, emptyChannel, planFailure
+    case downloadFailure, invalidDownload, outdatedInstaller, planFailure
+    case noMacRelease, modelNotOnChannel, channelUnreachable
     case allocationClamped, allocationAligned, approvalChanged, credentialsRejected, connectionLost
     case emptyReply, helperFailure, degradedProgress, recoveryRetry, manualRecovery
     case shutdownFailure, completed, installationMedia, spaceChanged
@@ -21,7 +22,9 @@
       case .downloadFailure: "Download interrupted"
       case .invalidDownload: "Download verification failed"
       case .outdatedInstaller: "Outdated installer"
-      case .emptyChannel: "Empty release channel"
+      case .noMacRelease: "Channel has no Mac release yet"
+      case .modelNotOnChannel: "Channel doesn’t include this Mac"
+      case .channelUnreachable: "Channel release list missing (404)"
       case .planFailure: "Not enough usable space"
       case .allocationClamped: "Disk size adjusted during review"
       case .allocationAligned: "Disk alignment · whole GB unchanged"
@@ -58,6 +61,12 @@
         "Install the 137 GB plan. The engine refuses it before changing the disk. Choose Check available space: the new plan offers 133 GB, the acknowledgement clears, and the next install succeeds."
       case .unsupported:
         "The simulated Mac is a MacBook Pro 14-inch (M3). The message must name it and list the M1 and M2 families from the simulated signed catalog."
+      case .noMacRelease:
+        "The test channel's signed catalog lists no Mac. Its channel label says No Mac release yet, and Continue explains the channel has nothing to install, not a network or verification problem."
+      case .modelNotOnChannel:
+        "The test channel's signed catalog lists other Macs only. Its channel label says Not available for this Mac, and Continue names this Mac and the models the channel supports."
+      case .channelUnreachable:
+        "The test channel's catalog address returns 404. Its channel label says Couldn’t reach, and Continue reports a server problem, never a missing Mac release."
       default:
         "Walk through the installer with test data. Check keyboard navigation, smaller windows, and activity details. Reset starts again."
       }
@@ -77,7 +86,7 @@
     public let channel: ReleaseChannel
 
     public init(
-      scenario: InstallerSimulationScenario, channel: ReleaseChannel = .stable,
+      scenario: InstallerSimulationScenario, channel: ReleaseChannel = .edge,
       delay: Duration = .milliseconds(600)
     ) {
       self.scenario = scenario
@@ -117,6 +126,23 @@
           : nil)
     }
 
+    /// Today's channels as a Mac sees them: only edge has a Mac release. The
+    /// three channel scenarios change what the test channel offers.
+    public func channelAvailability() async -> [ReleaseChannel: ReleaseChannelAvailability] {
+      var availability: [ReleaseChannel: ReleaseChannelAvailability] = [
+        .stable: .noRelease, .rc: .noRelease, .edge: .available,
+      ]
+      switch scenario {
+      case .noMacRelease: availability[channel] = .noRelease
+      case .modelNotOnChannel:
+        availability[channel] = .modelUnavailable(
+          supportedDeviceIdentifiers: Self.simulatedCatalogDevices)
+      case .channelUnreachable: availability[channel] = .checkFailed(.network)
+      default: availability[channel] = .available
+      }
+      return availability
+    }
+
     /// The 22 M1 and M2 models today's stable catalog admits.
     public static let simulatedCatalogDevices = [
       "apple,j274", "apple,j293", "apple,j313", "apple,j314c", "apple,j314s", "apple,j316c",
@@ -136,7 +162,12 @@
       progress(AssetProgressUpdate(stage: .fetchingCatalog))
       try await tick()
       switch scenario {
-      case .emptyChannel: throw InstallerReleaseConfigurationError.unexpectedHTTPStatus(404)
+      case .channelUnreachable: throw InstallerReleaseConfigurationError.unexpectedHTTPStatus(404)
+      case .noMacRelease: throw InstallerAssetPreparationError.noMacRelease
+      case .modelNotOnChannel:
+        throw InstallerAssetPreparationError.notInCatalog(
+          deviceIdentifier: "apple,j504", modelIdentifier: "Mac15,3",
+          supportedDeviceIdentifiers: Self.simulatedCatalogDevices)
       case .outdatedInstaller:
         throw InstallerAssetPreparationError.installerOutdated(
           current: InstallerVersion(major: 1, minor: 0, patch: 0),

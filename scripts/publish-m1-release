@@ -34,7 +34,8 @@ are never deleted, replaced, or clobbered; an asset that differs from the
 staged bytes is a hard error that requires cutting a new tag.
 
 publish-r2 uploads the staged assets to a Cloudflare R2 bucket under
-PREFIX (default releases/TAG) using the aws CLI. Credentials come from
+PREFIX (default STREAM/releases/TAG, STREAM being INSTALLER_STREAM_PATH, where
+publish-channels promotes from) using the aws CLI. Credentials come from
 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or the macOS Keychain items
 omarchy-r2-access-key-id / omarchy-r2-secret-access-key. Existing objects
 are never replaced: a size mismatch is a hard error. After upload every
@@ -420,7 +421,7 @@ publish_r2_release() {
   require_file "$dir/release-urls.env"
   require_file "$dir/SHA256SUMS"
   command -v aws >/dev/null || die "missing command: aws"
-  [[ -n $prefix ]] || prefix="releases/$tag"
+  [[ -n $prefix ]] || prefix="$INSTALLER_STREAM_PATH/releases/$tag"
   [[ $prefix =~ ^[A-Za-z0-9][A-Za-z0-9/._-]*$ && $prefix != */ ]] || die "invalid prefix"
 
   BASE_URL=""; TAG=""; RELEASE_ASSETS=""

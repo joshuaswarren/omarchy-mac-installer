@@ -6,9 +6,68 @@
   @testable import OmarchyInstallerUXCore
 
   final class PlainLanguageTests: XCTestCase {
-    func testChannelBadgesDistinguishStableAndRC() {
+    func testChannelBadgesNameEveryChannel() {
       XCTAssertEqual(PlainLanguage.badge(for: .stable), "Stable")
       XCTAssertEqual(PlainLanguage.badge(for: .rc), "Release candidate")
+      XCTAssertEqual(PlainLanguage.badge(for: .edge), "Edge")
+    }
+
+    func testChannelMenuItemsNameTheThreeStatesApart() {
+      XCTAssertEqual(PlainLanguage.channelMenuItem(.edge, availability: nil), "Edge")
+      XCTAssertEqual(PlainLanguage.channelMenuItem(.edge, availability: .available), "Edge")
+      XCTAssertEqual(
+        PlainLanguage.channelMenuItem(.stable, availability: .noRelease),
+        "Stable — No Mac release yet")
+      XCTAssertEqual(
+        PlainLanguage.channelMenuItem(
+          .rc, availability: .modelUnavailable(supportedDeviceIdentifiers: ["apple,j274"])),
+        "Release candidate — Not available for this Mac")
+      XCTAssertEqual(
+        PlainLanguage.channelMenuItem(.rc, availability: .checkFailed(.network)),
+        "Release candidate — Couldn’t reach")
+      XCTAssertEqual(
+        PlainLanguage.channelMenuItem(.rc, availability: .checkFailed(.verification)),
+        "Release candidate — Couldn’t verify")
+    }
+
+    func testOnlyChannelsWithNothingForThisMacAreDisabled() {
+      func enabled(_ channel: ReleaseChannel, _ availability: ReleaseChannelAvailability?) -> Bool {
+        PlainLanguage.channelMenuItemEnabled(channel, selected: .edge, availability: availability)
+      }
+      XCTAssertFalse(enabled(.stable, .noRelease))
+      XCTAssertFalse(enabled(.rc, .modelUnavailable(supportedDeviceIdentifiers: [])))
+      XCTAssertTrue(enabled(.rc, .checkFailed(.network)))
+      XCTAssertTrue(enabled(.rc, .checkFailed(.verification)))
+      XCTAssertTrue(enabled(.rc, .available))
+      XCTAssertTrue(enabled(.rc, nil))
+      // The channel in use stays chosen whatever it offers.
+      XCTAssertTrue(enabled(.edge, .noRelease))
+    }
+
+    func testNoMacReleaseReadsApartFromAMissingModelAndAServerFailure() {
+      let noRelease = PlainLanguage.failure(for: InstallerAssetPreparationError.noMacRelease)
+      XCTAssertEqual(noRelease.headline, "No Mac release on this channel yet")
+      XCTAssertFalse(noRelease.isBlockedModel)
+      XCTAssertTrue(try XCTUnwrap(noRelease.remedy).contains("Release channel menu"))
+
+      let notListed = PlainLanguage.failure(
+        for: InstallerAssetPreparationError.notInCatalog(
+          deviceIdentifier: "apple,j504", modelIdentifier: "Mac15,3",
+          supportedDeviceIdentifiers: ["apple,j274"]))
+      XCTAssertTrue(notListed.isBlockedModel)
+
+      let missing = PlainLanguage.failure(
+        for: InstallerReleaseConfigurationError.unexpectedHTTPStatus(404))
+      let unverified = PlainLanguage.failure(
+        for: InstallerReleaseConfigurationError.invalidCatalogSignature)
+      let headlines = [
+        noRelease.headline, notListed.headline, missing.headline, unverified.headline,
+      ]
+      XCTAssertEqual(Set(headlines).count, headlines.count)
+      // A missing channel object is a server problem, never "no release".
+      XCTAssertFalse(missing.headline.localizedCaseInsensitiveContains("no release"))
+      XCTAssertFalse(
+        missing.plainDetail.localizedCaseInsensitiveContains("no downloadable release"))
     }
 
     func testAllocationNoticeIgnoresByteAlignmentAtDisplayedPrecision() {
@@ -273,13 +332,15 @@
       XCTAssertFalse(failure.retryRecoveryAvailable)
     }
 
-    func testAnEmptyChannelSaysSoInsteadOfShowingAStatusCode() {
+    /// An empty channel serves a signed empty catalog; a missing channel
+    /// object is a server problem, reported without its status code.
+    func testAMissingChannelObjectSaysSoInsteadOfShowingAStatusCode() {
       let failure = PlainLanguage.failure(
         for: InstallerReleaseConfigurationError.unexpectedHTTPStatus(404)
       )
 
-      XCTAssertEqual(failure.headline, "No release is available on this channel")
-      XCTAssertTrue(failure.plainDetail.contains("No downloadable release"))
+      XCTAssertEqual(failure.headline, "This channel’s release list wasn’t found")
+      XCTAssertTrue(failure.plainDetail.contains("can’t tell what the channel offers"))
       XCTAssertFalse(failure.plainDetail.contains("404"))
       XCTAssertFalse(failure.headline.contains("404"))
       XCTAssertEqual(

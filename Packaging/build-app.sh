@@ -122,22 +122,28 @@ descriptor_fingerprint="$(plutil -extract trust_root_fingerprint raw -o - "$rele
 if [[ $descriptor_schema != "3" ]]; then
   fail "release.json schema_version must be 3"
 fi
+release_channels=(stable rc edge)
 descriptor_default_channel="$(plutil -extract default_channel raw -o - "$release_descriptor")"
-if [[ $descriptor_default_channel != "stable" && $descriptor_default_channel != "rc" ]]; then
-  fail "release.json default_channel must be stable or rc"
+if [[ " ${release_channels[*]} " != *" $descriptor_default_channel "* ]]; then
+  fail "release.json default_channel must be one of: ${release_channels[*]}"
 fi
-descriptor_stable_url="$(plutil -extract channels.stable.catalog_url raw -o - "$release_descriptor")"
-descriptor_rc_url="$(plutil -extract channels.rc.catalog_url raw -o - "$release_descriptor")"
-for descriptor_url in "$descriptor_stable_url" "$descriptor_rc_url"; do
+descriptor_channel_keys="$(plutil -extract channels raw -o - "$release_descriptor" | sort | tr '\n' ' ')"
+if [[ $descriptor_channel_keys != "$(printf '%s\n' "${release_channels[@]}" | sort | tr '\n' ' ')" ]]; then
+  fail "release.json must name exactly the channels: ${release_channels[*]}"
+fi
+descriptor_urls=" "
+for release_channel in "${release_channels[@]}"; do
+  descriptor_url="$(plutil -extract "channels.$release_channel.catalog_url" raw -o - "$release_descriptor")"
   if [[ $descriptor_url != https://?*/?* ]]; then
     fail "release.json channel URLs must be https with a host and a path"
   fi
+  # Two channels pointing at one object would silently erase the separation
+  # between what testers see and what everyone else installs.
+  if [[ $descriptor_urls == *" $descriptor_url "* ]]; then
+    fail "release.json channels must not share a URL"
+  fi
+  descriptor_urls+="$descriptor_url "
 done
-# Two channels pointing at one object would silently erase the separation
-# between what testers see and what everyone else installs.
-if [[ $descriptor_stable_url == "$descriptor_rc_url" ]]; then
-  fail "release.json channels must not share a URL"
-fi
 if [[ $descriptor_service != "$helper_identifier" ]]; then
   fail "release.json helper service does not match the compiled product"
 fi

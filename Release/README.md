@@ -3,7 +3,7 @@
 Production packaging reads this directory and copies its contents into
 `Omarchy Installer.app/Contents/Resources/Release/`:
 
-- `release.json` — schema version 3 descriptor naming the stable and rc
+- `release.json` — schema version 3 descriptor naming the stable, rc and edge
   channel catalog URLs, the default channel, the expected Ed25519 trust-root
   fingerprint, the helper Mach service name, and the helper code-signing
   requirement. Generate it with `scripts/make-release-descriptor`.
@@ -12,12 +12,16 @@ Production packaging reads this directory and copies its contents into
 
 Both files are the same for every build. The trust root changes only when the
 signing key is rotated; the descriptor also changes when the default channel
-does (it is `stable`, matching upstream Omarchy). The private key lives in the operator's login keychain under the
+does. The private key lives in the operator's login keychain under the
 service `omarchy-channel-signing-key` and must never appear here or anywhere
 else on disk; see
 [`docs/apple-silicon-distribution-channels.md`](https://github.com/maralcbr/omarchy-mx-mac/blob/92a9054f4565b37739ac3bd4f0fb4fcf8bd48625/docs/apple-silicon-distribution-channels.md).
 
-The descriptor names both channels because the app is signed once: a channel absent from the descriptor
+The default channel is `edge`. The channels match Omarchy's (stable, rc, edge; dev is a developer choice made after installation), and today only edge has a Mac release. Stable and rc serve signed empty catalogs (`scripts/publish-channels empty-catalog`), which the app shows as "No Mac release yet", never as a channel it cannot reach or verify.
+
+The catalog URLs sit under the release stream path (`INSTALLER_STREAM_PATH` in `Packaging/identity.conf`). The MX Mac installer's feeds at the root of the same host are a separate stream: this repository never publishes to, reads or prunes them, and the app keeps its accepted catalog sequences in stream-named state files so the two installers' rollback floors never meet.
+
+The descriptor names every channel because the app is signed once: a channel absent from the descriptor
 cannot be opened later without shipping another signed app.
 
 The app rejects missing, symlinked, group- or world-writable, oversized,
