@@ -304,5 +304,47 @@ class BootTreeTest(unittest.TestCase):
         with self.assertRaisesRegex(check.CheckError, "lacks root=UUID="):
             check.check_boot(self.root)
 
+
+class SyncDatabasesTest(unittest.TestCase):
+    """First boot resolves packages offline from the sync databases the image keeps."""
+
+    REPOSITORIES = ("omarchy", "asahi-alarm", "core", "extra", "alarm", "aur")
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        (self.root / "etc").mkdir()
+        (self.root / "etc/pacman.conf").write_text(
+            "[options]\nSigLevel = Required DatabaseOptional\n"
+            + "".join(f"\n[{name}]\nInclude = /etc/pacman.d/mirrorlist\n" for name in self.REPOSITORIES)
+            + "\n# [core-debug]\n")
+        self.sync = self.root / "var/lib/pacman/sync"
+        self.sync.mkdir(parents=True)
+        for name in self.REPOSITORIES:
+            (self.sync / f"{name}.db").write_bytes(b"db")
+
+    def test_one_database_per_configured_repository(self):
+        check.check_sync_databases(self.root)
+
+    def test_refusals(self):
+        cases = (
+            ("no sync databases", lambda: shutil.rmtree(self.sync), "keeps no pacman sync databases"),
+            ("a missing one", lambda: (self.sync / "aur.db").unlink(), "are not its pacman.conf's"),
+            ("the build's candidates", lambda: (self.sync / "omarchy-candidates.db").write_bytes(b"db"),
+             "are not its pacman.conf's"),
+            ("the empty fork placeholder", lambda: (self.sync / "omarchy-aarch64.db").write_bytes(b"db"),
+             "are not its pacman.conf's"),
+            ("a leftover lock", lambda: (self.sync / "db.lck").write_bytes(b""), "are not its pacman.conf's"),
+            ("an empty database", lambda: (self.sync / "core.db").write_bytes(b""), "not a regular, non-empty file"),
+            ("a linked database", lambda: ((self.sync / "core.db").unlink(), (self.sync / "core.db").symlink_to("extra.db")),
+             "not a regular, non-empty file"),
+        )
+        for label, edit, message in cases:
+            with self.subTest(label):
+                self.setUp()
+                edit()
+                with self.assertRaisesRegex(check.CheckError, message):
+                    check.check_sync_databases(self.root)
+
 if __name__ == "__main__":
     unittest.main()
