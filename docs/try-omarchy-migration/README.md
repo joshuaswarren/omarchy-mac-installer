@@ -6,10 +6,13 @@ This branch makes the current synthetic prototypes available for joint developme
 
 The [validation record](validation.md) identifies the tested commit, runner, tool hashes, passed checks, and the optional skip.
 
+The [M4 HVF experiment](m4-hvf-experiment.md) additionally demonstrates synthetic Btrfs growth, interrupted-copy resume, and ciphertext authentication after a clean second boot. It does not complete the native encryption/owner-provisioning gate.
+
 | Path | Purpose |
 | --- | --- |
 | [Collaboration plan](collaboration-plan.md) | Try guest delivery, stable capture/lifecycle, local export, authenticated app coordination, and acceptance criteria. |
 | [Bundle probe](../../Development/migration_bundle_probe/README.md) | Experimental encrypted archive, validation, synthetic credential selection, and 18 behavioral tests. |
+| [Runnable export fixture](../../Development/migration_bundle_probe/FIXTURE.md) | Generated test data, versioned requests, JSON progress/results, cooperative cancellation, and completed-job reuse. |
 | [Staging components](../../Development/migration_staging/README.md) | GPT identity/bounds, a regular-fixture-only QEMU range broker, capacity arithmetic, and resumable ciphertext publication with 44 tests. |
 
 ## Run and interpret the checks

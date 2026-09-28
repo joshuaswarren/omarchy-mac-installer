@@ -2,6 +2,8 @@
 
 This synthetic experiment exercises an encrypted archive using age 1.3.2. It is not a shipped exporter, home scanner, or home-directory importer. See the [collaboration plan](../../docs/try-omarchy-migration/collaboration-plan.md) for the intended product and work split.
 
+The [runnable integration fixture](FIXTURE.md) now exposes synthetic capabilities, inventory, export progress, cancellation, and completed-job reuse through a development command.
+
 ## What the experiment covers
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.

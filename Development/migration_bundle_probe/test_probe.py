@@ -6,7 +6,6 @@ import io
 import json
 import os
 from pathlib import Path
-import subprocess
 import tarfile
 import tempfile
 import tracemalloc
@@ -14,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from Development.migration_bundle_probe import probe
+from Development.migration_bundle_probe.dependency import configured_age
 
 
 AGE = Path(os.environ["OMARCHY_TEST_AGE"]) if os.environ.get("OMARCHY_TEST_AGE") else None
@@ -24,18 +24,8 @@ SECRET = b"synthetic-only-otter-maple-window-cobalt"
 class BundleProbe(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if AGE is None:
+        if configured_age() is None:
             raise unittest.SkipTest("set OMARCHY_TEST_AGE and OMARCHY_TEST_AGE_SHA256 for real age tests")
-        expected = os.environ.get("OMARCHY_TEST_AGE_SHA256", "")
-        if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected):
-            raise RuntimeError("OMARCHY_TEST_AGE_SHA256 must identify the independently verified executable")
-        if not AGE.is_absolute() or probe.digest_file(AGE) != expected:
-            raise RuntimeError("age path or executable differs from the verified dependency")
-        version = subprocess.run(
-            [str(AGE), "--version"], check=True, capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-        if version not in ("1.3.2", "v1.3.2"):
-            raise RuntimeError("this disposable probe requires age 1.3.2")
         cls.temporary = tempfile.TemporaryDirectory(prefix="migration-bundle-probe-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name)

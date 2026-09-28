@@ -80,7 +80,7 @@ Try owns source consent and the VM lifecycle journal. The shared module owns exp
 
 ## Delivery sequence
 
-1. **Agree on the boundary and fixture.** Scott supplies a runnable synthetic exporter and request/result fixtures. Together choose capture sequencing, passphrase interaction, and local transport. Try lifecycle and delivery review can begin while Scott finishes the fixture.
+1. **Agree on the boundary and fixture.** Scott has supplied a [runnable synthetic exporter and sample request](../../Development/migration_bundle_probe/FIXTURE.md) with progress, cancellation, and completed-job reuse. Together choose production capture sequencing, passphrase interaction, and local transport. Try lifecycle and delivery review can begin against this explicit test-only interface.
 2. **Try-only export milestone.** T1–T3 run synthetic projects/configuration through an existing VM and produce an encrypted bundle locally. A development action inside Try is sufficient. Test success, cancel, interruption, low space, moved storage, and duplicate requests.
 3. **Installer coordination milestone.** Add T4 and the Omarchy Installer client. Test authenticated requests, source/account binding, app restart, status, and cancellation against synthetic data.
 4. **Shared exporter integration.** Replace the fixture once production portable export/restore passes. Test a custom theme, unknown personal configuration, and Git work including uncommitted/untracked files; then qualify profiles, credentials, and databases through supported adapters.
@@ -90,7 +90,7 @@ Milestones 1–3 can progress independently of native target staging. Their succ
 
 ## Current progress
 
-Requirements and source inventory are documented. An experimental age-based encrypted bundle has 18 passing local tests covering streaming, synthetic credential inclusion/exclusion, malformed archives, tampering, wrong passphrases, and cancellation. The Omarchy Installer staging components also have 44 passing unprivileged tests. The production exporter/importer, application adapters, and complete native reboot/encryption handoff remain unfinished; the probe does not restore a user's home.
+Requirements and source inventory are documented. The age-based bundle has 18 behavioral tests, staging has 44 cases, and the runnable fixture adds 10 request/result and cancellation checks. The [validation record](validation.md) identifies which checks ran and any optional skip. An [isolated M4 experiment](m4-hvf-experiment.md) also passed Btrfs growth, interrupted-copy resume, and authentication after a clean second boot. The production exporter/importer, application adapters, and complete native reboot/encryption handoff remain unfinished; the probe does not restore a user's home.
 
 My M4 with Try is available for synthetic experiments. Later real examples are Brave Origin, 1Password desktop/extension, Codex CLI through mise, and theme/custom settings. Restoring app data and retaining an authenticated session are separate outcomes; fresh sign-in may be necessary. M4 VM testing does not establish native hardware support.
 
