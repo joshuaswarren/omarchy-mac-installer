@@ -310,7 +310,7 @@ def unique_json_pairs(pairs):
     return result
 
 
-def validate_archive(stream):
+def validate_archive(stream, *, _objects=None):
     length = read_header(stream, "manifest.json", MAX_MANIFEST)
     try:
         manifest = json.loads(read_exact(stream, length), object_pairs_hook=unique_json_pairs)
@@ -324,10 +324,16 @@ def validate_archive(stream):
             raise Rejected("entry size differs from manifest")
         checksum = hashlib.sha256()
         remaining = length
-        while remaining:
-            piece = read_exact(stream, min(CHUNK, remaining))
-            checksum.update(piece)
-            remaining -= len(piece)
+        # Optional private scratch output is never a destination path. The
+        # caller must withhold it until both archive and age EOF authenticate.
+        sink = contextlib.nullcontext() if _objects is None else _objects(entry)
+        with sink as output:
+            while remaining:
+                piece = read_exact(stream, min(CHUNK, remaining))
+                checksum.update(piece)
+                remaining -= len(piece)
+                if output is not None:
+                    output.write(piece)
         if checksum.hexdigest() != entry["sha256"]:
             raise Rejected("entry digest differs from manifest")
         consume_padding(stream, length)
@@ -344,6 +350,10 @@ def validate_archive(stream):
 
 
 def decode(age, secret, ciphertext, limit=MAX_TOTAL + MAX_MANIFEST + 2 * 1024 * 1024):
+    return _decode(age, secret, ciphertext, limit)
+
+
+def _decode(age, secret, ciphertext, limit, *, objects=None):
     fd = os.open(ciphertext, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb", buffering=0) as source:
         metadata = os.fstat(fd)
@@ -374,7 +384,7 @@ def decode(age, secret, ciphertext, limit=MAX_TOTAL + MAX_MANIFEST + 2 * 1024 * 
             feeder = threading.Thread(target=feed, daemon=True)
             feeder.start()
             try:
-                manifest = validate_archive(child.process.stdout)
+                manifest = validate_archive(child.process.stdout, _objects=objects)
                 child.finish()
                 feeder.join(timeout=1)
                 if errors or feeder.is_alive():

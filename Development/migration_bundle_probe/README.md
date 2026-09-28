@@ -4,6 +4,8 @@ This synthetic experiment exercises an encrypted archive using age 1.3.2. It is 
 
 The [runnable integration fixture](FIXTURE.md) now exposes synthetic capabilities, inventory, export progress, cancellation, and completed-job reuse through a development command.
 
+The [additive restoration experiment](RESTORE.md) authenticates into private scratch before planning and applying regular files to a disposable destination. It preserves existing-file conflicts and detects later edits or deletions on retry.
+
 ## What the experiment covers
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
@@ -32,7 +34,7 @@ Tests create fake source files and encrypted output in a private temporary direc
 
 ## Deliberate limits
 
-`decode` validates and hashes the archive; it does not extract files. Symlinks, hardlinks, PAX extensions, and device entries are rejected. Safe link preservation, extended metadata, ownership mapping, real extraction, and conflict-aware retry remain production work.
+`decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows additive regular-file restoration through `Restorer`. Symlinks, hardlinks, PAX extensions, and device entries remain rejected. Safe link preservation, extended metadata, replacement backups, full account mapping, and real-home qualification remain production work.
 
 Source capture is not yet stable: the probe stats/hashes inputs and later reopens them. It must not be used to claim a consistent capture of live files. The fixture holdouts act on an explicit synthetic file mapping; they do not establish credential protection before real home discovery/traversal or cover all credential-path aliases.
 
