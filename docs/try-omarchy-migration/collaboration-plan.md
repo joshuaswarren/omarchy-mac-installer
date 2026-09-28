@@ -29,6 +29,81 @@ Initial scope: one persistent source user and one fresh native destination user 
 
 The shared Linux command is planned as **omarchy-migration**, with inventory/export/plan/apply/report operations. Both products consume the same pinned implementation. These operations are design targets, not a finished API. Existing **omarchy-migrate** remains the separate Omarchy release-migration command.
 
+## What Try needs to collect and hand over
+
+Added 2026-09-28 UTC. This is the concrete collection checklist for the proposed work split. The tables specify required information and behavior; production JSON field names and transport are not frozen. The runnable fixture has its own deliberately smaller, synthetic-only schema. It must not be mistaken for the production data contract.
+
+Try supplies the selected VM/account context, consent, stable capture environment, and local export connection. **Scott's shared Linux exporter owns discovery of files and applications, category policy, exclusions, metadata, archive construction, and encryption.** Eduardo should wire that exporter into Try rather than build a second home scanner, application collector, or archive format. For now, that integration can use the runnable synthetic fixture.
+
+### A. Information Try supplies or obtains from the selected guest
+
+| Item | Required information | Use and handling |
+| --- | --- | --- |
+| Selected VM | Opaque persistent VM identity; current storage resolution; enough disk identity/change information to detect replacement; current running/stopped state. | Try resolves moved storage and keeps local filesystem references private. A display name or remembered path alone must not bind an export. Agree on the actual identity mechanism together. |
+| Selected Linux account | Actual username, UID/GID, and home location, obtained inside that VM for the approved account. | One account per export. Usernames and paths are private inventory, not public status text. Source IDs are provenance; native restore maps ownership to the new account. |
+| Installed capabilities | Try app version/build, delivered integration revision, actual guest architecture and Omarchy versions, installed exporter/protocol/bundle/policy versions, supported category/adapter IDs and versions, and setup/update requirements. | The guest exporter reports its own capabilities. Missing or unknown support is explicit; app version alone never enables a category. |
+| Shared folders | Available share identities, guest mount/link locations, current availability, and the user's explicitly selected shared content. | Host paths/bookmarks remain local to Try where possible; an opaque share reference binds the private selection. Expose only approved content to capture. Do not recursively follow every external link. |
+| User approval | Opaque request identity, VM/account binding, approved inventory/selection revision, selected categories and roots, separately selected credential/profile stores, approved shares, and an expiring authorization binding. | Authorization belongs to this request and source. A changed account, replaced disk, changed selection, or expired approval requires revalidation. The production selection is more specific than the fixture's single credential boolean. |
+| Capture lifecycle | One job/lifecycle owner and disk lock; application-preparation results from the exporter; capture identity and cutover time; stable-source mechanism and its outcome. | Record enough evidence to distinguish prepared, capturing, finalized, cancelled, and failed. Do not combine an old inventory/preparation receipt with an unrelated capture. The stable-capture mechanism is a joint decision. |
+| Export destination and capacity | A private job-scoped output connection/location, host free space, and capture-environment scratch capacity supplied to preflight. | The exporter supplies bundle/scratch estimates. Exported personal payload reaches macOS only as ciphertext; application dumps and plaintext scratch remain inside the controlled capture environment. A dedicated export connection must work without enabling personal folder sharing. |
+| Try-owned changes | Versioned descriptions/examples of injected configuration, menu actions, repository-refresh hooks, share links, and VM/display integration files. | Eduardo reviews which additions belong to Try and their version boundaries. Scott implements the precise exclusion/transformation rules and preserves unrelated user edits. |
+
+Selected Mac shares need a separate capture identity and consistency/change-detection result for each approved external source. Stopping or locking the VM, or mounting a share read-only in the guest, does not stop Mac applications from changing it. Try coordinates the agreed host-side preparation/capture mechanism and the exporter validates its inputs. A disappearing or changing share requires recapture, an explicitly approved omission, or an unavailable/failed result; completion must not claim that inconsistent shared content was captured successfully.
+
+The installer never collects the source Linux login password. Necessary login or sudo prompts remain inside the guest. Transfer-passphrase entry/confirmation must use the agreed private interaction with the exporter; the passphrase is never an argument, status field, persisted request, receipt, or diagnostic log entry.
+
+### B. Inventory the shared exporter returns through Try
+
+After the user approves read-only inventory, the shared exporter returns the following for the selected account. Try surfaces the results and passes the approved selection back; Scott supplies the collectors and policy.
+
+| Inventory item | Required contents |
+| --- | --- |
+| Inventory identity | Revision bound to the selected VM/account, collection time, exporter/policy versions, and actual capabilities. Final capture validates that the approved scope still applies; an inventory is not a frozen copy of a live home. |
+| Categories and roots | Stable category/root identifiers, eligible/default-selected/unavailable state, logical byte estimates and item counts where measurable, and explicit unknown estimates. Detailed paths are private. |
+| Applications and tools | Installed package names/versions, known acquisition source/repository, and explicit-versus-dependency status where available; supported tool-manager declarations such as mise. Unknown/custom sources are reported for later handling. No serialized installation commands or imported hooks are executed. |
+| Preparation requirements | Applications that need closure or a supported consistent export, available adapter versions, unsupported stores, and failed or pending preparation steps. A closed application is evidence for its declared adapter, not a guarantee that every database format is supported. |
+| External dependencies | Selected shared content and destination mapping, unavailable shares, links outside the approved scope, and other inputs requiring a user decision. |
+| Omissions and transformations | Known hardware/VM exclusions, credential/profile holdouts, unsupported file types or metadata, and the versioned rules that would alter selected configuration. Unknown personal configuration is preserved under the agreed portable-file policy. |
+| Space estimates | Selected logical data size, expected expanded restore size, temporary capture/dump requirements, and ciphertext estimate with explicit uncertainty. Do not assume compression will make the export fit. |
+
+Detailed inventory can contain sensitive filenames and application information. Keep it in the approved local interaction/private job state. General progress messages and the public ciphertext receipt carry opaque identities and aggregate progress, not personal paths or credential contents. No diagnostic upload is required.
+
+### C. Data the shared exporter is expected to put in the encrypted bundle
+
+These are production requirements, not claims that every adapter is implemented. Ordinary personal files and unfamiliar configuration use the generic portable-file policy; they do not need individual application adapters. Browser profiles, protected stores, databases, and other adapter-dependent categories require qualified support and must advertise unavailable rather than fall through to raw copying.
+
+| Category | Intended collected content | Selection and limits |
+| --- | --- | --- |
+| Personal files and projects | Selected documents and project trees, including dotfiles, Git history, tracked modifications, and untracked work. | Preserve the selected workspace under explicit policy; a fresh Git clone is insufficient. Do not execute project scripts during capture or restore. |
+| Personal settings and themes | Shell/editor settings, selected theme/background assets, supported application preferences, and unfamiliar personal configuration. | Apply only enumerated hardware/display/boot/VM exclusions and known Try transformations. Retain originals and report transformations; do not attempt to interpret all user dotfiles. |
+| Applications and development tools | Package/tool inventory and supported declarative acquisition metadata. | The destination may download applications and dependencies again. Source machine binaries, package caches, or installation scripts are not a substitute for supported destination installation. Omission rules belong to the versioned exporter policy. |
+| Browser profiles | Selected, supported profile data, with browser/version/profile identity and a consistent capture. | Profiles can contain authentication material and require explicit inclusion. Data-only modes are offered only when an adapter can separate them reliably. Brave Origin is a later acceptance case, not current proven support. |
+| Credentials and protected stores | Explicitly selected supported SSH/GPG/keyring material, application credential stores, and authentication-bearing CLI/browser data. | Recognized stores are held out before generic traversal unless their supported export mode is selected. No general secret-free guarantee for arbitrary project files. 1Password desktop/extension and Codex CLI are later acceptance cases; data restoration and continued sign-in are separate outcomes. |
+| Databases and container data | Consistent exports or supported volume captures with application/format versions and preparation results. | Require an implemented adapter; copying arbitrary live database files is insufficient. An unavailable adapter must be reported, not bypassed. |
+| Selected Mac shared content | Explicitly selected shared files, materialized into an agreed destination directory. | Copy only approved content through the controlled capture environment. Do not preserve a broken dependency on the original Mac mount or follow unrelated external links. |
+
+Inside the encrypted manifest, Scott's module records the export/source/account identities, source versions/architecture, selection and policy revisions, capture time, categories, application inventory, per-entry relative paths/types/content digests/sizes/modes/timestamps, declared link and ownership-mapping information, transformations, and omissions. Directory/link/extended-metadata behavior still needs its production contract; unsupported cases must be explicit. Machine-bound display/graphics/boot/VM settings and source account password databases are excluded from restoration. Device-specific credentials that cannot transfer must be reported accordingly.
+
+### D. What a completed Try handoff contains
+
+Try returns the exporter's completed result only after finalization succeeds. The required meanings are:
+
+1. Opaque request and export identities, bound to the approved source/account and selection revision without exposing private account details in the public receipt.
+2. Bundle format/version and the exporter/policy versions needed for compatibility checking.
+3. Final ciphertext byte length and SHA-256, plus a scoped local reference/stream from which Omarchy Installer can read those exact bytes.
+4. Accurate terminal state and access to the private per-category result/omission report. Unavailable or deselected categories are distinguishable from failures.
+5. Defined lifetime and retry behavior: retain the source VM and completed export, reconcile repeated requests with the same job, and require explicit cleanup. An interrupted ciphertext file alone is never a completed export.
+
+The installer verifies the received bytes; the importer separately authenticates the encrypted contents with the transfer passphrase. The checksum is not peer authentication or proof of consent. The result carries neither a passphrase nor a whole raw VM disk. Transport-specific access/expiry behavior and the production receipt fields must be agreed before the two apps depend on them.
+
+### E. First implementation Eduardo can start now
+
+Deliver and run the [synthetic fixture](../../Development/migration_bundle_probe/FIXTURE.md) in an existing guest through Try's integration mechanism, with a private export connection and Try-owned job/lifecycle state. The fixture emits fixed fake inventory, progress, and a real encrypted result; Try must identify that result as synthetic. It does not capture a real account or prove that applications were prepared.
+
+Exercise success, cancellation, repeated completed requests, an active/incomplete duplicate request, unavailable output/low space, moved VM storage, and guest/app interruption. Feed the completed ciphertext and receipt to a verifier and show that the original guest remains usable. Keep unsupported production categories unavailable. Scott then replaces the fixture with the shared production module as its contracts are qualified.
+
+Before real-data collection, agree together on the guest upgrade path, VM/disk identity binding, stable-capture mechanism, transfer-passphrase interaction, authenticated local transport, and versioned production schemas. Those are explicit integration decisions, not extra collectors Eduardo must invent.
+
 ## Try work packages
 
 ### T1. Deliver export support to existing guests
