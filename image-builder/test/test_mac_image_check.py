@@ -55,7 +55,8 @@ def package_set(packages) -> str:
 
 
 def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
-          profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None) -> None:
+          profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None,
+          sources=(("omarchy", "a" * 40),), runtime_sources=None) -> None:
     lab = "profile=lab" in profile
     name = name or (LAB_NAME if lab else NAME)
     payload = out / "payload"
@@ -85,7 +86,7 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
               "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "lab" if lab else "test"}
     if target_edit:
         target = target_edit(target)
-    report = {"result": inspection}
+    report = {"result": inspection, "runtime_sources": dict(sources) if runtime_sources is None else runtime_sources}
     if target is not None:
         report["image_target"] = target
     digest = inspection_digest or next((l.split("=", 1)[1] for l in profile if l.startswith("lab_access_sha256=")), None)
@@ -97,6 +98,7 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
              "builder_commit=" + "c" * 40, "builder_tree_clean=true", f"inputs_sha256={sha(out / 'inputs')}"]
     lines += [f"input.{k}={v}" for k, v in INPUTS.items()]
     lines += [f"candidate={n}|{v}|{f}|{s}" for n, v, _, f, s in candidates]
+    lines += [f"candidate_source={n}|{c}" for n, c in sources]
     lines += ["hardware_setup=build", *(profile if provenance_profile is None else provenance_profile),
               f"package_set_sha256={package_set(packages)}", f"package_count={len(packages)}"]
     lines += [f"package={i}|{'|'.join(p)}" for i, p in enumerate(packages, 1)]
@@ -178,6 +180,27 @@ class BuildDirectoryTest(unittest.TestCase):
                 build(self.out, target_edit=edit)
                 with self.assertRaisesRegex(check.CheckError, message):
                     check.check_provenance("edge", self.out)
+
+    def test_runtime_sources_must_be_inspections_and_the_sets(self):
+        cases = {
+            "no source": dict(sources=(), runtime_sources={}),
+            "twice": dict(sources=(("omarchy", "a" * 40), ("omarchy", "a" * 40)), runtime_sources={"omarchy": "a" * 40}),
+            "not a set package": dict(sources=(("omarchy", "a" * 40), ("glibc", "a" * 40))),
+            "not a commit": dict(sources=(("omarchy", "a" * 39),)),
+            "not inspection's": dict(runtime_sources={"omarchy": "a" * 40, "uboot-asahi": "b" * 40}),
+            "another runtime commit": dict(sources=(("omarchy", "b" * 40),)),
+        }
+        for label, change in cases.items():
+            with self.subTest(label):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, **change)
+                with self.assertRaisesRegex(check.CheckError, "candidate source|runtime"):
+                    check.check_provenance("edge", self.out)
+        shutil.rmtree(self.out)
+        self.out.mkdir()
+        build(self.out, sources=(("omarchy", "a" * 40), ("uboot-asahi", "b" * 40)))
+        check.check_provenance("edge", self.out)
 
     def test_a_changed_payload(self):
         build(self.out)

@@ -343,6 +343,100 @@ if ((EUID != 0)); then
   pass "without a way to hide its loop devices, the build refuses to run beside a desktop automounter"
 fi
 
+# ── boot setup ─────────────────────────────────────────────────────────────
+# The boot setup's script runs outside a chroot here: its fixed paths move
+# under the scratch root, and the dispatcher and the runtime's leaves are
+# fakes that record whether the Limine gate was set when each ran.
+boot_root=$scratch/boot-root
+logs=$scratch/boot-logs
+findmnt() { echo /dev/loop7; }
+isolated_chroot() {
+  shift
+  if [[ $1 == /usr/bin/omarchy-lifecycle-dispatch ]]; then
+    [[ $* == "/usr/bin/omarchy-lifecycle-dispatch --resolve setup-boot" ]] || return 99
+    [[ -z $resolve_output ]] || echo "$resolve_output"
+    return "$resolve_status"
+  fi
+  local mode=${*: -1} script
+  script=$(sed -e "s|/dev/disk/by-uuid|$boot_root/by-uuid|g" -e "s|/var/lib/omarchy/limine.enabled|$boot_root/gate|g")
+  PATH=$boot_root/bin:$PATH OMARCHY_PATH=$boot_root/runtime /bin/bash -eE -s -- /dev/loop7 "$ROOT_UUID" "$mode" <<<"$script" || return
+  mkdir -p "$target/boot/efi/EFI/Linux" "$target/boot/efi/EFI/BOOT" "$target/usr/share/limine" "$target/etc"
+  echo "/Omarchy" >"$target/boot/efi/limine.conf"
+  echo uki >"$target/boot/efi/EFI/Linux/omarchy_$KERNEL.efi"
+  echo limine | tee "$target/usr/share/limine/BOOTAA64.EFI" >"$target/boot/efi/EFI/BOOT/BOOTAA64.EFI"
+}
+boot_layout() {
+  rm -rf "$boot_root" "$scratch/boot-target"
+  target=$scratch/boot-target
+  mkdir -p "$boot_root/bin" "$boot_root/runtime/install/hardware/apple" "$target/usr/bin" "$logs"
+  : >"$boot_root/ran"
+  resolve_output=/usr/lib/omarchy/mac-boot/setup-boot resolve_status=0
+  local part
+  for part in "$@"; do
+    case $part in
+      dispatcher) printf '#!/bin/bash\n' >"$target/usr/bin/omarchy-lifecycle-dispatch"; chmod +x "$target/usr/bin/omarchy-lifecycle-dispatch" ;;
+      entry) mkdir -p "$target/usr/lib/omarchy/mac-boot"; : >"$target/usr/lib/omarchy/mac-boot/setup-boot" ;;
+      leaves)
+        for leaf in grub-console limine-boot; do
+          printf 'echo "%s $([[ -e %s ]] && echo gate || echo no-gate) sudo=$(type -t sudo)" >>%s\n' \
+            "$leaf" "$boot_root/gate" "$boot_root/ran" >"$boot_root/runtime/install/hardware/apple/$leaf.sh"
+          mkdir -p "$target/usr/share/omarchy/install/hardware/apple"
+          : >"$target/usr/share/omarchy/install/hardware/apple/$leaf.sh"
+        done ;;
+    esac
+  done
+  printf '#!/bin/bash\necho "$* $([[ -e %s ]] && echo gate || echo no-gate)" >>%s\n' "$boot_root/gate" "$boot_root/ran" \
+    >"$boot_root/bin/omarchy-lifecycle-dispatch"
+  chmod +x "$boot_root/bin/omarchy-lifecycle-dispatch"
+}
+activate() { (fail() { builder_fail "$@"; }; activate_limine); }
+
+boot_layout dispatcher entry
+activate
+[[ $(<"$boot_root/ran") == $'setup-boot no-gate\nsetup-boot gate' ]] ||
+  fail "setup-boot runs before the gate, then after it" "$(<"$boot_root/ran")"
+[[ $(<"$logs/limine-boot.log") == "boot setup: dispatch" && ! -e $boot_root/by-uuid/$ROOT_UUID ]] ||
+  fail "the boot setup says it dispatched and removes its device link" "$(<"$logs/limine-boot.log")"
+pass "a runtime without Apple leaves (omacom/omarchy#13362) runs omarchy-mac-boot's setup-boot, before the Limine gate and after it"
+
+boot_layout dispatcher entry leaves
+activate
+[[ $(<"$boot_root/ran") == $'setup-boot no-gate\nsetup-boot gate' ]] ||
+  fail "a boot package with setup-boot wins over the runtime's shims" "$(<"$boot_root/ran")"
+pass "a boot package with setup-boot is dispatched even when the runtime still carries its Apple leaves"
+
+for layout in "leaves" "dispatcher leaves" "entry leaves" "dispatcher entry leaves:2"; do
+  boot_layout ${layout%:*}
+  [[ $layout != *:2 ]] || resolve_output="" resolve_status=2
+  activate
+  [[ $(<"$boot_root/ran") == $'grub-console no-gate sudo=function\nlimine-boot gate sudo=function' ]] ||
+    fail "the runtime's leaves run as before ($layout)" "$(<"$boot_root/ran")"
+done
+pass "without a dispatchable setup-boot (no entrypoint, no dispatcher, or one without the operation) the runtime's Apple leaves run, the gate between them"
+
+for layout in "dispatcher entry leaves:1" "dispatcher entry leaves:0:/usr/lib/omarchy/mac-boot/other" "dispatcher entry leaves:0:" \
+  "dispatcher entry:2" "dispatcher" ""; do
+  IFS=: read -r parts status output <<<"$layout"
+  boot_layout $parts
+  if [[ -n $status ]]; then
+    resolve_status=$status resolve_output=$output
+  fi
+  if activate 2>"$scratch/boot-error"; then
+    fail "the boot setup is refused ($layout)"
+  fi
+  [[ ! -s $boot_root/ran ]] || fail "nothing runs when the boot setup is refused ($layout)"
+done
+grep -Fq "neither omarchy-mac-boot's setup-boot operation nor the runtime's grub-console.sh" "$scratch/boot-error" ||
+  fail "a runtime with neither boot setup names both" "$(<"$scratch/boot-error")"
+pass "a dispatcher that fails or resolves setup-boot elsewhere stops the build, and so does a runtime with no boot setup at all"
+
+boot_layout dispatcher entry
+mkdir -p "$target/var/lib/omarchy"
+: >"$target/var/lib/omarchy/limine.enabled"
+if activate 2>/dev/null; then fail "a gate set before the boot setup is refused"; fi
+pass "the Limine gate must not be set before the boot setup runs"
+unset -f findmnt isolated_chroot
+
 # ── lab access ─────────────────────────────────────────────────────────────
 target=$scratch/lab-root
 logs=$scratch

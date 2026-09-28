@@ -1161,35 +1161,70 @@ probe_first_boot() {
   [[ -z $requests ]] || fail "first boot would need the network: its hardware steps ask pacman for $(paste -sd';' - <<<"$requests") (logs/first-boot-probe.log)"
 }
 
-# The Mac boots Limine from the moment the install finishes. The runtime's
-# console leaf runs first (it adds the root-device wait to the command line in
-# /etc/default/grub, which the Limine line is derived from), then the Limine
-# gate is armed and the Limine leaf activates it: the same activation an
-# installed Mac runs, here once, in the image, with OMARCHY_MAC_IMAGE_BUILD
-# cleared for these two leaves only. No GRUB is installed or run.
-activate_limine() {
-  local root_device identity leaf
+# The Mac boots Limine from the moment the install finishes. The Mac's boot
+# setup runs its console leaf first (it adds the root-device wait to the
+# command line in /etc/default/grub, which the Limine line is derived from),
+# then the Limine gate is armed and the Limine leaf activates it: the same
+# activation an installed Mac runs, here once, in the image, with
+# OMARCHY_MAC_IMAGE_BUILD cleared. No GRUB is installed or run.
+#
+# omarchy-mac-boot owns the leaves and runs them as the lifecycle dispatcher's
+# setup-boot operation (omacom/omarchy#13362 and later). That operation runs
+# both leaves, and the Limine leaf does nothing without the gate, so it runs
+# once before the gate (the console settings) and once after (the console leaf
+# finds nothing to change; Limine is activated). A runtime whose dispatcher
+# predates setup-boot, or a boot package without it, keeps the leaves the
+# runtime carries in install/hardware/apple, sourced as before.
+boot_setup_mode() {
+  local entry=/usr/lib/omarchy/mac-boot/setup-boot dispatcher=/usr/bin/omarchy-lifecycle-dispatch leaf resolved status
+  if [[ -e $target$entry && -x $target$dispatcher ]]; then
+    status=0
+    resolved=$(isolated_chroot "$target" "$dispatcher" --resolve setup-boot 2>>"$logs/limine-boot.log") || status=$?
+    if ((status == 0)) && [[ $resolved == "$entry" ]]; then
+      echo dispatch
+      return 0
+    fi
+    # 2 is the dispatcher's usage error: it has no setup-boot operation.
+    ((status == 2)) || fail "the runtime's dispatcher does not resolve setup-boot to $entry (logs/limine-boot.log)"
+  fi
   for leaf in grub-console.sh limine-boot.sh; do
-    [[ -f $target/usr/share/omarchy/install/hardware/apple/$leaf ]] || fail "the runtime carries no Apple $leaf"
+    [[ -f $target/usr/share/omarchy/install/hardware/apple/$leaf ]] ||
+      fail "the image has no Apple boot setup: neither omarchy-mac-boot's setup-boot operation nor the runtime's $leaf"
   done
+  echo leaves
+}
+
+activate_limine() {
+  local root_device identity mode
   root_device=$(findmnt -n -o SOURCE --target "$target" | sed 's/\[.*//')
   mount_api
-  # The leaves reach for sudo, which clears the environment; everything here
-  # is already root, so a sudo that execs its arguments stands in.
+  : >"$logs/limine-boot.log"
+  [[ ! -e $target/var/lib/omarchy/limine.enabled ]] || fail "the Limine gate is set before the boot setup ran"
+  mode=$(boot_setup_mode) || exit 1
+  echo "boot setup: $mode" >>"$logs/limine-boot.log"
   isolated_chroot "$target" env -i PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
     HOME=/root TERM=dumb LANG=C.UTF-8 OMARCHY_PATH=/usr/share/omarchy BOOT_PART=/boot EFI_PART=/boot/efi \
-    /bin/bash -eE -s -- "$root_device" "$ROOT_UUID" >"$logs/limine-boot.log" 2>&1 <<'SCRIPT' ||
+    /bin/bash -eE -s -- "$root_device" "$ROOT_UUID" "$mode" >>"$logs/limine-boot.log" 2>&1 <<'SCRIPT' ||
 set -euo pipefail
 link=/dev/disk/by-uuid/$2
 mkdir -p /dev/disk/by-uuid
 [[ ! -e $link ]] || [[ $(readlink -f "$link") == "$(readlink -f "$1")" ]] || { echo "$link names another device" >&2; exit 1; }
 ln -sfn "$1" "$link"
 trap 'rm -f "$link"' EXIT
-sudo() { "$@"; }
-export -f sudo
-source "$OMARCHY_PATH/install/hardware/apple/grub-console.sh"
-install -Dm644 /dev/null /var/lib/omarchy/limine.enabled
-source "$OMARCHY_PATH/install/hardware/apple/limine-boot.sh"
+if [[ $3 == dispatch ]]; then
+  omarchy-lifecycle-dispatch setup-boot
+  install -Dm644 /dev/null /var/lib/omarchy/limine.enabled
+  omarchy-lifecycle-dispatch setup-boot
+else
+  # The runtime's leaves reach for sudo, which clears the environment;
+  # everything here is already root, so a sudo that execs its arguments
+  # stands in.
+  sudo() { "$@"; }
+  export -f sudo
+  source "$OMARCHY_PATH/install/hardware/apple/grub-console.sh"
+  install -Dm644 /dev/null /var/lib/omarchy/limine.enabled
+  source "$OMARCHY_PATH/install/hardware/apple/limine-boot.sh"
+fi
 SCRIPT
     fail "the Limine activation failed (logs/limine-boot.log)"
   unmount_api
@@ -1329,6 +1364,7 @@ write_provenance() {
       printf 'toolchain=%s\n' "$(pacman -Q "$name" | tr ' ' '|')"
     done
     jq -r '.packages[] | "candidate=\(.name)|\(.version)|\(.filename)|\(.sha256)"' "$candidates/import.json"
+    jq -r '.packages[] | select(.group == "runtime") | "candidate_source=\(.name)|\(.source_commit)"' "$candidates/import.json"
     printf 'hardware_setup=%s\n' "$hardware_setup"
     printf 'test_image_pin=%s\n' "$test_image_pin"
     [[ $profile == release ]] || printf 'profile=%s\nlab_access_sha256=%s\n' "$profile" "$lab_access_sha256"
