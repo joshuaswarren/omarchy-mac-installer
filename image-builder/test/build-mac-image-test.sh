@@ -358,7 +358,8 @@ isolated_chroot() {
     return "$resolve_status"
   fi
   local mode=${*: -1} script
-  script=$(sed -e "s|/dev/disk/by-uuid|$boot_root/by-uuid|g" -e "s|/var/lib/omarchy/limine.enabled|$boot_root/gate|g")
+  script=$(sed -e "s|/dev/disk/by-uuid|$boot_root/by-uuid|g" -e "s|/var/lib/omarchy/limine.enabled|$boot_root/gate|g" \
+    -e "s|/usr/bin/omarchy-lifecycle-dispatch|$boot_root/bin/omarchy-lifecycle-dispatch|g")
   PATH=$boot_root/bin:$PATH OMARCHY_PATH=$boot_root/runtime /bin/bash -eE -s -- /dev/loop7 "$ROOT_UUID" "$mode" <<<"$script" || return
   mkdir -p "$target/boot/efi/EFI/Linux" "$target/boot/efi/EFI/BOOT" "$target/usr/share/limine" "$target/etc"
   echo "/Omarchy" >"$target/boot/efi/limine.conf"
@@ -389,7 +390,16 @@ boot_layout() {
     >"$boot_root/bin/omarchy-lifecycle-dispatch"
   chmod +x "$boot_root/bin/omarchy-lifecycle-dispatch"
 }
-activate() { (fail() { builder_fail "$@"; }; activate_limine); }
+# GNU sed's in-place edit, which the activation's tail uses, on BSD sed too.
+portable_sed() {
+  if [[ $1 == -i ]]; then
+    shift
+    command sed "${@:1:$#-1}" "${@: -1}" >"${@: -1}.new" && mv "${@: -1}.new" "${@: -1}"
+  else
+    command sed "$@"
+  fi
+}
+activate() { (fail() { builder_fail "$@"; }; sed() { portable_sed "$@"; }; activate_limine); }
 
 boot_layout dispatcher entry
 activate

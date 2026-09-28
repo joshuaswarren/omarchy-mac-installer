@@ -1212,9 +1212,9 @@ mkdir -p /dev/disk/by-uuid
 ln -sfn "$1" "$link"
 trap 'rm -f "$link"' EXIT
 if [[ $3 == dispatch ]]; then
-  omarchy-lifecycle-dispatch setup-boot
+  /usr/bin/omarchy-lifecycle-dispatch setup-boot
   install -Dm644 /dev/null /var/lib/omarchy/limine.enabled
-  omarchy-lifecycle-dispatch setup-boot
+  /usr/bin/omarchy-lifecycle-dispatch setup-boot
 else
   # The runtime's leaves reach for sudo, which clears the environment;
   # everything here is already root, so a sudo that execs its arguments
