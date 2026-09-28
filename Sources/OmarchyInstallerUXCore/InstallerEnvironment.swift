@@ -152,7 +152,7 @@
       let remaining = free - min(free, allocation)
       guard remaining < Self.recommendedMacOSFreeBytes else { return nil }
       return
-        "macOS will keep less free space than recommended: about \(remaining / 1_000_000_000) GB instead of 38 GB. A macOS update may not install until you free up space in macOS. This estimate includes installation staging space."
+        "macOS will have about \(remaining / 1_000_000_000) GB free, less than the recommended 38 GB. You may need to free up space in macOS before an update will install."
     }
 
     public func spaceCautions(for allocation: UInt64) -> [String] {
@@ -160,11 +160,11 @@
       if let recommended = recommendedOmarchyBytes, allocation < recommended {
         if allocation <= minimumBytes {
           cautions.append(
-            "Omarchy will use its minimum size, \(PlainLanguage.bytes(allocation)), with little room for updates and snapshots. Choose a larger size if you can."
+            "Omarchy will use its minimum size, \(PlainLanguage.bytes(allocation)), leaving little room for updates and snapshots."
           )
         } else {
           cautions.append(
-            "Omarchy will use \(PlainLanguage.bytes(allocation)), below the recommended \(PlainLanguage.bytes(recommended)), with limited room for updates and snapshots. Choose a larger size if you can."
+            "Omarchy will use \(PlainLanguage.bytes(allocation)), less than the recommended \(PlainLanguage.bytes(recommended)), leaving limited room for updates and snapshots."
           )
         }
       }

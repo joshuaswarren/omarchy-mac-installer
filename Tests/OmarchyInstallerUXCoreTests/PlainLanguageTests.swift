@@ -12,18 +12,25 @@
         bindingDigest: "test", macOSFreeBeforeAllocationBytes: 80_000_000_000,
         recommendedOmarchyBytes: 77_000_000_000)
       XCTAssertEqual(plan.recommendedMacOSContainerBytes, 203_000_000_000)
-      XCTAssertTrue(plan.spaceCautions(for: 40_000_000_000)[0].contains("minimum size, 40 GB"))
+      XCTAssertEqual(
+        plan.spaceCautions(for: 40_000_000_000),
+        ["Omarchy will use its minimum size, 40 GB, leaving little room for updates and snapshots."]
+      )
       XCTAssertEqual(plan.spaceCautions(for: 42_000_000_000).count, 1)
       XCTAssertNil(plan.macOSSpaceCaution(for: 42_000_000_000))
       XCTAssertEqual(
         plan.macOSSpaceCaution(for: 42_000_000_001),
         plan.spaceCautions(for: 42_000_000_001).first)
-      XCTAssertTrue(
-        plan.spaceCautions(for: 42_000_000_001)[0].contains("about 37 GB instead of 38 GB"))
+      XCTAssertEqual(
+        plan.spaceCautions(for: 42_000_000_001)[0],
+        "macOS will have about 37 GB free, less than the recommended 38 GB. You may need to free up space in macOS before an update will install."
+      )
       let warnings = plan.spaceCautions(for: 43_000_000_000)
       XCTAssertEqual(warnings.count, 2)
-      XCTAssertTrue(warnings[0].contains("about 37 GB instead of 38 GB"))
-      XCTAssertTrue(warnings[1].contains("recommended 77 GB"))
+      XCTAssertEqual(
+        warnings[1],
+        "Omarchy will use 43 GB, less than the recommended 77 GB, leaving limited room for updates and snapshots."
+      )
       XCTAssertEqual(plan.spaceCautions(for: 77_000_000_000).count, 1)
       let free = PlanDisplay(
         diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
