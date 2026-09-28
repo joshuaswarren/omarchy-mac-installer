@@ -429,7 +429,7 @@
       disk.files = nil
       assertRefusal(
         disk,
-        "Found the installation “Asahi Alarm Minimal” (disk0s3, disk0s4, disk0s5), but its files couldn’t be checked: disk0s4 couldn’t be mounted read-only. Nothing was changed."
+        "Found the installation “Asahi Alarm Minimal” (disk0s3, disk0s4, disk0s5), but its files couldn’t be checked: disk0s4 couldn’t be read without mounting it. Nothing was changed."
       )
     }
 

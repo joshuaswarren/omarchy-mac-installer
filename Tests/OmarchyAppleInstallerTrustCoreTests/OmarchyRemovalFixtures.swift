@@ -294,7 +294,7 @@
       evidenceReads += 1
       if evidenceReads == 2 { afterPlanning?(self) }
       guard let files else {
-        throw RemovalFailure(message: "disk0s4 couldn’t be mounted read-only.")
+        throw RemovalFailure(message: "disk0s4 couldn’t be read without mounting it.")
       }
       return RemovalEvidence(files: files)
     }

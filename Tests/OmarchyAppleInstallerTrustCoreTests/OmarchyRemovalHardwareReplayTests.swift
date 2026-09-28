@@ -25,18 +25,12 @@
         plan.targetMacOSBytes, try CapturedMac("legacy-removed").size(of: "disk0s2"),
         "macOS grows to the size it had on the Mac after this removal")
       try assertConfirmed(plan, esp: "1bc56391-63e4-4bbd-9485-4517bc7f3aa7")
-      let path = try XCTUnwrap(mac.createdMountPoints.first)
-      XCTAssertEqual(mac.createdMountPoints.count, 1)
       XCTAssertEqual(
-        mac.log.filter { ["mount", "fatMount", "unmount"].contains($0[0]) },
-        [
-          ["mount", "readOnly", "nobrowse", "-mountPoint", path, "disk0s4"],
-          ["fatMount", "disk0s4", path],
-          ["unmount", "disk0s4"],
-        ])
-      XCTAssertEqual(
-        mac.opened, [[path, "disk0s4"], ["/Volumes/Asahi Alarm Minimal", "disk3s2"]])
-      XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        mac.log.filter { ["mount", "openFAT", "unmount"].contains($0[0]) },
+        [["openFAT", "disk0s4", "4096", "524288000"]],
+        "the dirty EFI partition is read from its raw device and never mounted")
+      XCTAssertEqual(mac.createdMountPoints, [])
+      XCTAssertEqual(mac.opened, [["/Volumes/Asahi Alarm Minimal", "disk3s2"]])
       assertReadOnly(mac)
     }
 
@@ -51,15 +45,11 @@
       XCTAssertEqual(plan.reclaimBytes, 315_999_911_936)
       XCTAssertEqual(plan.targetMacOSBytes, 994_662_584_320)
       try assertConfirmed(plan, esp: "14ea5495-50e5-40c5-a8a5-a52c66791e85")
-      let path = try XCTUnwrap(mac.createdMountPoints.first)
       XCTAssertEqual(
-        mac.log.filter { ["mount", "fatMount", "unmount"].contains($0[0]) },
-        [
-          ["mount", "readOnly", "nobrowse", "-mountPoint", path, "disk0s4"],
-          ["unmount", "disk0s4"],
-        ])
-      XCTAssertEqual(mac.opened, [[path, "disk0s4"], ["/Volumes/Omarchy", "disk2s2"]])
-      XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        mac.log.filter { ["mount", "openFAT", "unmount"].contains($0[0]) },
+        [["openFAT", "disk0s4", "4096", "524288000"]])
+      XCTAssertEqual(mac.createdMountPoints, [])
+      XCTAssertEqual(mac.opened, [["/Volumes/Omarchy", "disk2s2"]])
       assertReadOnly(mac)
     }
 
@@ -197,15 +187,7 @@
           self.createdMountPoints.append(url.resolvingSymlinksInPath().path)
           return url
         },
-        fatMount: { device, path in
-          self.lock.lock()
-          defer { self.lock.unlock() }
-          self.log.append(["fatMount", device, path])
-          guard self.mountedInfo[device] != nil else {
-            throw RemovalFailure(message: "mount_msdos failed")
-          }
-          self.mounted[device] = path
-        })
+        openFAT: { try self.openFAT($0, $1, $2) })
     }
 
     static func isReadOnly(_ argv: [String]) -> Bool {
@@ -217,7 +199,7 @@
           || (argv.count == 5 && argv[1] == "resizeContainer"
             && argv[3...] == ["limits", "-plist"])
       case "mount": return argv.count == 6 && argv[1] == "readOnly"
-      case "fatMount": return argv.count == 3
+      case "openFAT": return argv.count == 4
       case "unmount": return argv.count == 2
       default: return false
       }
@@ -289,6 +271,32 @@
       }
       return try RemovalFileTree(
         descriptor: open(tree.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC))
+    }
+
+    /// Serves the EFI partition's captured files from a FAT32 image, only while
+    /// diskutil reports it unmounted, with the geometry diskutil reported.
+    private func openFAT(_ device: String, _ blockSize: Int, _ size: UInt64) throws
+      -> any RemovalFileReading
+    {
+      lock.lock()
+      defer { lock.unlock() }
+      log.append(["openFAT", device, "\(blockSize)", "\(size)"])
+      let info = try plist(directory.appendingPathComponent("info/\(device).plist"))
+      guard let tree = trees[device], mounted[device] == nil,
+        (info["MountPoint"] as? String ?? "").isEmpty,
+        (info["DeviceBlockSize"] as? NSNumber)?.intValue == blockSize,
+        (info["Size"] as? NSNumber)?.uint64Value == size
+      else { throw RemovalFailure(message: "\(device) isn’t an unmounted EFI partition") }
+      func file(_ path: String) throws -> Data? {
+        let url = tree.appendingPathComponent(path)
+        return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+      }
+      let image = FATImageBuilder.esp(
+        RemovalInstallFiles(
+          espBootObject: try file("m1n1/boot.bin"), stubInfo: try file("asahi/stub_info.json"),
+          installerLog: try file("asahi/installer.log"), stubHasLibrary: false,
+          stubBootObject: nil))
+      return try OmarchyRemovalFATVolumeTests.volume(image.data)
     }
 
     /// The EFI partition's asahi/ files were copied from it. Its m1n1/boot.bin
