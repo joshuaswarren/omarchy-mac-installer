@@ -190,6 +190,71 @@ class CandidateSetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mixed package sources"):
             self.verify(directory, receipt)
 
+    def platform_set(self, label, declared, revisions=None, sources=None, channel=()):
+        """A set whose omarchy-mac and omarchy-mac-boot were built from their own
+        commits: REVISIONS in the archives, SOURCES in the manifest, DECLARED as
+        its platform_sources."""
+        revisions = revisions or {"omarchy-mac": "d" * 40, "omarchy-mac-boot": "e" * 40}
+        sources = revisions if sources is None else sources
+        contents = fixtures.default_contents()
+        files = {"omarchy-mac": "usr/share/omarchy-mac/source-revision",
+                 "omarchy-mac-boot": "usr/share/omarchy-mac/boot-source-revision"}
+        for name, revision in revisions.items():
+            contents[name][files[name]] = (revision + "\n").encode()
+
+        def edit(manifest):
+            for package in manifest["packages"]:
+                if package["name"] in sources and package["name"] not in channel:
+                    package["source"] = {"repository": fixtures.POLICY["source_repository"],
+                                         "commit": sources[package["name"]]}
+            if declared is not None:
+                manifest["platform_sources"] = declared
+
+        directory = self.work / label.replace(" ", "-")
+        return directory, fixtures.make_set(directory, self.signer, contents=contents, manifest_edit=edit, channel=channel)
+
+    def test_platform_packages_declared_from_their_own_commits(self):
+        declared = {"omarchy-mac": "d" * 40, "omarchy-mac-boot": "e" * 40}
+        directory, receipt = self.platform_set("declared", declared)
+        summary = self.verify(directory, receipt)
+        packages = {p["name"]: p for p in summary["packages"]}
+        self.assertEqual({n: (p["origin"], p["source_commit"]) for n, p in packages.items() if p["group"] == "runtime"},
+                         {"omarchy": ("commit", fixtures.SOURCE), "omarchy-settings": ("commit", fixtures.SOURCE),
+                          "omarchy-mac": ("platform " + "d" * 40, "d" * 40),
+                          "omarchy-mac-boot": ("platform " + "e" * 40, "e" * 40)})
+        self.assertNotIn("source_commit", packages["linux-aurora"])
+        self.assertEqual(fixtures.test_image_pin.pinned(summary), ["omarchy", "omarchy-mac", "omarchy-mac-boot", "omarchy-settings"])
+
+    def test_one_platform_package_declared(self):
+        directory, receipt = self.platform_set("one", {"omarchy-mac": "d" * 40}, revisions={"omarchy-mac": "d" * 40})
+        packages = {p["name"]: p for p in self.verify(directory, receipt)["packages"]}
+        self.assertEqual((packages["omarchy-mac"]["origin"], packages["omarchy-mac-boot"]["origin"]),
+                         ("platform " + "d" * 40, "commit"))
+
+    def test_platform_sources_that_do_not_hold(self):
+        d, e = "d" * 40, "e" * 40
+        both = {"omarchy-mac": d, "omarchy-mac-boot": e}
+        cases = (
+            ("undeclared", None, {}, "mixed package sources: omarchy-mac"),
+            ("half declared", {"omarchy-mac": d}, {}, "mixed package sources: omarchy-mac-boot"),
+            ("revision differs", both, dict(revisions={"omarchy-mac": "f" * 40, "omarchy-mac-boot": e}, sources=both),
+             "mixed package sources: omarchy-mac"),
+            ("manifest commit differs", both, dict(sources={"omarchy-mac": "f" * 40, "omarchy-mac-boot": e}),
+             "mixed package sources: omarchy-mac"),
+            ("from the channel", both, dict(channel=("omarchy-mac-boot",)), "mixed package sources: omarchy-mac-boot"),
+            ("runtime package", dict(both, omarchy=d), {}, "not a platform package: omarchy"),
+            ("boot package", dict(both, **{"linux-aurora": d}), {}, "not a platform package: linux-aurora"),
+            ("own commit", dict(both, **{"omarchy-mac": fixtures.SOURCE}), {}, "the set's own commit: omarchy-mac"),
+            ("short commit", dict(both, **{"omarchy-mac": "d" * 12}), {}, "invalid platform source commit: omarchy-mac"),
+            ("not a map", [["omarchy-mac", d]], {}, "invalid platform sources"),
+        )
+        for label, declared, change, pattern in cases:
+            with self.subTest(label):
+                directory, receipt = self.platform_set(label, declared, **change)
+                with self.assertRaisesRegex(ValueError, pattern):
+                    self.verify(directory, receipt)
+                shutil.rmtree(self.work / "output", ignore_errors=True)
+
     def test_set_digest_must_match_its_packages(self):
         directory, receipt = self.variant(manifest_edit=lambda m: m.update(set_sha256="0" * 64))
         with self.assertRaisesRegex(ValueError, "set digest"):

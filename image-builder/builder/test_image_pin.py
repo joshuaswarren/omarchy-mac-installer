@@ -6,9 +6,9 @@ versioned 4.0.0.alpha..., which sorts below the channel's omarchy (4.0.2 on
 edge), so a pacman -Syu on the installed Mac would replace it with the
 channel's. An image built from a test set (candidate_only, which is every set
 the importer accepts) therefore ignores upgrades of the packages built from the
-set's source commit, in a marked block of /etc/pacman.conf's [options]. A set
-package taken from the channel (the boot package, the closure) keeps following
-it. The runtime's own pacman templates carry no pin, and nothing else in the
+set's source commit, or from the commit the set declares for a platform
+package, in a marked block of /etc/pacman.conf's [options]. A set package taken
+from the channel (the boot package, the closure) keeps following it. The runtime's own pacman templates carry no pin, and nothing else in the
 image changes. Keep the marked lines until the channel carries qualified Mac
 packages: without them a pacman -Syu can downgrade and break the Mac.
 
@@ -26,7 +26,8 @@ REASON = "# whose version sorts below the channel's. Keep these three lines: the
 def pinned(summary: dict) -> list[str]:
     if summary.get("candidate_only") is not True:
         return []
-    return sorted(p["name"] for p in summary["packages"] if p.get("origin") == "commit")
+    return sorted(p["name"] for p in summary["packages"]
+                  if p.get("origin") == "commit" or p.get("origin", "").startswith("platform "))
 
 
 def render(template: bytes, names: list[str]) -> bytes:

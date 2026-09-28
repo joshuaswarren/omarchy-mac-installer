@@ -13,6 +13,15 @@ from an Omarchy channel. Those, the boot packages and the boot package the
 policy allows may come from that channel instead of a pull request build or
 the source commit; each is still signed by the set's key.
 
+The platform packages (omarchy-mac, omarchy-mac-boot) are versioned apart from
+the runtime, so a set may carry them built from their own commit of the source
+repository. It says so in its signed manifest, one entry per such package:
+
+  "platform_sources": {"omarchy-mac": "<commit>", "omarchy-mac-boot": "<commit>"}
+
+Each declared package must name that commit as its source and carry it as its
+source revision. Any other runtime package from another commit is refused.
+
   candidate_set.py import --input DIR --output DIR --receipt-sha256 HEX
                           --manifest-sha256 HEX --source-commit HEX
   candidate_set.py describe --input DIR
@@ -252,10 +261,18 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
         require(not set(names) & set(policy['refused_packages']), 'refused package in the set')
         require(runtime | boot <= set(names), 'wrong package set: missing '
                 + ', '.join(sorted(runtime | boot - set(names))))
+        declared = data.get('platform_sources', {})
+        require(isinstance(declared, dict), 'invalid platform sources')
+        for name, commit in declared.items():
+            require(name in policy['platform_packages'], 'platform sources name a package that is not a platform package: '
+                    + str(name))
+            require(isinstance(commit, str) and HEX40.fullmatch(commit) is not None,
+                    'invalid platform source commit: ' + name)
+            require(commit != source_commit, "platform sources name the set's own commit: " + name)
         signatures = {entry['file']: entry for entry in receipt.get('signatures', [])}
         require(len(signatures) == len(receipt.get('signatures', []))
                 and set(signatures) == {p['filename'] for p in packages}, 'unexpected signed inventory')
-        versions, payloads, fields_of, origins = {}, {}, {}, {}
+        versions, payloads, fields_of, origins, commits = {}, {}, {}, {}, {}
         for package in packages:
             name, filename = package['name'], package['filename']
             require(ARCHIVE.fullmatch(filename) is not None, 'invalid archive name')
@@ -275,7 +292,11 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
             origin = package.get('source', {})
             if name in runtime:
                 revision = member(path, REVISION_FILES[name]).decode().strip()
-                if origin.get('repository') == policy['source_repository'] and origin.get('commit') == source_commit:
+                if name in declared:
+                    require(origin.get('repository') == policy['source_repository']
+                            and origin.get('commit') == declared[name] == revision, 'mixed package sources: ' + name)
+                    origins[name] = 'platform ' + revision
+                elif origin.get('repository') == policy['source_repository'] and origin.get('commit') == source_commit:
                     require(revision == source_commit, 'mixed package sources: ' + name)
                     origins[name] = 'commit'
                 else:
@@ -283,6 +304,7 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
                     require(name in policy['channel_runtime_packages'] and from_channel(origin, filename)
                             and HEX40.fullmatch(revision) is not None, 'mixed package sources: ' + name)
                     origins[name] = 'channel ' + revision
+                commits[name] = revision
             elif name in boot:
                 require((origin.get('repository') == policy['boot_repository']
                          and HEX40.fullmatch(origin.get('commit', '')) is not None) or from_channel(origin, filename),
@@ -319,7 +341,8 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
         'set_sha256': data['set_sha256'],
         'packages': [{'name': p['name'], 'version': p['version'], 'filename': p['filename'], 'sha256': p['sha256'],
                       'group': 'runtime' if p['name'] in runtime else 'boot' if p['name'] in boot else 'closure',
-                      'origin': origins[p['name']]} for p in packages],
+                      'origin': origins[p['name']],
+                      **({'source_commit': commits[p['name']]} if p['name'] in runtime else {})} for p in packages],
     }
     (destination / 'import.json').write_text(json.dumps(summary, indent=2, sort_keys=True) + '\n')
     for path in destination.iterdir():
