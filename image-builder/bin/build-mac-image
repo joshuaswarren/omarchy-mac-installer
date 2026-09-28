@@ -561,7 +561,7 @@ prepare_isolated_api() {
   [[ -L $root/dev/stdin ]] || ln -s /proc/self/fd/0 "$root/dev/stdin"
   [[ -L $root/dev/stdout ]] || ln -s /proc/self/fd/1 "$root/dev/stdout"
   [[ -L $root/dev/stderr ]] || ln -s /proc/self/fd/2 "$root/dev/stderr"
-  while read -r name file; do
+  while ((${isolated_loops:-1})) && read -r name file; do
     [[ $file == "$work"/* ]] || continue
     node=${name##*/}
     [[ -e $root/dev/$node ]] || touch "$root/dev/$node"
@@ -575,7 +575,7 @@ prepare_isolated_api() {
   # when /dev/disk/by-uuid has it, so the image's root loop device gets that link.
   local root_device
   root_device=$(findmnt -n -o SOURCE --target "$root" 2>/dev/null | sed 's/\[.*//')
-  if [[ $root_device =~ ^/dev/loop[0-9]+$ && -n ${ROOT_UUID:-} ]]; then
+  if ((${isolated_loops:-1})) && [[ $root_device =~ ^/dev/loop[0-9]+$ && -n ${ROOT_UUID:-} ]]; then
     mkdir -p "$root/dev/disk/by-uuid"
     ln -sfn "$root_device" "$root/dev/disk/by-uuid/$ROOT_UUID"
   fi
@@ -616,7 +616,7 @@ isolated_chroot() {
   local root=$1
   shift
   unshare --mount --pid --fork --mount-proc \
-    env OMARCHY_ISOLATED_ROOT="$root" OMARCHY_ISOLATED_WORK="$work" \
+    env OMARCHY_ISOLATED_ROOT="$root" OMARCHY_ISOLATED_WORK="$work" OMARCHY_ISOLATED_LOOPS="${isolated_loops:-1}" \
     "$BASH" "$ROOT/bin/build-mac-image" --isolated-chroot "$@"
 }
 
@@ -1143,19 +1143,20 @@ probe_first_boot() {
   probe_pacman /var/tmp/first-boot-probe.requests /usr/bin/pacman.image >"$probe/usr/bin/pacman"
   chmod 0755 "$probe/usr/bin/pacman"
   : >"$probe/var/tmp/first-boot-probe.requests"
-  isolated_chroot "$probe" unshare --net env -i PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
+  isolated_loops=0 isolated_chroot "$probe" unshare --net env -i PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
     HOME=/root TERM=dumb LANG=C.UTF-8 OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
     OMARCHY_INSTALL_USER= OMARCHY_IMAGE_DEFERRED_HARDWARE=1 OMARCHY_IMAGE_BOOT_REBUILD=/var/lib/omarchy/image/boot-rebuild \
     /bin/bash -c '
       while IFS= read -r step; do
         [[ -n $step ]] || continue
         echo "== $step"
+        [[ $step == install/hardware/*.sh && $step != *..* && ! -L $OMARCHY_PATH/$step ]] || { echo "refused"; exit 1; }
         [[ -f $OMARCHY_PATH/$step ]] || { echo "not shipped"; continue; }
         timeout 600 /bin/bash -c "source \"\$1\"" bash "$OMARCHY_PATH/$step" </dev/null
         echo "== $step exit $?"
       done </var/lib/omarchy/image/deferred-steps' >>"$logs/first-boot-probe.log" 2>&1 ||
     fail "the first-boot probe did not run (logs/first-boot-probe.log)"
-  requests=$(<"$probe/var/tmp/first-boot-probe.requests")
+  requests=$(<"$probe/var/tmp/first-boot-probe.requests") || fail "the first-boot probe lost its record"
   btrfs subvolume delete "$probe" >>"$logs/first-boot-probe.log" 2>&1 || fail "could not remove the first-boot probe"
   [[ -z $requests ]] || fail "first boot would need the network: its hardware steps ask pacman for $(paste -sd';' - <<<"$requests") (logs/first-boot-probe.log)"
 }
@@ -1466,6 +1467,7 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     shift
     work=${OMARCHY_ISOLATED_WORK:-/work}
     target=${OMARCHY_ISOLATED_ROOT:?}
+    isolated_loops=${OMARCHY_ISOLATED_LOOPS:-1}
     api_mounts=()
     prepare_isolated_api "$target" 0
     if findmnt -n "$target/proc" >/dev/null 2>&1; then
