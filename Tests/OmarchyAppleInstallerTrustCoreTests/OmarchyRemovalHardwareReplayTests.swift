@@ -63,6 +63,27 @@
       assertReadOnly(mac)
     }
 
+    func testCapturedStartupDiskIsTheRunningMacOS() throws {
+      for label in ["legacy", "converged-before"] {
+        let plan = try OmarchyRemovalPlan(disks: CapturedMac(label).makeOperator())
+        XCTAssertNil(plan.startup, label)
+        XCTAssertNil(plan.ticket(id: UUID()).startupDisk, label)
+      }
+    }
+
+    func testConvergedInstallSetAsTheStartupDiskIsPlannedFirst() throws {
+      let mac = try CapturedMac("converged-before")
+      mac.startupDevice = "/dev/disk2s2\n"
+      let plan = try OmarchyRemovalPlan(disks: mac.makeOperator())
+      XCTAssertEqual(plan.startup, .other("Omarchy"))
+      XCTAssertEqual(
+        plan.ticket(id: UUID()).startupDisk,
+        OmarchyRemovalItem(
+          title: "Set macOS “Macintosh HD” as the startup disk",
+          detail: "Your Mac starts up from “Omarchy” now", bytes: 0))
+      assertReadOnly(mac)
+    }
+
     func testFreeSpaceLeftAfterMacOSIsReturned() throws {
       let mac = try CapturedMac("after-make-space")
       let plan = try OmarchyRemovalPlan(disks: mac.makeOperator())
@@ -116,6 +137,8 @@
   /// captured answer is refused and recorded.
   final class CapturedMac: @unchecked Sendable {
     let directory: URL
+    /// What `bless --getBoot` prints instead of the captured answer.
+    var startupDevice: String?
     let diskutilRefusesMount: Set<String>
     private(set) var log = [[String]]()
     private(set) var refused = [[String]]()
@@ -147,11 +170,21 @@
         commands: { try self.diskutil($0) }, targetType: { "J314s" },
         startupTools: { tool in
           switch tool {
-          case .blessGetBoot: return try self.file("bless-getboot.txt")
+          case .blessGetBoot:
+            return try self.startupDevice.map { Data($0.utf8) } ?? self.file("bless-getboot.txt")
           case .nvramPrint:
+            // Only names were captured; boot-volume is the value this Mac
+            // printed on 2026-09-28 (macOS never moved between captures).
             let names = String(decoding: try self.file("nvram-names.txt"), as: UTF8.self)
+            let bootVolume = String(
+              decoding: try Data(
+                contentsOf: self.directory.deletingLastPathComponent().appendingPathComponent(
+                  "nvram-boot-volume.txt")), as: UTF8.self
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
             return Data(
-              names.split(whereSeparator: \.isNewline).map { "\($0)\tvalue\n" }.joined().utf8)
+              names.split(whereSeparator: \.isNewline).map {
+                "\($0)\t\($0 == "boot-volume" ? bootVolume : "value")\n"
+              }.joined().utf8)
           }
         },
         openTree: { try self.openTree($0, $1) },

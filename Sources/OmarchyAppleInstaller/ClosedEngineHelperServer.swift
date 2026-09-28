@@ -117,7 +117,7 @@
           }
           try validateAdministrator(authorization)
           let executor = OmarchyRemovalExecutor(disks: disks)
-          try executor.execute(approved.plan) { next in
+          try executor.execute(approved.plan, authorization: authorization) { next in
             // The private journal is durable before each mutation, without credentials.
             let journal = RemovalJournal(plan: approved.plan, phase: next)
             try JSONEncoder().encode(journal).write(to: journalURL, options: .atomic)
@@ -144,7 +144,9 @@
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."
           let message: String
           if phase == "checking" {
-            message = "\(detail) No disk changes were made."
+            message =
+              (error as? RemovalFailure)?.complete == true
+              ? detail : "\(detail) No disk changes were made."
           } else if approved.plan.kind == .freeSpace {
             message =
               "macOS couldn’t confirm it took the free space. The space may still be unallocated. \(detail) Don’t start again; the removal record was kept for recovery."

@@ -568,6 +568,9 @@
       throw RemovalFailure(message: "unused")
     }
     func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup { .unknown }
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization
+    ) throws {}
     func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 { 0 }
     func deleteContainer(_ stub: RemovalPartition, disk: String) throws {}
     func erasePartition(_ partition: RemovalPartition, disk: String) throws {}

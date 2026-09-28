@@ -28,10 +28,13 @@
     public let deletions: [OmarchyRemovalItem]
     public let kept: [OmarchyRemovalItem]
     public let notes: [String]
+    /// Done before anything is deleted: macOS becomes the startup disk.
+    public let startupDisk: OmarchyRemovalItem?
     public init(
       id: UUID, kind: OmarchyRemovalKind = .installation, reclaimBytes: UInt64,
       macOSBytesAfter: UInt64, deletions: [OmarchyRemovalItem] = [],
-      kept: [OmarchyRemovalItem] = [], notes: [String] = []
+      kept: [OmarchyRemovalItem] = [], notes: [String] = [],
+      startupDisk: OmarchyRemovalItem? = nil
     ) {
       self.id = id
       self.kind = kind
@@ -40,6 +43,7 @@
       self.deletions = deletions
       self.kept = kept
       self.notes = notes
+      self.startupDisk = startupDisk
     }
     /// A helper older than the app sends tickets without the plan fields.
     public init(from decoder: any Decoder) throws {
@@ -51,6 +55,7 @@
       deletions = try values.decodeIfPresent([OmarchyRemovalItem].self, forKey: .deletions) ?? []
       kept = try values.decodeIfPresent([OmarchyRemovalItem].self, forKey: .kept) ?? []
       notes = try values.decodeIfPresent([String].self, forKey: .notes) ?? []
+      startupDisk = try values.decodeIfPresent(OmarchyRemovalItem.self, forKey: .startupDisk)
     }
     public var confirmation: String {
       kind == .freeSpace ? Self.freeSpaceConfirmation : Self.confirmation
@@ -77,7 +82,15 @@
 
   struct RemovalFailure: LocalizedError, Sendable {
     let message: String
+    /// The message already says what changed, so nothing is appended to it.
+    var complete = false
     var errorDescription: String? { message }
+  }
+
+  /// bless didn't make the change. `reason` is its last output line, with
+  /// the password removed.
+  struct RemovalStartupRefusal: Error, Sendable {
+    let reason: String
   }
 
   struct RemovalPartition: Codable, Equatable, Sendable {
@@ -156,7 +169,7 @@
     }
   }
 
-  enum RemovalStartup: Equatable, Sendable {
+  enum RemovalStartup: Codable, Equatable, Sendable {
     case macOS
     case other(String)
     case nextStartupOverride
@@ -171,6 +184,9 @@
     let members: [RemovalPartition]
     let macOS: RemovalPartition
     let targetMacOSBytes: UInt64
+    /// What the Mac started up from at review when that wasn't the running
+    /// macOS. Execution sets macOS as the startup disk before deleting.
+    let startup: RemovalStartup?
 
     /// Read-only. Every check that can refuse happens here, before a ticket exists.
     init(disks: any RemovalDiskOperating) throws {
@@ -189,6 +205,7 @@
         members = []
         self.macOS = macOS
         targetMacOSBytes = target
+        startup = nil
       case .installation(let found, let macOS, let target):
         let evidence: RemovalEvidence
         do { evidence = try disks.evidence(for: found, disk: snapshot.disk) } catch {
@@ -198,13 +215,14 @@
         if let reason = evidence.problem(for: found) {
           throw RemovalFailure(message: RemovalText.unconfirmed(found, reason: reason))
         }
-        try RemovalText.requireMacOSStartup(disks.startup(snapshot))
+        let startup = try disks.startup(snapshot)
         kind = .installation
         installation = found
         self.evidence = evidence
         members = found.members
         self.macOS = macOS
         targetMacOSBytes = target
+        self.startup = startup == .macOS ? nil : startup
       }
     }
 
@@ -212,6 +230,10 @@
 
     var summary: String {
       if let installation {
+        if startup != nil {
+          return
+            "Found “\(installation.name)”. Removal first sets macOS as the startup disk, then permanently deletes “\(installation.name)” and everything stored in it and returns its space to macOS."
+        }
         return
           "Found “\(installation.name)”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
       }
@@ -246,9 +268,6 @@
         notes.append(
           "macOS takes all the unallocated space directly after it, whatever put it there.")
       }
-      let macOSName =
-        snapshot.containers.first { $0.uuid == snapshot.macOSContainerUUID }?.volumes
-        .first { $0.roles == ["System"] }?.name ?? "macOS"
       let kept = [
         OmarchyRemovalItem(
           title: "macOS “\(macOSName)”",
@@ -262,7 +281,17 @@
       ]
       return OmarchyRemovalTicket(
         id: id, kind: kind, reclaimBytes: reclaimBytes, macOSBytesAfter: targetMacOSBytes,
-        deletions: deletions, kept: kept, notes: notes)
+        deletions: deletions, kept: kept, notes: notes,
+        startupDisk: startup.map {
+          OmarchyRemovalItem(
+            title: "Set macOS “\(macOSName)” as the startup disk",
+            detail: RemovalText.startupNow($0), bytes: 0)
+        })
+    }
+
+    var macOSName: String {
+      snapshot.containers.first { $0.uuid == snapshot.macOSContainerUUID }?.volumes
+        .first { $0.roles == ["System"] }?.name ?? "macOS"
     }
 
     /// Every intermediate state must be exactly the approved layout minus the
@@ -305,6 +334,11 @@
     func snapshot() throws -> RemovalSnapshot
     func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence
     func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup
+    /// Makes the running macOS the startup disk (`nextOnly`: for the next
+    /// restart only), authorized by a local owner.
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization)
+      throws
     func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64
     func deleteContainer(_ stub: RemovalPartition, disk: String) throws
     func erasePartition(_ partition: RemovalPartition, disk: String) throws
@@ -314,7 +348,10 @@
   struct OmarchyRemovalExecutor: Sendable {
     let disks: any RemovalDiskOperating
 
-    func execute(_ plan: OmarchyRemovalPlan, record: (String) throws -> Void) throws {
+    func execute(
+      _ plan: OmarchyRemovalPlan, authorization: MachineOwnerAuthorization? = nil,
+      record: (String) throws -> Void
+    ) throws {
       let first = try disks.snapshot()
       try plan.validate(first, removed: [])
       if let installation = plan.installation {
@@ -328,8 +365,38 @@
               "The installation changed since you reviewed it. Close this window and review removal again."
           )
         }
-        try RemovalText.requireMacOSStartup(disks.startup(first))
+        let startup = try disks.startup(first)
+        if startup != .macOS {
+          guard let reviewed = plan.startup, startup == reviewed else {
+            throw RemovalFailure(message: RemovalText.startupChanged)
+          }
+          guard let authorization else {
+            throw RemovalFailure(
+              message: "A macOS administrator account is needed to set the startup disk.")
+          }
+          try setMacOSStartup(plan, snapshot: first, authorization: authorization)
+          var recorded = false
+          do {
+            try removeAndReturnSpace(plan) { phase in
+              try record(phase)
+              recorded = true
+            }
+          } catch let error where !recorded {
+            let detail = (error as? RemovalFailure)?.message ?? error.localizedDescription
+            throw RemovalFailure(
+              message:
+                "\(detail) Your Mac now starts up from macOS “\(plan.macOSName)”. Nothing was deleted.",
+              complete: true)
+          }
+          return
+        }
       }
+      try removeAndReturnSpace(plan, record: record)
+    }
+
+    private func removeAndReturnSpace(
+      _ plan: OmarchyRemovalPlan, record: (String) throws -> Void
+    ) throws {
       var removed = Set<String>()
       // Delete the startup container first: if a volume is busy, diskutil refuses
       // before the Linux partitions are touched. No force-unmount or -force fallback.
@@ -364,6 +431,36 @@
       try disks.growContainer(macOS, disk: current.disk)
       try plan.validate(disks.snapshot(), removed: removed, expanded: true)
       try record("complete")
+    }
+
+    /// Nothing is deleted unless macOS then reports the running macOS as both
+    /// the startup disk and the next restart's choice.
+    private func setMacOSStartup(
+      _ plan: OmarchyRemovalPlan, snapshot: RemovalSnapshot,
+      authorization: MachineOwnerAuthorization
+    ) throws {
+      let name = plan.macOSName
+      do {
+        try disks.setMacOSStartup(snapshot, nextOnly: false, authorization: authorization)
+      } catch let refusal as RemovalStartupRefusal {
+        throw RemovalFailure(
+          message: RemovalText.startupRefused(name, reason: refusal.reason), complete: true)
+      }
+      var now = try disks.startup(snapshot)
+      if now == .nextStartupOverride {
+        do {
+          try disks.setMacOSStartup(snapshot, nextOnly: true, authorization: authorization)
+        } catch {
+          let reason = (error as? RemovalStartupRefusal)?.reason ?? error.localizedDescription
+          throw RemovalFailure(
+            message: RemovalText.startupUnconfirmed(name, now, reason: reason), complete: true)
+        }
+        now = try disks.startup(snapshot)
+      }
+      guard now == .macOS else {
+        throw RemovalFailure(
+          message: RemovalText.startupUnconfirmed(name, now, reason: nil), complete: true)
+      }
     }
   }
 #endif

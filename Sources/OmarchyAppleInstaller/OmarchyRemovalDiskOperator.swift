@@ -22,6 +22,11 @@
       case .nvramPrint: try Self.systemRun("/usr/sbin/nvram", ["-p"])
       }
     }
+    /// Runs `/usr/sbin/bless` with these arguments and the password line on
+    /// stdin; throws RemovalStartupRefusal when it fails.
+    var blessSetBoot:
+      @Sendable (_ arguments: [String], _ input: Data, _ secret: Data) throws -> Void =
+        { try Self.runBless($0, input: $1, secret: $2) }
     var openTree: @Sendable (_ mountPoint: String, _ device: String) throws -> RemovalFileTree = {
       try RemovalFileTree(mountPoint: $0, device: $1)
     }
@@ -215,11 +220,27 @@
       return try result.get()
     }
 
+    /// The persistent choice comes from `bless --getBoot`. A one-time choice
+    /// (alt-boot-volume) counts only when it and boot-volume both name the
+    /// running macOS: its APFS store and its volume group.
     func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup {
       guard let variables = try? startupTools(.nvramPrint) else { return .unknown }
-      let names = String(decoding: variables, as: UTF8.self).split(whereSeparator: \.isNewline)
-        .map { $0.split(separator: "\t", maxSplits: 1).first.map(String.init) ?? "" }
-      if names.contains("alt-boot-volume") { return .nextStartupOverride }
+      var values = [String: [String]]()
+      for line in String(decoding: variables, as: UTF8.self).split(whereSeparator: \.isNewline) {
+        let fields = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+        values[String(fields[0]), default: []].append(fields.count > 1 ? String(fields[1]) : "")
+      }
+      guard let group = try? bootedGroup(snapshot) else { return .unknown }
+      let macOS = RemovalBootTarget(store: snapshot.macOSStoreUUID, group: group)
+      func target(_ name: String) -> RemovalBootTarget? {
+        guard let found = values[name], found.count == 1 else { return nil }
+        return RemovalBootTarget(nvram: found[0])
+      }
+      if values["alt-boot-volume"] != nil {
+        guard target("alt-boot-volume") == macOS, target("boot-volume") == macOS else {
+          return .nextStartupOverride
+        }
+      }
       guard let raw = try? startupTools(.blessGetBoot) else { return .unknown }
       let device = String(decoding: raw, as: UTF8.self).trimmingCharacters(
         in: .whitespacesAndNewlines)
@@ -232,9 +253,83 @@
         let storeUUID = try? uuid(storeInfo, "DiskUUID"),
         let parent = try? string(storeInfo, "ParentWholeDisk")
       else { return .unknown }
-      if storeUUID == snapshot.macOSStoreUUID, parent == snapshot.disk { return .macOS }
+      if storeUUID == snapshot.macOSStoreUUID, parent == snapshot.disk {
+        // Another macOS can share the container; the group tells them apart.
+        guard (try? uuid(info, "APFSVolumeGroupID")) == group else { return .unknown }
+        if values["boot-volume"] != nil, target("boot-volume") != macOS { return .unknown }
+        return .macOS
+      }
       let name = info["VolumeName"] as? String ?? ""
       return .other(name.isEmpty ? identifier : name)
+    }
+
+    /// The volume group of the running macOS, after proving `/` is still on
+    /// the macOS store that removal returns the space to.
+    private func bootedGroup(_ snapshot: RemovalSnapshot) throws -> String {
+      let root = try plist(["info", "-plist", "/"])
+      guard let stores = root["APFSPhysicalStores"] as? [[String: Any]], stores.count == 1,
+        let store = stores[0]["APFSPhysicalStore"] as? String,
+        let storeInfo = try? plist(["info", "-plist", store]),
+        (try? uuid(storeInfo, "DiskUUID")) == snapshot.macOSStoreUUID,
+        (try? string(storeInfo, "ParentWholeDisk")) == snapshot.disk
+      else {
+        throw RemovalFailure(
+          message: "The running macOS isn’t the one removal returns the space to.")
+      }
+      return try uuid(root, "APFSVolumeGroupID")
+    }
+
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization
+    ) throws {
+      _ = try bootedGroup(snapshot)
+      let arguments =
+        ["--mount", "/", "--setBoot"] + (nextOnly ? ["--nextonly"] : [])
+        + ["--user", authorization.username, "--stdinpass"]
+      try blessSetBoot(arguments, authorization.password + Data([10]), authorization.password)
+    }
+
+    static func runBless(
+      _ arguments: [String], input: Data, secret: Data, executable: String = "/usr/sbin/bless"
+    ) throws {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: executable)
+      process.arguments = arguments
+      process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"]
+      let inputPipe = Pipe()
+      let outputPipe = Pipe()
+      process.standardInput = inputPipe
+      process.standardOutput = outputPipe
+      process.standardError = outputPipe
+      let output = BoundedStandardErrorCollector(limit: 16_384)
+      do { try output.start(reading: outputPipe.fileHandleForReading) } catch {
+        throw RemovalStartupRefusal(reason: "bless couldn’t be started")
+      }
+      defer { output.cancel() }
+      let exited = DispatchSemaphore(value: 0)
+      process.terminationHandler = { _ in exited.signal() }
+      do { try process.run() } catch {
+        throw RemovalStartupRefusal(reason: "bless couldn’t be started")
+      }
+      let writer = inputPipe.fileHandleForWriting
+      _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
+      try? writer.write(contentsOf: input)
+      try? writer.close()
+      if exited.wait(timeout: .now() + 120) == .timedOut {
+        process.terminate()
+        _ = exited.wait(timeout: .now() + 5)
+        throw RemovalStartupRefusal(reason: "bless didn’t finish within two minutes")
+      }
+      let captured = output.finish()
+      guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+        let text = EngineStandardErrorRedactor.redact(
+          captured.data, truncated: captured.truncated, secrets: [secret])
+        let last = text.split(whereSeparator: \.isNewline)
+          .map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        throw RemovalStartupRefusal(
+          reason: String(
+            (last ?? "bless stopped with code \(process.terminationStatus)").prefix(300)))
+      }
     }
 
     func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 {
@@ -425,6 +520,34 @@
       withUnsafeBytes(of: &value) { bytes in
         String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
       }
+    }
+  }
+
+  /// Where boot-volume and alt-boot-volume point: "<APFS type GUID>:<partition
+  /// GUID, first three fields byte-swapped>:<volume group UUID>".
+  struct RemovalBootTarget: Equatable, Sendable {
+    let store: String
+    let group: String
+
+    init(store: String, group: String) {
+      self.store = store
+      self.group = group
+    }
+
+    init?(nvram value: String) {
+      let fields = value.split(separator: ":", omittingEmptySubsequences: false)
+      guard fields.count == 3, fields[0].uppercased() == "EF57347C-0000-AA11-AA11-00306543ECAC",
+        let stored = UUID(uuidString: String(fields[1])),
+        let group = UUID(uuidString: String(fields[2]))
+      else { return nil }
+      let b = stored.uuid
+      store =
+        UUID(
+          uuid: (
+            b.3, b.2, b.1, b.0, b.5, b.4, b.7, b.6, b.8, b.9, b.10, b.11, b.12, b.13, b.14, b.15
+          )
+        ).uuidString
+      self.group = group.uuidString
     }
   }
 

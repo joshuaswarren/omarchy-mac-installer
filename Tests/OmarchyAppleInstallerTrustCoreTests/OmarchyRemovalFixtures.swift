@@ -19,6 +19,17 @@
     static let macContainer = "6B3F0C4E-1D2A-4C55-9E61-0F6A9B2C7D10"
     static let macGroup = "5E7A2C19-3B84-4D07-A6F1-2C9D8E4B6A01"
 
+    /// boot-volume / alt-boot-volume as nvram prints them: the partition GUID
+    /// has its first three fields byte-swapped.
+    static func bootVolume(store: String, group: String) -> String {
+      let b = UUID(uuidString: store)!.uuid
+      let swapped = UUID(
+        uuid: (
+          b.3, b.2, b.1, b.0, b.5, b.4, b.7, b.6, b.8, b.9, b.10, b.11, b.12, b.13, b.14, b.15
+        ))
+      return "EF57347C-0000-AA11-AA11-00306543ECAC:\(swapped.uuidString):\(group)"
+    }
+
     static func id(_ n: Int) -> String { String(format: "0A000000-0000-4000-8000-%012d", n) }
 
     struct Install {
@@ -254,6 +265,12 @@
     var state: RemovalSnapshot
     var files: RemovalInstallFiles?
     var startupState = RemovalStartup.macOS
+    /// What each `setMacOSStartup` call leaves, in order; a thrown error
+    /// is what bless reported.
+    var startupAfterSet = [Result<RemovalStartup, RemovalStartupRefusal>]()
+    /// `nextOnly` of each call, and whether a partition was already gone then.
+    var startupWrites = [(nextOnly: Bool, afterDeletion: Bool)]()
+    var startupPasswords = [Data]()
     var operations = [String]()
     var evidenceReads = 0
     var limitOverride: UInt64?
@@ -282,6 +299,14 @@
       return RemovalEvidence(files: files)
     }
     func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup { startupState }
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization
+    ) throws {
+      startupWrites.append((nextOnly, !operations.isEmpty))
+      startupPasswords.append(authorization.password)
+      guard !startupAfterSet.isEmpty else { throw RemovalStartupRefusal(reason: "unexpected") }
+      startupState = try startupAfterSet.removeFirst().get()
+    }
     func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 {
       if let limitOverride { return limitOverride }
       let next = state.partitions.filter { $0.offset > macOS.offset }.map(\.offset).min()!

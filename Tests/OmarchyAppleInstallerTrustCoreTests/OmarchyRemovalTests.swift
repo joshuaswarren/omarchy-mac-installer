@@ -433,26 +433,195 @@
       )
     }
 
-    func testStartupDiskMustBeTheRunningMacOS() {
+    // MARK: Startup disk
+
+    func testPlanSetsMacOSAsTheStartupDiskFirstWhenItIsNot() throws {
       let cases: [(RemovalStartup, String)] = [
-        (
-          .other("Asahi Alarm Minimal"),
-          "Your Mac is set to start up from “Asahi Alarm Minimal”. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
-        ),
-        (
-          .nextStartupOverride,
-          "A one-time startup choice is set for the next restart. Restart once, come back to macOS, then check again. Nothing was changed."
-        ),
-        (
-          .unknown,
-          "macOS couldn’t report which system your Mac starts up from. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
-        ),
+        (.other("Asahi Alarm Minimal"), "Your Mac starts up from “Asahi Alarm Minimal” now"),
+        (.nextStartupOverride, "Replaces a one-time startup choice for the next restart"),
+        (.unknown, "macOS couldn’t report which system your Mac starts up from"),
       ]
-      for (startup, message) in cases {
+      for (startup, detail) in cases {
         let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
         disk.startupState = startup
-        assertRefusal(disk, message)
+        let plan = try OmarchyRemovalPlan(disks: disk)
+        XCTAssertEqual(plan.startup, startup)
+        let ticket = plan.ticket(id: UUID())
+        XCTAssertEqual(
+          ticket.startupDisk,
+          OmarchyRemovalItem(
+            title: "Set macOS “Macintosh HD” as the startup disk", detail: detail, bytes: 0))
+        XCTAssertEqual(ticket.deletions.count, 3)
+        XCTAssertEqual(
+          plan.summary,
+          "Found “Asahi Alarm Minimal”. Removal first sets macOS as the startup disk, then permanently deletes “Asahi Alarm Minimal” and everything stored in it and returns its space to macOS."
+        )
+        XCTAssertTrue(disk.startupWrites.isEmpty, "planning is read-only")
       }
+      let plan = try OmarchyRemovalPlan(disks: FakeRemovalDisk(F.alarm(), install: F.alarmInstall))
+      XCTAssertNil(plan.startup)
+      XCTAssertNil(plan.ticket(id: UUID()).startupDisk)
+    }
+
+    func testStartupDiskIsSetAndConfirmedBeforeAnythingIsDeleted() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .other("Asahi Alarm Minimal")
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.startupAfterSet = [.success(.macOS)]
+      var journal = [String]()
+      try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) {
+        journal.append($0)
+      }
+      XCTAssertEqual(disk.startupWrites.map(\.nextOnly), [false])
+      XCTAssertEqual(disk.startupWrites.map(\.afterDeletion), [false])
+      XCTAssertEqual(disk.startupPasswords, [Data("test-password".utf8)])
+      XCTAssertEqual(disk.operations.first, "container:\(F.alarmInstall.stub)")
+      XCTAssertEqual(journal.last, "complete")
+    }
+
+    func testOneTimeChoiceLeftAfterSettingIsReplacedForTheNextRestart() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .nextStartupOverride
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.startupAfterSet = [.success(.nextStartupOverride), .success(.macOS)]
+      try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) { _ in }
+      XCTAssertEqual(disk.startupWrites.map(\.nextOnly), [false, true])
+      XCTAssertEqual(disk.startupWrites.map(\.afterDeletion), [false, false])
+      XCTAssertEqual(disk.operations.count, 4)
+    }
+
+    func testStartupDiskFailuresStopWithTheExactReasonAndDeleteNothing() throws {
+      let refused = RemovalStartupRefusal(reason: "Failed to authenticate owner")
+      let cases: [(RemovalStartup, [Result<RemovalStartup, RemovalStartupRefusal>], String)] = [
+        (
+          .other("Asahi Alarm Minimal"), [.failure(refused)],
+          "macOS didn’t set “Macintosh HD” as the startup disk. It reported: “Failed to authenticate owner”. Nothing was deleted."
+        ),
+        (
+          .other("Asahi Alarm Minimal"), [.success(.other("Asahi Alarm Minimal"))],
+          "macOS set “Macintosh HD” as the startup disk, but afterwards it reports that your Mac starts up from “Asahi Alarm Minimal”. Nothing was deleted."
+        ),
+        (
+          .unknown, [.success(.unknown)],
+          "macOS set “Macintosh HD” as the startup disk, but afterwards it reports that it can’t tell which system your Mac starts up from. Nothing was deleted."
+        ),
+        (
+          .nextStartupOverride, [.success(.nextStartupOverride), .success(.nextStartupOverride)],
+          "macOS set “Macintosh HD” as the startup disk, but afterwards it reports that a one-time startup choice for the next restart is still set. Nothing was deleted."
+        ),
+        (
+          .nextStartupOverride, [.success(.nextStartupOverride), .failure(refused)],
+          "macOS set “Macintosh HD” as the startup disk, but afterwards it reports that a one-time startup choice for the next restart is still set, and replacing it didn’t work. It reported: “Failed to authenticate owner”. Nothing was deleted."
+        ),
+      ]
+      for (before, results, message) in cases {
+        let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+        disk.startupState = before
+        let plan = try OmarchyRemovalPlan(disks: disk)
+        disk.startupAfterSet = results
+        var journal = [String]()
+        XCTAssertThrowsError(
+          try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) {
+            journal.append($0)
+          }
+        ) { error in
+          let failure = error as? RemovalFailure
+          XCTAssertEqual(failure?.message, message)
+          XCTAssertEqual(failure?.complete, true)
+        }
+        XCTAssertEqual(disk.startupWrites.count, results.count)
+        XCTAssertTrue(disk.operations.isEmpty)
+        XCTAssertTrue(journal.isEmpty)
+      }
+    }
+
+    func testStopAfterTheStartupDiskChangedSaysSoUntilSomethingIsDeleted() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .other("Asahi Alarm Minimal")
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.startupAfterSet = [.success(.macOS)]
+      XCTAssertThrowsError(
+        try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) {
+          _ in throw RemovalFailure(message: "The removal record couldn’t be saved.")
+        }
+      ) { error in
+        let failure = error as? RemovalFailure
+        XCTAssertEqual(
+          failure?.message,
+          "The removal record couldn’t be saved. Your Mac now starts up from macOS “Macintosh HD”. Nothing was deleted."
+        )
+        XCTAssertEqual(failure?.complete, true)
+      }
+      XCTAssertTrue(disk.operations.isEmpty)
+
+      let deleting = FakeRemovalDisk(F.alarm(), install: F.alarmInstall, failAt: 1)
+      deleting.startupState = .other("Asahi Alarm Minimal")
+      let next = try OmarchyRemovalPlan(disks: deleting)
+      deleting.startupAfterSet = [.success(.macOS)]
+      XCTAssertThrowsError(
+        try OmarchyRemovalExecutor(disks: deleting).execute(next, authorization: authorization()) {
+          _ in
+        }
+      ) { error in
+        XCTAssertEqual((error as? RemovalFailure)?.message, "injected command failure")
+        XCTAssertEqual((error as? RemovalFailure)?.complete, false)
+      }
+    }
+
+    func testStartupChangedSinceReviewIsNotSetWithoutAFreshReview() throws {
+      let changes: [(RemovalStartup?, RemovalStartup)] = [
+        (nil, .other("Asahi Alarm Minimal")),
+        (nil, .unknown),
+        (.other("Asahi Alarm Minimal"), .other("Another System")),
+        (.other("Asahi Alarm Minimal"), .nextStartupOverride),
+        (.nextStartupOverride, .unknown),
+      ]
+      for (reviewed, live) in changes {
+        let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+        disk.startupState = reviewed ?? .macOS
+        let plan = try OmarchyRemovalPlan(disks: disk)
+        disk.afterPlanning = { $0.startupState = live }
+        disk.startupAfterSet = [.success(.macOS)]
+        XCTAssertThrowsError(
+          try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) {
+            _ in
+          }
+        ) { error in
+          XCTAssertEqual((error as? RemovalFailure)?.message, RemovalText.startupChanged)
+        }
+        XCTAssertTrue(disk.startupWrites.isEmpty)
+        XCTAssertTrue(disk.operations.isEmpty)
+      }
+    }
+
+    func testStartupFixedSinceReviewNeedsNoChange() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .other("Asahi Alarm Minimal")
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.afterPlanning = { $0.startupState = .macOS }
+      try OmarchyRemovalExecutor(disks: disk).execute(plan, authorization: authorization()) { _ in }
+      XCTAssertTrue(disk.startupWrites.isEmpty)
+      XCTAssertEqual(disk.operations.count, 4)
+    }
+
+    func testStartupStepNeedsTheAdministratorAccount() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .other("Asahi Alarm Minimal")
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.startupAfterSet = [.success(.macOS)]
+      XCTAssertThrowsError(try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in })
+      XCTAssertTrue(disk.startupWrites.isEmpty)
+      XCTAssertTrue(disk.operations.isEmpty)
+    }
+
+    func testTicketCarriesTheStartupStepToTheApp() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.startupState = .other("Asahi Alarm Minimal")
+      let ticket = try OmarchyRemovalPlan(disks: disk).ticket(id: UUID())
+      let decoded = try JSONDecoder().decode(
+        OmarchyRemovalTicket.self, from: JSONEncoder().encode(ticket))
+      XCTAssertEqual(decoded, ticket)
+      XCTAssertEqual(decoded.startupDisk?.title, "Set macOS “Macintosh HD” as the startup disk")
     }
 
     // MARK: Execution
@@ -707,6 +876,50 @@
       }
     }
 
+    func testServerSetsTheStartupDiskWithTheAccountFromTheSheet() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let disk = FakeRemovalDisk()
+      disk.startupState = .other("Omarchy")
+      disk.startupAfterSet = [.success(.macOS)]
+      let service = server(root: root, disk: disk)
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(inspection.ticket)
+      XCTAssertEqual(ticket.startupDisk?.detail, "Your Mac starts up from “Omarchy” now")
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertTrue(result.completed, result.message)
+      XCTAssertEqual(disk.startupPasswords, [Data("test-password".utf8)])
+      XCTAssertEqual(disk.operations.count, 5)
+    }
+
+    func testServerStartupFailureSaysNothingWasDeletedAndKeepsNoRecord() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let disk = FakeRemovalDisk()
+      disk.startupState = .other("Omarchy")
+      disk.startupAfterSet = [
+        .failure(RemovalStartupRefusal(reason: "Failed to authenticate owner"))
+      ]
+      let service = server(root: root, disk: disk)
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let result = try await service.removal(
+        ticketID: XCTUnwrap(inspection.ticket).id, confirmation: OmarchyRemovalTicket.confirmation,
+        authorization: authorization())
+      XCTAssertFalse(result.completed)
+      XCTAssertFalse(result.requiresReview)
+      XCTAssertEqual(
+        result.message,
+        "macOS didn’t set “Macintosh HD” as the startup disk. It reported: “Failed to authenticate owner”. Nothing was deleted."
+      )
+      XCTAssertTrue(disk.operations.isEmpty)
+      XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+      let next = try await service.removal(ticketID: nil, confirmation: "", authorization: nil)
+      XCTAssertNotNil(next.ticket, "a refused startup change doesn't block the next review")
+    }
+
     func testInterruptedJournalBlocksNewRequestsAfterHelperRestart() async throws {
       let root = try temporaryDirectory()
       defer { try? FileManager.default.removeItem(at: root) }
@@ -883,6 +1096,11 @@
     }
     func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup {
       try disk.startup(snapshot)
+    }
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization
+    ) throws {
+      try disk.setMacOSStartup(snapshot, nextOnly: nextOnly, authorization: authorization)
     }
     func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 {
       try self.disk.growLimit(macOS, disk: disk)

@@ -137,6 +137,20 @@ struct OmarchyRemovalSheet: View {
         .accessibilityIdentifier("removal-message")
       if let ticket, !submitted {
         VStack(alignment: .leading, spacing: 10) {
+          if let step = ticket.startupDisk {
+            VStack(alignment: .leading, spacing: 6) {
+              Text("First").foregroundStyle(OmarchyTheme.secondaryText)
+              VStack(alignment: .leading, spacing: 1) {
+                Text(step.title)
+                Text(step.detail)
+                  .font(OmarchyTheme.detail)
+                  .foregroundStyle(OmarchyTheme.secondaryText)
+              }
+              .accessibilityElement(children: .combine)
+              .accessibilityIdentifier("removal-startup-disk")
+            }
+            .font(OmarchyTheme.body)
+          }
           if !ticket.deletions.isEmpty {
             planSection("Deleted", items: ticket.deletions)
           }
@@ -312,7 +326,10 @@ struct OmarchyRemovalSheet: View {
     password = ""
     busy = true
     submitted = true
-    message = "Removing Omarchy, then returning its space to macOS…"
+    message =
+      ticket.startupDisk == nil
+      ? "Removing Omarchy, then returning its space to macOS…"
+      : "Setting macOS as the startup disk, removing Omarchy, then returning its space to macOS…"
     defer { busy = false }
     #if DEBUG
       if isSimulation {
@@ -321,7 +338,7 @@ struct OmarchyRemovalSheet: View {
           connectionLost()
           return
         }
-        completed = [.success, .asahi, .freeSpace].contains(scenario)
+        completed = [.success, .asahi, .freeSpace, .startupDisk].contains(scenario)
         if [.interrupted, .reclaimFailed, .disconnected].contains(scenario) { onRequiresReview() }
         message = scenario.message
         return
@@ -441,6 +458,8 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
   enum RemovalPreviewScenario: String, CaseIterable {
     case success = "Complete removal"
     case asahi = "Older omarchy-mac installation"
+    case startupDisk = "Starts up from Omarchy"
+    case startupFailed = "Startup disk not changed"
     case freeSpace = "Free space only"
     case none = "No installation"
     case ambiguous = "Unfamiliar or partial layout"
@@ -468,14 +487,15 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
       }
       func ticket(
         kind: OmarchyRemovalKind = .installation, macOS: UInt64, deletions: [OmarchyRemovalItem],
-        free: UInt64 = 0, recovery: String, notes: [String] = []
+        free: UInt64 = 0, recovery: String, notes: [String] = [],
+        startupDisk: OmarchyRemovalItem? = nil
       ) -> OmarchyRemovalTicket {
         let reclaim = deletions.reduce(free) { $0 + $1.bytes }
         return OmarchyRemovalTicket(
           id: UUID(), kind: kind, reclaimBytes: reclaim, macOSBytesAfter: macOS + reclaim,
           deletions: deletions,
           kept: kept(macOS: macOS, after: macOS + reclaim, recovery: recovery),
-          notes: notes)
+          notes: notes, startupDisk: startupDisk)
       }
       switch self {
       case .freeSpace:
@@ -504,6 +524,7 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
           "Found “Arch Linux ARM”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
         )
       default:
+        let startsUpFromOmarchy = [.startupDisk, .startupFailed].contains(self)
         return (
           ticket(
             macOS: 678_662_672_384,
@@ -516,8 +537,14 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
               OmarchyRemovalItem(title: "Linux partition", detail: "disk0s5", bytes: 2_147_483_648),
               OmarchyRemovalItem(
                 title: "Linux partition", detail: "disk0s6", bytes: 310_828_335_104),
-            ], recovery: "disk0s7"),
-          "Found “Omarchy”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
+            ], recovery: "disk0s7",
+            startupDisk: startsUpFromOmarchy
+              ? OmarchyRemovalItem(
+                title: "Set macOS “Macintosh HD” as the startup disk",
+                detail: "Your Mac starts up from “Omarchy” now", bytes: 0) : nil),
+          startsUpFromOmarchy
+            ? "Found “Omarchy”. Removal first sets macOS as the startup disk, then permanently deletes “Omarchy” and everything stored in it and returns its space to macOS."
+            : "Found “Omarchy”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
         )
       }
     }
@@ -529,6 +556,10 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
       case .asahi:
         "“Arch Linux ARM” and its data have been removed. The freed space is now part of macOS."
       case .freeSpace: "The free space is now part of macOS."
+      case .startupDisk:
+        "“Omarchy” and its data have been removed. The freed space is now part of macOS."
+      case .startupFailed:
+        "macOS didn’t set “Macintosh HD” as the startup disk. It reported: “Failed to authenticate owner”. Nothing was deleted."
       case .none:
         "No Omarchy installation, or other installation made with the Asahi installer, was found, and there’s no unallocated space after macOS. Nothing was changed."
       case .ambiguous:

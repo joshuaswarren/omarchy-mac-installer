@@ -161,7 +161,7 @@
       }
 
       func testRemovalSheetFitsA14InchAnd13InchScreen() throws {
-        for scenario in [RemovalPreviewScenario.success, .asahi, .freeSpace] {
+        for scenario in [RemovalPreviewScenario.success, .asahi, .freeSpace, .startupDisk] {
           for placement in RemovalSheetLayoutTests.placements {
             for showsAccountFields in [false, true] {
               try assertFits(
