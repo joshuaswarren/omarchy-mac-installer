@@ -668,8 +668,8 @@ private struct EncryptDiskToggle: View {
       .controlSize(.large)
       .tint(OmarchyTheme.accent)
       .disabled(!enabled)
-      // One help paragraph: the password, then the recovery key.
-      Text(PlainLanguage.encryptLinuxDiskPassword + " " + PlainLanguage.encryptLinuxDiskRecovery)
+      // One help paragraph: the password, and that nothing else unlocks the disk.
+      Text(PlainLanguage.encryptLinuxDiskPassword + " " + PlainLanguage.encryptLinuxDiskNoRecovery)
         .omarchyHelpText()
     }
     .padding(.horizontal, 4)

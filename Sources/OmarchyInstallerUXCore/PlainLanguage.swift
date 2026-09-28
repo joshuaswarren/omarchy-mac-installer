@@ -52,8 +52,8 @@
     public static let encryptLinuxDiskTitle = "Encrypt the Omarchy disk"
     public static let encryptLinuxDiskPassword =
       "The Omarchy password you create at first boot will unlock the encrypted disk after installation."
-    public static let encryptLinuxDiskRecovery =
-      "A recovery key is also shown then, only once, in case you’re ever unable to use the password. Write it down."
+    public static let encryptLinuxDiskNoRecovery =
+      "There is no separate recovery key, so keep the password somewhere safe."
     public static let encryptionChoiceNotRecorded =
       "The encryption choice wasn’t saved, so Omarchy will encrypt its disk at first boot."
     public static let encryptionOptOutRecorded =

@@ -361,3 +361,85 @@ python3 -c 'import importlib.util, sys; s = importlib.util.spec_from_file_locati
   "$here/builder/lab_access.py" "$target" || fail "the builder writes exactly the lab overlay"
 unset -f isolated_chroot
 pass "a lab build writes the lab overlay and validates its sudoers rule; a release build writes none"
+
+# ── sync databases the image keeps ─────────────────────────────────────────
+target=$scratch/sync-root
+sync=$target/var/lib/pacman/sync
+mkdir -p "$sync" "$target/etc"
+cat >"$target/etc/pacman.conf" <<'CONF'
+[options]
+SigLevel = Required DatabaseOptional
+
+[omarchy]
+Server = https://pkgs.omarchy.org/edge/$arch
+
+[asahi-alarm]
+Server = https://github.com/asahi-alarm/asahi-alarm/releases/download/aarch64
+  [core]
+Include = /etc/pacman.d/mirrorlist
+# [core-debug]
+[extra]
+Include = /etc/pacman.d/mirrorlist
+[alarm]
+Include = /etc/pacman.d/mirrorlist
+[aur]
+Include = /etc/pacman.d/mirrorlist
+CONF
+[[ $(pacman_repositories "$target/etc/pacman.conf" | paste -sd' ' -) == "omarchy asahi-alarm core extra alarm aur" ]] ||
+  fail "the installed configuration's repositories are read in order, comments and [options] skipped"
+fill_sync() {
+  rm -rf "$sync"
+  mkdir -p "$sync"
+  local name
+  for name in omarchy-candidates asahi-alarm core extra alarm aur omarchy omarchy-aarch64; do
+    printf '%s database\n' "$name" >"$sync/$name.db"
+  done
+  : >"$sync/db.lck"
+  mkdir "$sync/.stale"
+}
+fill_sync
+pins=$(printf 'omarchy-candidates - -\n'
+  for name in asahi-alarm core extra alarm aur omarchy; do
+    printf '%s %s https://%s.invalid\n' "$name" "$(sha256_of "$sync/$name.db")" "$name"
+  done)
+repositories() {
+  printf '%s\n' "$pins"
+}
+(fail() { builder_fail "$@"; }; keep_installed_databases) || fail "the installed repositories' databases are kept"
+[[ $(cd "$sync" && ls -A | sort | paste -sd' ' -) == "alarm.db asahi-alarm.db aur.db core.db extra.db omarchy.db" ]] ||
+  fail "only the installed repositories' databases are left: $(ls -A "$sync")"
+fill_sync
+printf 'moved\n' >"$sync/core.db"
+if (fail() { builder_fail "$@"; }; keep_installed_databases) >/dev/null 2>&1; then
+  fail "a kept database that is not the pinned one stops the build"
+fi
+fill_sync
+rm "$sync/aur.db"
+if (fail() { builder_fail "$@"; }; keep_installed_databases) >/dev/null 2>&1; then
+  fail "a repository with no database stops the build"
+fi
+fill_sync
+printf '\n[omarchy-candidates]\nServer = file:///repos\n' >>"$target/etc/pacman.conf"
+if (fail() { builder_fail "$@"; }; keep_installed_databases) >/dev/null 2>&1; then
+  fail "a repository the inputs pin no database for stops the build"
+fi
+unset -f repositories fill_sync
+pass "the image keeps the pinned database of each repository its pacman.conf names, and nothing else"
+
+# ── first-boot probe ───────────────────────────────────────────────────────
+probe_pacman "$scratch/requests" "echo pacman" >"$scratch/probe-pacman"
+: >"$scratch/requests"
+for request in "-Q vulkan-asahi" "-Qi asahi-bless" "-T vulkan-driver" "-U /var/tmp/x.pkg.tar.zst" "--query --search Sy"; do
+  read -ra words <<<"$request"
+  [[ $("$BASH" "$scratch/probe-pacman" "${words[@]}") == "pacman ${words[*]}" ]] || fail "the probe's pacman runs $request"
+done
+[[ ! -s $scratch/requests ]] || fail "queries and local installs are not recorded"
+for request in "-S --noconfirm --needed vulkan-asahi" "-Sy" "-Syu --noconfirm" "--sync foo" "-Fy" "--needed --refresh -S foo"; do
+  read -ra words <<<"$request"
+  if "$BASH" "$scratch/probe-pacman" "${words[@]}" >/dev/null; then
+    fail "the probe's pacman refuses $request"
+  fi
+done
+[[ $(wc -l <"$scratch/requests") -eq 6 && $(head -n 1 "$scratch/requests") == "-S --noconfirm --needed vulkan-asahi" ]] ||
+  fail "every sync or refresh is recorded: $(<"$scratch/requests")"
+pass "the first-boot probe's pacman refuses and records every sync or refresh, and runs everything else"
