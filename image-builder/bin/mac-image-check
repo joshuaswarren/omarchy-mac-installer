@@ -666,6 +666,16 @@ def check_provenance(lane: str, directory: Path) -> None:
             "INSPECTION is not the one PROVENANCE names")
     report = json.loads(inspection.read_text())
     require(report.get("result") == "passed", "INSPECTION did not pass")
+    sources: dict[str, str] = {}
+    for value in fields.get("candidate_source", []):
+        name, _, commit = value.partition("|")
+        require(name in candidates and name not in sources and re.fullmatch(r"[0-9a-f]{40}", commit) is not None,
+                "PROVENANCE has a malformed candidate source")
+        sources[name] = commit
+    require(sources and sources == report.get("runtime_sources"),
+            "PROVENANCE's candidate sources do not match INSPECTION's runtime sources")
+    require(sources.get("omarchy") == fields.get("input.candidate_source_commit", [None])[0],
+            "PROVENANCE's runtime is not from the set's source commit")
     profile = check_recorded_profile(lane, fields, "PROVENANCE")
     require(report.get("lab_access_sha256") == fields.get("lab_access_sha256", [None])[0],
             "INSPECTION's lab access digest does not match PROVENANCE")

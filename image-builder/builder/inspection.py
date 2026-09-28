@@ -117,6 +117,26 @@ def check_candidate_versions(root: Path, candidates: Candidates, report: dict) -
     return f"all {len(candidates.packages)} candidate packages installed at the set's versions"
 
 
+def check_runtime_sources(root: Path, candidates: Candidates, report: dict) -> str:
+    """The commit each runtime package was built from, as the importer verified
+    it: the set's source commit, or the one the set declares for a platform
+    package. The installed package records it too."""
+    sources = {}
+    for name, package in sorted(candidates.packages.items()):
+        if package.get("group") != "runtime":
+            continue
+        commit = package.get("source_commit", "")
+        require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None, f"the candidate set records no source commit for {name}")
+        path = root / candidate_set.REVISION_FILES[name]
+        require(path.is_file() and path.read_text().strip() == commit, f"/{candidate_set.REVISION_FILES[name]} does not name {commit}")
+        sources[name] = commit
+    require(sources.get("omarchy") == sources.get("omarchy-settings") == candidates.summary["source_commit"],
+            "the runtime is not built from the set's source commit")
+    report["runtime_sources"] = sources
+    others = sorted(f"{name} {commit[:12]}" for name, commit in sources.items() if commit != candidates.summary["source_commit"])
+    return f"runtime from {candidates.summary['source_commit'][:12]}" + (f"; {', '.join(others)}" if others else "")
+
+
 def check_apple_packages(root: Path, report: dict) -> str:
     """Every package the image's Apple list names is installed, reading the list
     build-mac-image took: omarchy-apple-silicon.packages, else an older
@@ -532,6 +552,7 @@ def inspect(root: Path, candidates_dir: Path, channel: str, factory: Path | None
     }
     checks = [
         ("candidate-versions", lambda: check_candidate_versions(root, candidates, report)),
+        ("runtime-sources", lambda: check_runtime_sources(root, candidates, report)),
         ("minimum-versions", lambda: check_minimum_versions(root, policy)),
         ("refused-packages", lambda: check_refused(root, policy)),
         ("apple-packages", lambda: check_apple_packages(root, report)),
