@@ -182,16 +182,124 @@
       let model = F.alarm()
       let fake = FakeDiskutil(model)
       let disk = fake.makeOperator()
+      let macOS = F.bootVolume(store: model.macOSStoreUUID, group: F.macGroup)
+      let stub = F.bootVolume(store: F.alarmInstall.stub, group: F.alarmInstall.group)
       XCTAssertEqual(try disk.startup(model), .macOS)
-      fake.nvram = "auto-boot\ttrue\nalt-boot-volume\tEF57347C-0000-AA11-AA11-00306543ECAC:X\n"
+      fake.nvram = "auto-boot\ttrue\nboot-volume\t\(macOS)\nalt-boot-volume\t\(stub)\n"
       XCTAssertEqual(try disk.startup(model), .nextStartupOverride)
+      fake.nvram =
+        "boot-volume\t\(macOS)\nalt-boot-volume\tEF57347C-0000-AA11-AA11-00306543ECAC:X\n"
+      XCTAssertEqual(try disk.startup(model), .nextStartupOverride)
+      fake.nvram = "boot-volume\t\(macOS)\nalt-boot-volume\t\(macOS)\nalt-boot-volume\t\(macOS)\n"
+      XCTAssertEqual(try disk.startup(model), .nextStartupOverride, "listed twice")
+      fake.nvram = "boot-volume\t\(stub)\nalt-boot-volume\t\(macOS)\n"
+      XCTAssertEqual(
+        try disk.startup(model), .nextStartupOverride,
+        "a one-time macOS choice doesn’t hide a startup disk that is about to be deleted")
+      fake.nvram = "boot-volume\t\(macOS)\nalt-boot-volume\t\(macOS)\n"
+      XCTAssertEqual(try disk.startup(model), .macOS, "both choices name the running macOS")
+      fake.nvram = "boot-volume\t\(F.bootVolume(store: model.macOSStoreUUID, group: F.id(1)))\n"
+      XCTAssertEqual(try disk.startup(model), .unknown, "another macOS in the same container")
+      fake.nvram = "boot-volume\tgarbage\n"
+      XCTAssertEqual(try disk.startup(model), .unknown)
       fake.nvram = "auto-boot\ttrue\n"
+      XCTAssertEqual(try disk.startup(model), .macOS)
       fake.bless = "/dev/disk4s2\n"
       XCTAssertEqual(try disk.startup(model), .other("Asahi Alarm Minimal"))
       fake.bless = nil
       XCTAssertEqual(try disk.startup(model), .unknown)
       fake.bless = "garbage"
       XCTAssertEqual(try disk.startup(model), .unknown)
+      fake.bless = "/dev/disk3s1\n"
+      fake.rootGroup = nil
+      XCTAssertEqual(try disk.startup(model), .unknown)
+      fake.rootGroup = F.id(1)
+      XCTAssertEqual(try disk.startup(model), .unknown, "the startup volume isn’t the running one")
+    }
+
+    func testBootTargetReadsThePartitionGUIDAsNVRAMStoresIt() {
+      // boot-volume on the M1 Pro lab Mac (macOS 27.0, 2026-09-28): disk0s2 is
+      // 1EDFBFBF-3123-4142-BF27-A7215B874733, its macOS group 3EE75828-….
+      XCTAssertEqual(
+        RemovalBootTarget(
+          nvram:
+            "EF57347C-0000-AA11-AA11-00306543ECAC:BFBFDF1E-2331-4241-BF27-A7215B874733:3EE75828-1F54-4365-9BA7-E7217E81D869"
+        ),
+        RemovalBootTarget(
+          store: "1EDFBFBF-3123-4142-BF27-A7215B874733",
+          group: "3EE75828-1F54-4365-9BA7-E7217E81D869"))
+      for value in [
+        "", "EF57347C-0000-AA11-AA11-00306543ECAC:X",
+        "EF57347C-0000-AA11-AA11-00306543ECAC:BFBFDF1E-2331-4241-BF27-A7215B874733",
+        "C12A7328-F81F-11D2-BA4B-00A0C93EC93B:BFBFDF1E-2331-4241-BF27-A7215B874733:3EE75828-1F54-4365-9BA7-E7217E81D869",
+        "EF57347C-0000-AA11-AA11-00306543ECAC:BFBFDF1E-2331-4241-BF27-A7215B874733:3EE75828-1F54-4365-9BA7-E7217E81D869:x",
+      ] {
+        XCTAssertNil(RemovalBootTarget(nvram: value), value)
+      }
+    }
+
+    func testStartupIsSetOnTheRunningMacOSWithTheOwnerPasswordOnStdin() throws {
+      let model = F.alarm()
+      let fake = FakeDiskutil(model)
+      let disk = fake.makeOperator()
+      let owner = try MachineOwnerAuthorization(
+        username: "test-admin", password: Data("test-password".utf8))
+      try disk.setMacOSStartup(model, nextOnly: false, authorization: owner)
+      try disk.setMacOSStartup(model, nextOnly: true, authorization: owner)
+      XCTAssertEqual(
+        fake.blessed.map(\.arguments),
+        [
+          ["--mount", "/", "--setBoot", "--user", "test-admin", "--stdinpass"],
+          ["--mount", "/", "--setBoot", "--nextonly", "--user", "test-admin", "--stdinpass"],
+        ])
+      XCTAssertEqual(
+        fake.blessed.map(\.input), Array(repeating: Data("test-password\n".utf8), count: 2))
+      fake.blessRefusal = "Failed to authenticate owner"
+      XCTAssertThrowsError(try disk.setMacOSStartup(model, nextOnly: false, authorization: owner)) {
+        XCTAssertEqual(($0 as? RemovalStartupRefusal)?.reason, "Failed to authenticate owner")
+      }
+      XCTAssertTrue(fake.log.allSatisfy { !$0.contains("--setBoot") })
+    }
+
+    func testStartupIsNeverSetWhenTheRunningSystemIsntThisMacOS() throws {
+      let model = F.alarm()
+      let fake = FakeDiskutil(model)
+      let owner = try MachineOwnerAuthorization(
+        username: "test-admin", password: Data("test-password".utf8))
+      fake.override["info -plist /"] = [
+        "APFSPhysicalStores": [["APFSPhysicalStore": "disk0s3"]]
+      ]
+      XCTAssertThrowsError(
+        try fake.makeOperator().setMacOSStartup(model, nextOnly: false, authorization: owner)
+      ) {
+        XCTAssertEqual(
+          ($0 as? RemovalFailure)?.message,
+          "The running macOS isn’t the one removal returns the space to.")
+      }
+      XCTAssertTrue(fake.blessed.isEmpty)
+    }
+
+    func testBlessRunnerQuotesItsLastLineWithoutThePassword() throws {
+      XCTAssertNoThrow(
+        try MacRemovalDiskOperator.runBless(
+          ["-c", "read line; [ \"$line\" = secret ]"], input: Data("secret\n".utf8),
+          secret: Data("secret".utf8), executable: "/bin/sh"))
+      XCTAssertThrowsError(
+        try MacRemovalDiskOperator.runBless(
+          ["-c", "read line; echo start; echo \"Failed for $line\" >&2; echo; exit 3"],
+          input: Data("secret\n".utf8), secret: Data("secret".utf8), executable: "/bin/sh")
+      ) { error in
+        let reason = (error as? RemovalStartupRefusal)?.reason ?? ""
+        XCTAssertTrue(reason.hasPrefix("Failed for"), reason)
+        XCTAssertFalse(reason.contains("secret"), reason)
+      }
+      XCTAssertThrowsError(
+        try MacRemovalDiskOperator.runBless(
+          ["-c", "exit 4"], input: Data("secret\n".utf8), secret: Data("secret".utf8),
+          executable: "/bin/sh")
+      ) { error in
+        XCTAssertEqual((error as? RemovalStartupRefusal)?.reason, "bless stopped with code 4")
+      }
     }
 
     func testMutationsUseTheValidatedBSDIdentifierOnlyAfterProvingIdentity() throws {
@@ -354,13 +462,22 @@
     var refuseDiskutilMount = Set<String>()
     var refuseFATMount = false
     var duplicateGroupMembership = false
-    var nvram = "auto-boot\ttrue\nboot-volume\tEF57347C-0000-AA11-AA11-00306543ECAC:X\n"
+    var nvram: String
     var bless: String? = "/dev/disk3s1\n"
+    var rootGroup: String? = RemovalFixtures.macGroup
+    var blessed = [(arguments: [String], input: Data)]()
+    var blessRefusal: String?
     var log = [[String]]()
     var createdMountPoints = [String]()
     private let lock = NSLock()
 
-    init(_ model: RemovalSnapshot) { self.model = model }
+    init(_ model: RemovalSnapshot) {
+      self.model = model
+      nvram =
+        "auto-boot\ttrue\nboot-volume\t"
+        + RemovalFixtures.bootVolume(store: model.macOSStoreUUID, group: RemovalFixtures.macGroup)
+        + "\n"
+    }
 
     func makeOperator() -> MacRemovalDiskOperator {
       MacRemovalDiskOperator(
@@ -372,6 +489,12 @@
             guard let bless = self.bless else { throw RemovalFailure(message: "bless failed") }
             return Data(bless.utf8)
           }
+        },
+        blessSetBoot: { arguments, input, _ in
+          self.lock.lock()
+          defer { self.lock.unlock() }
+          self.blessed.append((arguments, input))
+          if let refusal = self.blessRefusal { throw RemovalStartupRefusal(reason: refusal) }
         },
         openTree: { path, _ in
           try RemovalFileTree(descriptor: open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW))
@@ -435,10 +558,12 @@
       let macOS = model.partitions.first { $0.uuid == model.macOSStoreUUID }!
       switch key {
       case "info -plist /":
-        return [
+        var root: [String: Any] = [
           "Internal": true, "APFSContainerReference": "disk3",
           "APFSPhysicalStores": [["APFSPhysicalStore": macOS.identifier]],
         ]
+        root["APFSVolumeGroupID"] = rootGroup
+        return root
       case "info -plist \(model.disk)":
         return [
           "Internal": true, "WholeDisk": true, "VirtualOrPhysical": "Physical",
@@ -522,12 +647,14 @@
           continue
         }
         let store = model.partitions.first { $0.uuid == container.storeUUID }!
-        return [
+        var info: [String: Any] = [
           "DeviceIdentifier": identifier, "DiskUUID": volume.uuid, "VolumeName": volume.name,
           "APFSPhysicalStores": [["APFSPhysicalStore": store.identifier]],
           "MountPoint": mountPoints[identifier] ?? "",
           "WritableVolume": !mountWritable ? mountPoints[identifier] == nil : true,
         ]
+        info["APFSVolumeGroupID"] = volume.group
+        return info
       }
       return nil
     }

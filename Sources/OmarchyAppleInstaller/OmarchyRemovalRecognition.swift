@@ -373,25 +373,43 @@
       "\(size(free)) directly after macOS is unallocated, but macOS reports it can only grow to \(size(limit)). Nothing was changed."
     }
 
-    static func requireMacOSStartup(_ startup: RemovalStartup) throws {
+    /// The plan line's detail: what the Mac starts up from before removal.
+    static func startupNow(_ startup: RemovalStartup) -> String {
       switch startup {
-      case .macOS: return
-      case .other(let name):
-        throw RemovalFailure(
-          message:
-            "Your Mac is set to start up from “\(name)”. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
-        )
-      case .nextStartupOverride:
-        throw RemovalFailure(
-          message:
-            "A one-time startup choice is set for the next restart. Restart once, come back to macOS, then check again. Nothing was changed."
-        )
-      case .unknown:
-        throw RemovalFailure(
-          message:
-            "macOS couldn’t report which system your Mac starts up from. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
-        )
+      case .macOS: return "It already starts up from macOS"
+      case .other(let name): return "Your Mac starts up from “\(name)” now"
+      case .nextStartupOverride: return "Replaces a one-time startup choice for the next restart"
+      case .unknown: return "macOS couldn’t report which system your Mac starts up from"
       }
+    }
+
+    static let startupChanged =
+      "Your Mac’s startup disk changed since you reviewed removal. Close this window and review removal again."
+
+    static func startupRefused(_ name: String, reason: String?) -> String {
+      "macOS didn’t set “\(name)” as the startup disk\(reported(reason)). Nothing was deleted."
+    }
+
+    /// After macOS accepted the change, so the startup disk may now be macOS.
+    static func startupUnconfirmed(_ name: String, _ now: RemovalStartup, reason: String?)
+      -> String
+    {
+      let state: String
+      switch now {
+      case .macOS: state = "your Mac starts up from macOS"
+      case .other(let other): state = "your Mac starts up from “\(other)”"
+      case .nextStartupOverride:
+        state = "a one-time startup choice for the next restart is still set"
+      case .unknown: state = "it can’t tell which system your Mac starts up from"
+      }
+      let failed = reason == nil ? "" : ", and replacing it didn’t work\(reported(reason))"
+      return
+        "macOS set “\(name)” as the startup disk, but afterwards it reports that \(state)\(failed). Nothing was deleted."
+    }
+
+    private static func reported(_ reason: String?) -> String {
+      guard let reason, !reason.isEmpty else { return "" }
+      return ". It reported: “\(reason)”"
     }
   }
 #endif
