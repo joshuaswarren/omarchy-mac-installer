@@ -15,7 +15,7 @@ import fixtures  # noqa: E402
 
 inspection = fixtures.load("inspection", "builder/inspection.py")
 inspection.OWNER_UID = os.geteuid()
-CHECKS = ("candidate-versions", "minimum-versions", "refused-packages", "apple-packages", "installed-boot-payloads",
+CHECKS = ("candidate-versions", "runtime-sources", "minimum-versions", "refused-packages", "apple-packages", "installed-boot-payloads",
           "candidate-files",
           "m1n1-stage2", "aurora-device-trees", "limine-uki", "embedded-initramfs", "boot-splash", "boot-maintenance",
           "image-target", "first-boot", "snapshots", "pacman-config", "installed-system", "factory")
@@ -330,6 +330,13 @@ class InspectionTest(unittest.TestCase):
         (entry / "desc").write_text("%NAME%\nlimine-mkinitcpio-hook\n\n%VERSION%\n1.38.0-1.1\n\n")
         report = self.assertFails("minimum-versions", "below the minimum")
         self.assertEqual(report["checks"]["candidate-versions"]["result"], "failed")
+
+    def test_runtime_sources_are_the_installed_revisions(self):
+        report = self.inspect()
+        self.assertEqual(report["runtime_sources"], {name: fixtures.SOURCE for name in
+                                                     ("omarchy", "omarchy-mac", "omarchy-mac-boot", "omarchy-settings")})
+        (self.root / "usr/share/omarchy-mac/source-revision").write_text("d" * 40 + "\n")
+        self.assertFails("runtime-sources", "does not name")
 
     def test_refused_package_installed(self):
         fixtures.local_package(self.root, "linux-asahi", "6.16-1", [])
