@@ -14,6 +14,7 @@ The [M4 HVF experiment](m4-hvf-experiment.md) additionally demonstrates syntheti
 | [Bundle probe](../../Development/migration_bundle_probe/README.md) | Experimental encrypted archive, validation, synthetic credential selection, and 18 behavioral tests. |
 | [Runnable export fixture](../../Development/migration_bundle_probe/FIXTURE.md) | Generated test data, versioned requests, JSON progress/results, cooperative cancellation, and completed-job reuse. |
 | [Additive restore experiment](../../Development/migration_bundle_probe/RESTORE.md) | Authentication before destination writes, regular-file restoration, preservation of conflicts, and journaled retry after interruption. |
+| [Directories and links](../../Development/migration_bundle_probe/TREE.md) | Explicit/empty directories, verified relative links, inert unsupported links, and a real synthetic Git workspace roundtrip. |
 | [Staging components](../../Development/migration_staging/README.md) | GPT identity/bounds, a regular-fixture-only QEMU range broker, capacity arithmetic, and resumable ciphertext publication with 44 tests. |
 
 ## Run and interpret the checks
@@ -24,7 +25,7 @@ All added tests use synthetic regular files and temporary directories. They do n
 
 ## Remaining integration work
 
-The shared production exporter/importer, stable source capture, safe links/metadata, application adapters, authenticated app interface, durable lifecycle recovery, native staging utility, and reboot/encryption/owner handoff remain unfinished. The new restoration library exercises disposable regular files; replacement backups and real-home support remain unfinished. The staging broker cannot yet reopen after mutation or reconcile controller death. Component tests are not native installation qualification.
+The shared production exporter/importer, stable source capture, complete links/metadata support, application adapters, authenticated app interface, durable lifecycle recovery, native staging utility, and reboot/encryption/owner handoff remain unfinished. The restoration library exercises disposable regular files, directories, and selected relative links; replacement backups, directory metadata finalization, and real-home support remain unfinished. The staging broker cannot yet reopen after mutation or reconcile controller death. Component tests are not native installation qualification.
 
 The proposed public Linux interface is `omarchy-migration` with inventory/export/plan/apply/report operations. There is no production implementation or stable protocol to depend on yet. Existing `omarchy-migrate` remains the release-migration runner. Try integration can start against an agreed synthetic fixture while the shared module and native handoff are developed.
 

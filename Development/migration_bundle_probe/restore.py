@@ -19,6 +19,7 @@ from . import probe
 
 
 JOURNAL_SCHEMA = "omarchy-migration-restore-probe/1"
+TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/2"
 JOURNAL_LIMIT = 4 * 1024 * 1024
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -117,9 +118,43 @@ def _fingerprint(fd):
 
 
 def _matches(entry, observed):
+    if observed is None or "blocked" in observed:
+        return False
+    if probe.entry_kind(entry) == "directory":
+        # This slice restores structure; source directory metadata is deferred.
+        return set(observed) == {"device", "inode", "uid", "gid", "mode"}
+    if probe.entry_kind(entry) == "symlink":
+        return all(observed.get(key) == entry[key] for key in ("target", "mtime_ns"))
     return observed is not None and all(
         observed.get(key) == entry[key] for key in ("bytes", "mode", "mtime_ns", "sha256")
     )
+
+
+def _ancestors(path):
+    parts = path.split("/")
+    return ["/".join(parts[:index]) for index in range(1, len(parts))]
+
+
+def _directory_fingerprint(fd):
+    metadata = os.fstat(fd)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o022):
+        raise probe.Rejected("unsafe destination directory")
+    return {**_identity(fd), "gid": metadata.st_gid, "mode": stat.S_IMODE(metadata.st_mode)}
+
+
+def _symlink_fingerprint(parent, name):
+    before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISLNK(before.st_mode) or before.st_uid != os.geteuid() or before.st_size > 4096:
+        raise probe.Rejected("unsafe destination symlink")
+    target = os.readlink(name, dir_fd=parent)
+    after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if _metadata(before) != _metadata(after) or before.st_ctime_ns != after.st_ctime_ns:
+        raise probe.Rejected("symlink changed while reading")
+    return {
+        "device": after.st_dev, "inode": after.st_ino, "uid": after.st_uid,
+        "gid": after.st_gid, "mtime_ns": after.st_mtime_ns, "target": target,
+    }
 
 
 class Restorer:
@@ -142,6 +177,8 @@ class Restorer:
         self._plan = None
         self._closed = False
         self._created_parents = {}
+        self._tree = bundle._manifest["schema"] == probe.TREE_SCHEMA
+        self._entries = {entry["path"]: entry for entry in bundle._manifest["entries"]}
         try:
             # Caller paths are trusted, but the final component must not be a
             # symlink. Resolve parents only for containment checks.
@@ -161,7 +198,7 @@ class Restorer:
             except BlockingIOError as error:
                 raise probe.Rejected("restore job is already active") from error
             self._binding = {
-                "schema": JOURNAL_SCHEMA,
+                "schema": TREE_JOURNAL_SCHEMA if self._tree else JOURNAL_SCHEMA,
                 "manifest_sha256": bundle._digest,
                 "export_id": bundle._manifest["export_id"],
                 "target": _identity(self._target_fd),
@@ -216,28 +253,45 @@ class Restorer:
                 or any(journal[key] != value for key, value in self._binding.items())):
             raise probe.Rejected("restore journal binding differs")
         entries = journal["entries"]
-        allowed = {entry["object"] for entry in self.bundle._manifest["entries"]}
-        if not isinstance(entries, dict) or not set(entries) <= allowed:
+        allowed = {entry["object"]: entry for entry in self.bundle._manifest["entries"]}
+        if not isinstance(entries, dict) or not set(entries) <= allowed.keys():
             raise probe.Rejected("restore journal entries")
-        fingerprint_keys = {"device", "inode", "uid", "gid", "bytes", "mode", "mtime_ns", "sha256"}
-        for entry in entries.values():
+        for identity, entry in entries.items():
+            kind = probe.entry_kind(allowed[identity])
+            states = ("pending", "applied", "retained") if self._tree else ("pending", "applied")
             if (not isinstance(entry, dict) or set(entry) != {"state", "file", "temporary"}
-                    or entry["state"] not in ("pending", "applied")
-                    or not isinstance(entry["file"], dict) or set(entry["file"]) != fingerprint_keys):
+                    or entry["state"] not in states):
                 raise probe.Rejected("restore journal entry")
             temporary = entry["temporary"]
-            try:
-                if not isinstance(temporary, str) or str(uuid.UUID(temporary)) != temporary:
-                    raise ValueError()
-            except ValueError as error:
-                raise probe.Rejected("restore journal temporary identity") from error
+            if kind == "directory" or entry["state"] == "retained":
+                if temporary is not None:
+                    raise probe.Rejected("directory journal temporary identity")
+                if kind == "directory" and entry["state"] == "pending" and entry["file"] is None:
+                    continue  # Intent before mkdir; uncertainty is never adopted.
+            else:
+                try:
+                    if not isinstance(temporary, str) or str(uuid.UUID(temporary)) != temporary:
+                        raise ValueError()
+                except ValueError as error:
+                    raise probe.Rejected("restore journal temporary identity") from error
+            fingerprint_keys = {"device", "inode", "uid", "gid"}
+            if kind == "file":
+                fingerprint_keys.update(("bytes", "mode", "mtime_ns", "sha256"))
+            elif kind == "symlink":
+                fingerprint_keys.update(("mtime_ns", "target"))
+            else:
+                fingerprint_keys.add("mode")
             expected = entry["file"]
+            if not isinstance(expected, dict) or set(expected) != fingerprint_keys:
+                raise probe.Rejected("restore journal fingerprint")
             if any(type(expected[key]) is not int or expected[key] < 0
-                   for key in fingerprint_keys - {"sha256"}):
+                   for key in fingerprint_keys - {"sha256", "target"}):
                 raise probe.Rejected("restore journal metadata")
-            if (not isinstance(expected["sha256"], str) or len(expected["sha256"]) != 64
+            if kind == "file" and (not isinstance(expected["sha256"], str) or len(expected["sha256"]) != 64
                     or any(c not in "0123456789abcdef" for c in expected["sha256"])):
                 raise probe.Rejected("restore journal digest")
+            if kind == "symlink" and expected["target"] != allowed[identity]["target"]:
+                raise probe.Rejected("restore journal symlink target")
         return journal
 
     def _save(self):
@@ -290,16 +344,21 @@ class Restorer:
         finally:
             os.close(fd)
 
-    def _observe(self, path, parents):
+    def _observe(self, path, parents, kind="file"):
         try:
             with self._parent(path, identities=parents) as parent:
                 if parent is None:
                     return None
                 try:
-                    fd = os.open(path.split("/")[-1], FILE_FLAGS, dir_fd=parent)
+                    name = path.split("/")[-1]
+                    if kind == "symlink":
+                        return _symlink_fingerprint(parent, name)
+                    fd = os.open(name, DIRECTORY_FLAGS if kind == "directory" else FILE_FLAGS, dir_fd=parent)
                 except FileNotFoundError:
                     return None
                 try:
+                    if kind == "directory":
+                        return _directory_fingerprint(fd)
                     metadata = os.fstat(fd)
                     if metadata.st_uid != os.geteuid() or not metadata.st_mode & 0o400:
                         raise probe.Rejected("destination is not a readable owner file")
@@ -313,10 +372,13 @@ class Restorer:
         self._check()
         actions, observations = [], []
         for entry in self.bundle._manifest["entries"]:
+            kind = probe.entry_kind(entry)
             parents = []
-            observed = self._observe(entry["path"], parents)
+            observed = self._observe(entry["path"], parents, kind)
             saved = self._journal["entries"].get(entry["object"])
-            if not entry["mode"] & 0o400:
+            if kind == "symlink" and probe.link_target(entry, self._entries) is None:
+                status, reason = "inert", "unsupported link retained only in encrypted manifest"
+            elif kind == "file" and not entry["mode"] & 0o400:
                 status, reason = "conflict", "unreadable source mode is unsupported by this probe"
             elif saved:
                 if observed == saved["file"] and _matches(entry, observed):
@@ -333,12 +395,34 @@ class Restorer:
                 status, reason = "conflict", "existing file or unsafe path preserved"
             actions.append(Action(entry["path"], status, reason))
             observations.append((observed, parents))
+        if self._tree:
+            by_path = {action.path: action for action in actions}
+            for index in self._order():
+                entry, action = self.bundle._manifest["entries"][index], actions[index]
+                dependencies = _ancestors(entry["path"])
+                if probe.entry_kind(entry) == "symlink" and action.status != "inert":
+                    target, traversed = probe.link_target(entry, self._entries)
+                    dependencies.extend((target, *traversed))
+                if action.status != "inert" and any(by_path[path].status == "conflict" for path in dependencies):
+                    action = Action(action.path, "conflict", "directory or link dependency is unavailable")
+                    actions[index] = by_path[action.path] = action
         self._plan = tuple(actions)
         self._observations = observations
         return self._plan
 
     def _prepare(self, entry):
         temporary = str(uuid.uuid4())
+        if probe.entry_kind(entry) == "symlink":
+            os.symlink(entry["target"], temporary, dir_fd=self._job_fd)
+            try:
+                os.utime(temporary, ns=(entry["mtime_ns"], entry["mtime_ns"]),
+                         dir_fd=self._job_fd, follow_symlinks=False)
+                fingerprint = _symlink_fingerprint(self._job_fd, temporary)
+                os.fsync(self._job_fd)
+                return {"state": "pending", "file": fingerprint, "temporary": temporary}
+            except BaseException:
+                os.unlink(temporary, dir_fd=self._job_fd)
+                raise
         fd = os.open(temporary, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self._job_fd)
         try:
             with os.fdopen(fd, "w+b") as output:
@@ -373,14 +457,73 @@ class Restorer:
     def _cleanup(self, saved):
         # A pending object may be hardlinked to a now user-edited destination.
         # Never mutate its bytes or permissions, and only unlink our own inode.
+        if saved["temporary"] is None:
+            return
         try:
             metadata = os.stat(saved["temporary"], dir_fd=self._job_fd, follow_symlinks=False)
         except FileNotFoundError:
             return
         expected = saved["file"]
-        if stat.S_ISREG(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == (expected["device"], expected["inode"]):
+        if (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)) and (
+            metadata.st_dev, metadata.st_ino
+        ) == (expected["device"], expected["inode"]):
             os.unlink(saved["temporary"], dir_fd=self._job_fd)
             os.fsync(self._job_fd)
+
+    def _order(self):
+        entries = self.bundle._manifest["entries"]
+        priority = {"directory": 0, "file": 1, "symlink": 2}
+        return sorted(range(len(entries)), key=lambda index: (
+            priority[probe.entry_kind(entries[index])],
+            entries[index]["path"].count("/") if probe.entry_kind(entries[index]) == "directory" else 0,
+            index,
+        ))
+
+    def _restore_directory(self, entry, action, observed):
+        identity = entry["object"]
+        with self._parent(entry["path"]) as parent:
+            if parent is None:
+                raise probe.Rejected("directory parent is unavailable")
+            name = entry["path"].split("/")[-1]
+            if action.status == "create":
+                # mkdir cannot return its inode atomically with creation. A
+                # crash before the second journal write leaves an uncertain
+                # directory, which retry must not adopt or recreate.
+                self._journal["entries"][identity] = {"state": "pending", "file": None, "temporary": None}
+                self._save()
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent)
+                except FileExistsError:
+                    return Action(entry["path"], "conflict", "directory appeared during creation"), None
+            fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
+            try:
+                if action.status == "create":
+                    os.fchmod(fd, 0o700)
+                fingerprint = _directory_fingerprint(fd)
+                if action.status != "create" and fingerprint != observed:
+                    return Action(entry["path"], "conflict", "directory changed during application"), None
+                os.fsync(fd)
+                if action.status == "create":
+                    self._created_parents[entry["path"]] = _identity(fd)
+            finally:
+                os.close(fd)
+            os.fsync(parent)
+        self._journal["entries"][identity] = {"state": "applied", "file": fingerprint, "temporary": None}
+        self._save()  # Establish directory identity before touching children.
+        return Action(entry["path"], "directory", "structure retained; source directory metadata deferred"), fingerprint
+
+    def _link_ready(self, entry):
+        resolution = probe.link_target(entry, self._entries)
+        if resolution is None:
+            return False
+        target, traversed = resolution
+        for path in (target, *traversed):
+            if path not in self._ready:
+                return False
+            observed = self._observe(path, [], probe.entry_kind(self._entries[path]))
+            if observed != self._ready[path]:
+                return False
+        return True
 
     def apply(self, plan):
         self._check()
@@ -390,22 +533,51 @@ class Restorer:
             raise probe.Rejected("restore journal changed after planning")
         self._plan = None
         self._created_parents = {}
+        self._ready = {}
         self._save()
-        report = []
-        for entry, action, before in zip(self.bundle._manifest["entries"], plan, self._observations):
+        report = [None] * len(plan)
+        for index in self._order():
+            entry = self.bundle._manifest["entries"][index]
+            action, before = plan[index], self._observations[index]
+            kind = probe.entry_kind(entry)
             self._check()
+            if action.status == "inert":
+                report[index] = action
+                continue
+            if self._tree and any(path not in self._ready for path in _ancestors(entry["path"])):
+                report[index] = Action(entry["path"], "conflict", "directory dependency is unavailable")
+                continue
             parents = []
-            observed = self._observe(entry["path"], parents)
+            observed = self._observe(entry["path"], parents, kind)
             previous_file, planned_parents = before
             parents_match = parents[:len(planned_parents)] == planned_parents and all(
                 self._created_parents.get(path) == identity
                 for path, identity in parents[len(planned_parents):]
             )
             if observed != previous_file or not parents_match:
-                report.append(Action(entry["path"], "conflict", "destination changed after planning"))
+                report[index] = Action(entry["path"], "conflict", "destination changed after planning")
                 continue
-            if action.status in ("present", "conflict"):
-                report.append(action)
+            if action.status == "conflict":
+                report[index] = action
+                continue
+            if kind == "directory":
+                report[index], fingerprint = self._restore_directory(entry, action, observed)
+                if fingerprint is not None:
+                    self._ready[entry["path"]] = fingerprint
+                continue
+            if kind == "symlink" and not self._link_ready(entry):
+                report[index] = Action(entry["path"], "conflict", "link target or traversal directory is unavailable")
+                continue
+            if action.status == "present":
+                if self._tree:
+                    # Retain a witness even for matching pre-existing entries;
+                    # their later deletion must not become permission to copy.
+                    self._journal["entries"][entry["object"]] = {
+                        "state": "retained", "file": observed, "temporary": None,
+                    }
+                    self._save()
+                self._ready[entry["path"]] = observed
+                report[index] = action
                 continue
             previous = self._journal["entries"].get(entry["object"])
             if action.status == "restored":
@@ -413,24 +585,29 @@ class Restorer:
                 # stopped between link publication and its directory fsync.
                 with self._parent(entry["path"]) as parent:
                     os.fsync(parent)
-                previous["state"] = "applied"
+                if previous["state"] != "retained":
+                    previous["state"] = "applied"
                 self._save()
                 self._cleanup(previous)
-                report.append(action)
+                self._ready[entry["path"]] = observed
+                report[index] = action
                 continue
             saved = self._prepare(entry)
             self._journal["entries"][entry["object"]] = saved
             self._save()  # Durable witness must precede target publication.
-            with self._parent(entry["path"], create=True) as parent:
+            with self._parent(entry["path"], create=not self._tree) as parent:
+                if parent is None:
+                    raise probe.Rejected("destination parent disappeared")
                 try:
                     os.link(saved["temporary"], entry["path"].split("/")[-1],
                             src_dir_fd=self._job_fd, dst_dir_fd=parent, follow_symlinks=False)
                 except FileExistsError:
-                    report.append(Action(entry["path"], "conflict", "destination appeared during publication"))
+                    report[index] = Action(entry["path"], "conflict", "destination appeared during publication")
                     continue
                 os.fsync(parent)
             saved["state"] = "applied"
             self._save()
             self._cleanup(saved)
-            report.append(Action(entry["path"], "restored", "new file published"))
+            self._ready[entry["path"]] = saved["file"]
+            report[index] = Action(entry["path"], "restored", "new entry published")
         return tuple(report)

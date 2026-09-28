@@ -26,6 +26,7 @@ import uuid
 
 
 SCHEMA = "omarchy-migration-probe/1"
+TREE_SCHEMA = "omarchy-migration-probe/2"
 MAX_MANIFEST = 1024 * 1024
 MAX_ENTRIES = 1024
 MAX_TOTAL = 1024 * 1024 * 1024
@@ -103,11 +104,85 @@ def make_manifest(files):
     return {"schema": SCHEMA, "export_id": str(uuid.uuid4()), "entries": entries}
 
 
+def entry_kind(entry):
+    return entry.get("kind", "file")
+
+
+def make_tree_manifest(paths):
+    """Describe an explicit synthetic mapping, never recursively discover a home.
+
+    All parents must be included. Links are recorded with lstat/readlink and
+    never followed; a trusted, stable source mapping is still a prerequisite.
+    """
+    entries = []
+    for index, (name, source) in enumerate(sorted(paths.items())):
+        metadata = source.lstat()
+        entry = {
+            "path": name, "object": f"objects/{index:08d}",
+            "mtime_ns": metadata.st_mtime_ns,
+        }
+        if stat.S_ISREG(metadata.st_mode):
+            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode) or (
+                    opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+                ) != (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns):
+                    raise Rejected("source changed while inventorying")
+                checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+            entry.update(kind="file", mode=metadata.st_mode & 0o777,
+                         bytes=metadata.st_size, sha256=checksum)
+        elif stat.S_ISDIR(metadata.st_mode):
+            entry.update(kind="directory", mode=metadata.st_mode & 0o777)
+        elif stat.S_ISLNK(metadata.st_mode):
+            entry.update(kind="symlink", target=os.readlink(source))
+        else:
+            raise Rejected("unsupported source entry type")
+        entries.append(entry)
+    manifest = {"schema": TREE_SCHEMA, "export_id": str(uuid.uuid4()), "entries": entries}
+    validate_manifest(manifest)
+    return manifest
+
+
+def link_target(entry, entries):
+    """Return a direct in-selection target and every directory traversed.
+
+    Resolve each component against declared types before processing '..'. No
+    symlink chain or filesystem traversal occurs. Unsupported links stay inert.
+    """
+    target = entry["target"]
+    if target.startswith("/"):
+        return None
+    current = entry["path"].split("/")[:-1]
+    directories = set()
+    for index in range(1, len(current) + 1):
+        directories.add("/".join(current[:index]))
+    for part in target.split("/"):
+        if current:
+            prefix = "/".join(current)
+            if prefix not in entries or entry_kind(entries[prefix]) != "directory":
+                return None
+            directories.add(prefix)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not current:
+                return None
+            current.pop()
+            continue
+        current.append(part)
+    final = "/".join(current)
+    if final not in entries or entry_kind(entries[final]) not in ("file", "directory"):
+        return None
+    return final, tuple(sorted(directories))
+
+
 def validate_manifest(manifest):
     if not isinstance(manifest, dict) or set(manifest) != {"schema", "export_id", "entries"}:
         raise Rejected("manifest fields")
-    if manifest["schema"] != SCHEMA:
+    if manifest["schema"] not in (SCHEMA, TREE_SCHEMA):
         raise Rejected("unsupported schema")
+    tree = manifest["schema"] == TREE_SCHEMA
     if not isinstance(manifest["export_id"], str):
         raise Rejected("export identity")
     try:
@@ -118,38 +193,64 @@ def validate_manifest(manifest):
     entries = manifest["entries"]
     if not isinstance(entries, list) or len(entries) > MAX_ENTRIES:
         raise Rejected("entry count")
-    paths = set()
+    paths = {}
     total = 0
     for index, entry in enumerate(entries):
-        if not isinstance(entry, dict) or set(entry) != {
-            "path", "object", "bytes", "sha256", "mode", "mtime_ns"
-        }:
+        if not isinstance(entry, dict):
+            raise Rejected("entry fields")
+        kind = entry_kind(entry)
+        fields = {"path", "object", "mtime_ns"}
+        if tree:
+            fields.add("kind")
+        if kind == "file":
+            fields.update(("bytes", "sha256", "mode"))
+        elif tree and kind == "directory":
+            fields.add("mode")
+        elif tree and kind == "symlink":
+            fields.add("target")
+        else:
+            raise Rejected("unsupported entry kind")
+        if set(entry) != fields:
             raise Rejected("entry fields")
         name = entry["path"]
         if not isinstance(name, str) or not name or len(name.encode("utf-8")) > 4096:
             raise Rejected("path size/type")
         if any(part in ("", ".", "..") for part in name.split("/")) or "\0" in name:
             raise Rejected("unsafe path")
+        if tree and any(len(part.encode("utf-8")) > 255 for part in name.split("/")):
+            raise Rejected("path component too long")
         if name in paths or entry["object"] != f"objects/{index:08d}":
             raise Rejected("duplicate path or object identity")
-        if type(entry["bytes"]) is not int or not 0 <= entry["bytes"] <= MAX_TOTAL:
-            raise Rejected("entry size")
-        if type(entry["mode"]) is not int or not 0 <= entry["mode"] <= 0o777:
+        if kind != "symlink" and (type(entry["mode"]) is not int or not 0 <= entry["mode"] <= 0o777):
             raise Rejected("mode")
         if type(entry["mtime_ns"]) is not int or not 0 <= entry["mtime_ns"] < 2**63:
             raise Rejected("mtime")
-        checksum = entry["sha256"]
-        if not isinstance(checksum, str) or len(checksum) != 64 or any(
-            char not in "0123456789abcdef" for char in checksum
-        ):
-            raise Rejected("digest")
-        paths.add(name)
-        total += entry["bytes"]
+        if kind == "file":
+            if type(entry["bytes"]) is not int or not 0 <= entry["bytes"] <= MAX_TOTAL:
+                raise Rejected("entry size")
+            checksum = entry["sha256"]
+            if not isinstance(checksum, str) or len(checksum) != 64 or any(
+                char not in "0123456789abcdef" for char in checksum
+            ):
+                raise Rejected("digest")
+            total += entry["bytes"]
+        elif kind == "symlink":
+            target = entry["target"]
+            if (not isinstance(target, str) or not target or "\0" in target
+                    or len(target.encode("utf-8")) > 4096):
+                raise Rejected("symlink target")
+        paths[name] = entry
         if total > MAX_TOTAL:
             raise Rejected("expanded size")
     for name in paths:
-        if any(str(parent) in paths for parent in PurePosixPath(name).parents):
-            raise Rejected("file used as parent")
+        for parent in PurePosixPath(name).parents:
+            if str(parent) == ".":
+                continue
+            if tree:
+                if str(parent) not in paths or entry_kind(paths[str(parent)]) != "directory":
+                    raise Rejected("ancestor must be a declared directory")
+            elif str(parent) in paths:
+                raise Rejected("file used as parent")
 
 
 class AgeProcess:
@@ -243,9 +344,14 @@ def write_archive(stream, manifest, files):
         metadata.mode, metadata.size = 0o600, len(data)
         archive.addfile(metadata, io.BytesIO(data))
         for entry in manifest["entries"]:
+            if entry_kind(entry) != "file":
+                continue
             metadata = tarfile.TarInfo(entry["object"])
             metadata.mode, metadata.size = 0o600, entry["bytes"]
-            with open(files[entry["path"]], "rb") as source:
+            fd = os.open(files[entry["path"]], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise Rejected("archive source must remain a regular file")
                 archive.addfile(metadata, source)
 
 
@@ -319,6 +425,8 @@ def validate_archive(stream, *, _objects=None):
         raise Rejected("invalid manifest") from error
     consume_padding(stream, length)
     for entry in manifest["entries"]:
+        if entry_kind(entry) != "file":
+            continue
         length = read_header(stream, entry["object"], entry["bytes"])
         if length != entry["bytes"]:
             raise Rejected("entry size differs from manifest")

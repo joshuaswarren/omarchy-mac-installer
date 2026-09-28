@@ -1,6 +1,6 @@
 # Authenticated, additive restoration experiment
 
-This extends the existing synthetic bundle probe with a library interface for regular-file restoration into a disposable destination. It is not a real-home importer or an installed command. The production module still belongs in the shared Omarchy runtime at `install/migration/omarchy_migration/`, exposed by `bin/omarchy-migration`; Try and native installation must consume one pinned implementation. These experiments settle behavior before that promotion, rather than establishing an independent installer-side import engine.
+This extends the existing synthetic bundle probe with a library interface for restoration into a disposable destination. The original file-only format remains supported; the [v2 tree extension](TREE.md) adds explicit directories and selected relative links. It is not a real-home importer or an installed command. The production module still belongs in the shared Omarchy runtime at `install/migration/omarchy_migration/`, exposed by `bin/omarchy-migration`; Try and native installation must consume one pinned implementation. These experiments settle behavior before that promotion, rather than establishing an independent installer-side import engine.
 
 ## Interface
 
@@ -33,7 +33,7 @@ The fixture intentionally has no command that accepts a home directory. No file 
 | File missing after durable publication intent | Report `conflict`; the importer cannot distinguish interruption before creation from a later user deletion. |
 | Source mode lacks owner-read permission | Report `conflict`; this probe cannot verify retries without changing that mode. |
 
-Destination traversal uses pinned directory descriptors and refuses symlink components. Newly needed directories use mode 0700. Original directory metadata is not represented in the probe manifest. Only selected regular files are represented; links and special archive entries remain rejected. ACLs, xattrs, sparse layout, hardlink relationships, and atime preservation are outside this experiment.
+Destination traversal uses pinned directory descriptors and refuses symlink components. Newly needed directories use mode 0700. The original v1 format has implicit parent directories and regular files only. The [v2 extension](TREE.md) represents directories and links in the encrypted manifest, restores directory structure with source directory metadata explicitly deferred, and publishes eligible links only after verifying their actual destination dependencies. Actual TAR link/directory/special records remain rejected. ACLs, xattrs, sparse layout, hardlink relationships, and atime preservation are outside this experiment.
 
 ## Publication and recovery
 
@@ -59,4 +59,4 @@ python3 -W error::ResourceWarning -m unittest Development.migration_bundle_probe
 
 The cases cover byte/metadata roundtrip, no destination writes before authentication, private scratch cleanup, existing files/links/FIFOs, nested parent replacement, changed plans, wrong job/target/manifest binding, duplicate jobs, post-import edits/deletions, publication races, interrupted hardlinks, journal synchronization failures, and recovery by a fresh process after an actual SIGKILL immediately after publication. That process test does not simulate filesystem or host power loss. The shared crypto tests remain necessary because restoration reuses their validator.
 
-The next production work includes stable source capture and early credential holdouts, explicit directory/link/extended-metadata policy, user-approved replacement with durable backups, Try-specific configuration transformations, scalable journals/capacity checks, safe plaintext lifecycle, packaging, and the shared public command. Tickets 04 and 05 remain incomplete. Native owner setup and reboot/encryption integration are separate gates.
+The next production work includes stable source capture and early credential holdouts, directory metadata finalization and broader link/extended-metadata policy, user-approved replacement with durable backups, Try-specific configuration transformations, scalable journals/capacity checks, safe plaintext lifecycle, packaging, and the shared public command. Tickets 04 and 05 remain incomplete. Native owner setup and reboot/encryption integration are separate gates.

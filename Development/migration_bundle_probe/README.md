@@ -6,6 +6,8 @@ The [runnable integration fixture](FIXTURE.md) now exposes synthetic capabilitie
 
 The [additive restoration experiment](RESTORE.md) authenticates into private scratch before planning and applying regular files to a disposable destination. It preserves existing-file conflicts and detects later edits or deletions on retry.
 
+The [v2 tree extension](TREE.md) additionally preserves explicit/empty directories and selected relative symlinks, keeps unsupported links inert, and roundtrips a real synthetic Git repository with modified and untracked work. New directory metadata is explicitly deferred; no home scanner or production capture support is implied.
+
 ## What the experiment covers
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
@@ -17,7 +19,7 @@ The [additive restoration experiment](RESTORE.md) authenticates into private scr
 
 ## Run checks
 
-Use Linux, Python 3.11 or newer, and a trusted age 1.3.2 executable. The PTY adapter uses Unix terminal facilities and English prompts; only Linux has been exercised. Tests download nothing and do not install packages. Obtain age through a trusted package or verified upstream distribution before selecting it. The executable digest detects changes after that verification; a checksum alone does not establish provenance.
+Use Linux, Python 3.11 or newer, Git for the tree roundtrip case, and a trusted age 1.3.2 executable. The PTY adapter uses Unix terminal facilities and English prompts; only Linux has been exercised. Tests download nothing and do not install packages. Obtain age through a trusted package or verified upstream distribution before selecting it. The executable digest detects changes after that verification; a checksum alone does not establish provenance.
 
 From the repository root, configure the absolute executable path and its SHA-256 after independent verification:
 
@@ -34,7 +36,7 @@ Tests create fake source files and encrypted output in a private temporary direc
 
 ## Deliberate limits
 
-`decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows additive regular-file restoration through `Restorer`. Symlinks, hardlinks, PAX extensions, and device entries remain rejected. Safe link preservation, extended metadata, replacement backups, full account mapping, and real-home qualification remain production work.
+`decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows additive restoration through `Restorer`. The v2 manifest represents directories and symbolic links as authenticated metadata; TAR links, hardlinks, PAX extensions, and device entries remain rejected. Directory metadata finalization, broader link support, extended metadata, replacement backups, full account mapping, and real-home qualification remain production work.
 
 Source capture is not yet stable: the probe stats/hashes inputs and later reopens them. It must not be used to claim a consistent capture of live files. The fixture holdouts act on an explicit synthetic file mapping; they do not establish credential protection before real home discovery/traversal or cover all credential-path aliases.
 
