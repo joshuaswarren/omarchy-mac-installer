@@ -1,5 +1,17 @@
 # Migration exploration validation
 
+## Additive restoration candidate, 2026-09-28 UTC
+
+Source candidate: [`0560807806293482ca599d196399d77600336371`](https://github.com/omacom/omarchy-mac-installer/commit/0560807806293482ca599d196399d77600336371), tree `0e0b745e0db98fd9cdb7b71d473fe33e01832c78`. This validation update is a documentation-only follow-up. One authoritative `./test/all` run on that committed candidate passed Python compilation, shell syntax, 37 engine tests, 104 overlay tests, 24 release/script tests, 43 staging tests, 54 bundle/fixture/restore tests, and the shell/packaging fixtures. Total: **262 Python tests passed; one optional sgdisk case skipped**.
+
+The 54 bundle tests include 26 new [restoration cases](../../Development/migration_bundle_probe/RESTORE.md). Focused restoration and full bundle checks also passed with ResourceWarning treated as an error. They verify authenticated EOF before releasing plaintext objects, private scratch cleanup after validation failure, exact file contents/modes/nsmtime and current-user ownership, existing-file preservation, symlink/FIFO refusal, changed parent/target/job identities, changed plans, journal binding and duplicate-job exclusion, interrupted publication, synchronization failures, and preservation of subsequent edits/deletions. A child process was actually killed with SIGKILL immediately after linking its first destination file; a fresh authenticated session recovered that file from positive inode/content/metadata evidence and restored the remaining files.
+
+Read-only review found a stale-plan issue involving replaced nested parent directories. The implementation now records and rechecks parent identities, with a regression case. Review found no remaining blocker within the documented synthetic, quiescent-target scope. Missing files after uncertain publication remain conflicts because the importer cannot distinguish interruption before publication from a later user deletion.
+
+Runner: Linux aarch64 `7.1.12-2-11-ARCH`, Python 3.14.7, Bash 5.3.20, Git 2.55.0. Dependency identities match the age/QEMU hashes below. Private Unix socket tests ran with a sandbox allowance while remaining unprivileged. No Swift, packaging, helper, host-support, release trust, or engine-lock source changed. macOS builds/signing and M4 experiments were not repeated for this Python-only slice.
+
+These results cover additive restoration of synthetic regular files. They do not establish power-loss recovery, replacement backups, hostile simultaneous namespace changes, secure plaintext cleanup after SIGKILL, stable live capture, real-home or application support, or native installation. Tickets 04–05 and the native reboot/encryption gate remain incomplete.
+
 ## Runnable fixture candidate, 2026-09-28 UTC
 
 Source candidate: [`4e11e700f3e7092d64a5ca0433bcd85ecd8c8ca2`](https://github.com/omacom/omarchy-mac-installer/commit/4e11e700f3e7092d64a5ca0433bcd85ecd8c8ca2), tree `c914a5b65e0d9bf904d50e3086693bc4c4dbeaa8`. This validation update is a documentation-only follow-up. One authoritative `./test/all` run on that committed candidate passed Python compilation, shell syntax, 37 engine tests, 104 overlay tests, 24 release/script tests, 43 staging tests, 28 bundle/fixture tests, and the shell/packaging fixtures. Total: **236 Python tests passed; one optional sgdisk case skipped**.
@@ -51,4 +63,4 @@ The 36 MiB bundle fixture measured 800,329 bytes peak Python allocations in the 
 
 This is source/component validation. No Swift app code, packaging inputs, engine lock, release trust configuration, helper authorization, or native host restriction changed. macOS debug/release builds, signing, app packaging, guest lifecycle integration, native staging/reboot/encryption, and physical installation were not exercised by this branch's run. Existing repository validation records do not qualify these unfinished migration paths.
 
-The standalone probe still does not restore files or provide stable live capture. The broker is still initial-open only. Passing the portable suite does not make this branch a production migration release.
+The standalone probe now restores synthetic regular files into disposable destinations. Stable live capture, production replacement/backup behavior, safe links and real-home support remain unfinished. The broker is still initial-open only. Passing the portable suite does not make this branch a production migration release.
