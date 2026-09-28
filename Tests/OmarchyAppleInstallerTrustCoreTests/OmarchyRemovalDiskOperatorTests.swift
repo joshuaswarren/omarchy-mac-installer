@@ -62,6 +62,77 @@
       }
     }
 
+    func testDirtyEFIPartitionIsMountedReadOnlyWithoutDiskArbitrationsCheck() throws {
+      let model = F.alarm()
+      let fake = FakeDiskutil(model)
+      let files = F.files(for: F.alarmInstall, in: model)
+      fake.onMount = { identifier, path in
+        let root = URL(fileURLWithPath: path)
+        if identifier == "disk0s4" {
+          try self.write(files, esp: root, stub: nil)
+        } else {
+          try self.write(files, esp: nil, stub: root)
+        }
+      }
+      fake.refuseDiskutilMount = ["disk0s4"]
+      let plan = try OmarchyRemovalPlan(disks: fake.makeOperator())
+      XCTAssertEqual(plan.members.count, 3)
+      let mounts = fake.log.filter { ["mount", "fatMount"].contains($0.first) }
+      XCTAssertEqual(mounts.map { [$0.first!, $0.last!] }.count, 3)
+      XCTAssertEqual(mounts[0].first, "mount")
+      XCTAssertEqual(mounts[0].last, "disk0s4")
+      XCTAssertEqual(Array(mounts[1].prefix(2)), ["fatMount", "disk0s4"])
+      XCTAssertEqual(mounts[1][2], mounts[0][mounts[0].count - 2], "same private mount point")
+      XCTAssertEqual(mounts[2].first, "mount")
+      XCTAssertEqual(mounts[2].last, "disk4s2")
+      XCTAssertEqual(
+        fake.log.filter { $0.first == "unmount" },
+        [["unmount", "disk0s4"], ["unmount", "disk4s2"]])
+      for path in fake.createdMountPoints {
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+      }
+    }
+
+    func testFATFallbackIsOnlyForTheEFIPartitionAndStillMustBeReadOnly() throws {
+      let model = F.alarm()
+      let files = F.files(for: F.alarmInstall, in: model)
+      func attempt(_ configure: (FakeDiskutil) -> Void) -> (FakeDiskutil, String) {
+        let fake = FakeDiskutil(model)
+        fake.onMount = { identifier, path in
+          let root = URL(fileURLWithPath: path)
+          if identifier == "disk0s4" {
+            try self.write(files, esp: root, stub: nil)
+          } else {
+            try self.write(files, esp: nil, stub: root)
+          }
+        }
+        configure(fake)
+        var message = ""
+        XCTAssertThrowsError(try OmarchyRemovalPlan(disks: fake.makeOperator())) { error in
+          message = (error as? RemovalFailure)?.message ?? ""
+        }
+        return (fake, message)
+      }
+      let (stub, stubMessage) = attempt { $0.refuseDiskutilMount = ["disk4s2"] }
+      XCTAssertFalse(stub.log.contains { $0.first == "fatMount" })
+      XCTAssertTrue(stubMessage.contains("disk4s2 couldn’t be mounted read-only"), stubMessage)
+      let (both, bothMessage) = attempt {
+        $0.refuseDiskutilMount = ["disk0s4"]
+        $0.refuseFATMount = true
+      }
+      XCTAssertEqual(both.log.filter { $0.first == "fatMount" }.count, 1)
+      XCTAssertTrue(bothMessage.contains("disk0s4 couldn’t be mounted read-only"), bothMessage)
+      for path in both.createdMountPoints {
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+      }
+      let (writable, writableMessage) = attempt {
+        $0.refuseDiskutilMount = ["disk0s4"]
+        $0.mountWritable = true
+      }
+      XCTAssertTrue(writableMessage.contains("disk0s4 wasn’t mounted read-only"), writableMessage)
+      XCTAssertEqual(writable.log.filter { $0.first == "unmount" }, [["unmount", "disk0s4"]])
+    }
+
     func testWritableMountOrFailedUnmountRefuses() throws {
       let model = F.alarm()
       for failure in ["writable", "unmount"] {
@@ -279,6 +350,9 @@
     var onMount: ((String, String) throws -> Void)?
     var mountWritable = false
     var failUnmount = false
+    /// `diskutil mount` refuses these, as it does a dirty FAT.
+    var refuseDiskutilMount = Set<String>()
+    var refuseFATMount = false
     var duplicateGroupMembership = false
     var nvram = "auto-boot\ttrue\nboot-volume\tEF57347C-0000-AA11-AA11-00306543ECAC:X\n"
     var bless: String? = "/dev/disk3s1\n"
@@ -308,6 +382,14 @@
           try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
           self.createdMountPoints.append(url.resolvingSymlinksInPath().path)
           return url
+        },
+        fatMount: { device, path in
+          self.lock.lock()
+          defer { self.lock.unlock() }
+          self.log.append(["fatMount", device, path])
+          if self.refuseFATMount { throw RemovalFailure(message: "mount_msdos failed") }
+          try self.onMount?(device, path)
+          self.mountPoints[device] = path
         })
     }
 
@@ -319,6 +401,9 @@
       if arguments.first == "mount" {
         let identifier = arguments.last!
         let path = arguments[arguments.count - 2]
+        if refuseDiskutilMount.contains(identifier) {
+          throw RemovalFailure(message: "Volume on \(identifier) failed to mount")
+        }
         try onMount?(identifier, path)
         mountPoints[identifier] = path
         return Data()

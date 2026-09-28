@@ -26,6 +26,18 @@
       try RemovalFileTree(mountPoint: $0, device: $1)
     }
     var makeMountPoint: @Sendable () throws -> URL = Self.privateMountPoint
+    /// An EFI partition that Linux last mounted and didn't cleanly unmount is a
+    /// dirty FAT. `diskutil mount` first runs DiskArbitration's check, which
+    /// refuses a dirty FAT even for a read-only mount. FSKit's msdos module
+    /// (`mount -F`, macOS 15.4 and later), or the msdos kext before it, mounts
+    /// it read-only without that check and leaves it as it is.
+    var fatMount: @Sendable (_ device: String, _ mountPoint: String) throws -> Void = {
+      device, mountPoint in
+      let arguments = ["-t", "msdos", "-o", "rdonly,nobrowse", "/dev/" + device, mountPoint]
+      do { _ = try Self.systemRun("/sbin/mount", ["-F"] + arguments) } catch {
+        _ = try Self.systemRun("/sbin/mount", arguments)
+      }
+    }
 
     func snapshot() throws -> RemovalSnapshot {
       let target = try targetType().lowercased()
@@ -124,7 +136,9 @@
     }
 
     func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence {
-      let esp = try withVolume(installation.esp.identifier, uuid: installation.esp.uuid) { info in
+      let esp = try withVolume(installation.esp.identifier, uuid: installation.esp.uuid, fat: true)
+      {
+        info in
         try string(info, "ParentWholeDisk") == disk && info["Content"] as? String == "EFI"
       } read: { tree in
         (
@@ -156,8 +170,8 @@
     /// read-only at a private directory and unmounts it again. The volume must be
     /// the one the approved snapshot names, by BSD identifier and UUID.
     private func withVolume<T>(
-      _ identifier: String, uuid expected: String, belongs: ([String: Any]) throws -> Bool,
-      read body: (RemovalFileTree) throws -> T
+      _ identifier: String, uuid expected: String, fat: Bool = false,
+      belongs: ([String: Any]) throws -> Bool, read body: (RemovalFileTree) throws -> T
     ) throws -> T {
       let info = try plist(["info", "-plist", identifier])
       guard try string(info, "DeviceIdentifier") == identifier,
@@ -168,14 +182,23 @@
       }
       let directory = try makeMountPoint()
       let path = directory.resolvingSymlinksInPath().path
-      do {
-        _ = try run(["mount", "readOnly", "nobrowse", "-mountPoint", path, identifier])
-      } catch {
+      func release() {
         if (try? plist(["info", "-plist", identifier]))?["MountPoint"] as? String == path {
           _ = try? run(["unmount", identifier])
         }
-        _ = Darwin.rmdir(path)
-        throw RemovalFailure(message: "\(identifier) couldn’t be mounted read-only.")
+      }
+      do {
+        _ = try run(["mount", "readOnly", "nobrowse", "-mountPoint", path, identifier])
+      } catch {
+        release()
+        do {
+          guard fat else { throw error }
+          try fatMount(identifier, path)
+        } catch {
+          release()
+          _ = Darwin.rmdir(path)
+          throw RemovalFailure(message: "\(identifier) couldn’t be mounted read-only.")
+        }
       }
       let result = Result<T, any Error>(catching: {
         let mounted = try plist(["info", "-plist", identifier])
