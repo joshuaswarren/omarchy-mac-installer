@@ -1077,8 +1077,87 @@ configure_image() {
     fail "/boot/omarchy is missing or not empty"
 
   rm -f "$target/boot/efi/.builder" "$target/boot/efi/m1n1/boot.bin.old"
-  rm -rf "$target/var/lib/pacman/sync"
+  keep_installed_databases
   find "$target/var/cache/pacman/pkg" -mindepth 1 -delete
+  probe_first_boot
+}
+
+# Repository names in pacman configuration FILE, in its order.
+pacman_repositories() {
+  sed -n 's/^[[:space:]]*\[\([^]]*\)\][[:space:]]*$/\1/p' "$1" | grep -vx options
+}
+
+# The image keeps the pinned sync database of every repository its
+# /etc/pacman.conf names, so its first boot resolves packages without a network
+# sync. The build's own [omarchy-candidates] and [omarchy-aarch64] go.
+keep_installed_databases() {
+  local sync=$target/var/lib/pacman/sync repository sha entry keep=() pinned
+  pinned=$(repositories)
+  mapfile -t keep < <(pacman_repositories "$target/etc/pacman.conf")
+  ((${#keep[@]})) || fail "the image's pacman.conf names no repository"
+  for repository in "${keep[@]}"; do
+    sha=$(awk -v name="$repository" '$1 == name { print $2 }' <<<"$pinned")
+    [[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "the image's pacman.conf names [$repository], which the inputs pin no database for"
+    [[ -f $sync/$repository.db && ! -L $sync/$repository.db ]] || fail "the image has no $repository sync database"
+    verify_database "$sync/$repository.db" "$sha"
+  done
+  for entry in "$sync"/* "$sync"/.*; do
+    [[ ${entry##*/} != . && ${entry##*/} != .. && (-e $entry || -L $entry) ]] || continue
+    [[ " ${keep[*]/%/.db} " == *" ${entry##*/} "* ]] || rm -rf -- "$entry"
+  done
+}
+
+# The probe's pacman: a sync or refresh is recorded in REQUESTS and refused,
+# anything else runs the image's own pacman at REAL.
+probe_pacman() {
+  sed -e "s|@REQUESTS@|$1|" -e "s|@REAL@|$2|" <<'WRAPPER'
+#!/bin/bash
+for arg in "$@"; do
+  case $arg in
+    --sync | --refresh) ;;
+    --* | [!-]*) continue ;;
+    *S* | *y*) ;;
+    *) continue ;;
+  esac
+  printf '%s\n' "$*" >>@REQUESTS@
+  exit 1
+done
+exec @REAL@ "$@"
+WRAPPER
+}
+
+# The first boot, rehearsed offline on a throwaway snapshot of @: each hardware
+# step the image queued runs as omarchy-provision-hardware runs it, with no
+# network, and pacman stands in for any sync transaction. A step that would
+# install or download anything (omarchy-pkg-add of a package the image lacks,
+# or a pacman -Sy) stops the build: the Mac's first boot may well be offline,
+# and nothing refreshes its databases there. Steps keep running past a failure
+# here, so a chroot-only error cannot hide a later step's packages.
+probe_first_boot() {
+  [[ $hardware_setup == deferred ]] || return 0
+  local top=$work/build-top probe=$work/build-top/@first-boot-probe requests
+  [[ -e $probe ]] && { btrfs subvolume delete "$probe" >/dev/null || fail "could not remove an old first-boot probe"; }
+  btrfs subvolume snapshot "$top/@" "$probe" >>"$logs/first-boot-probe.log" 2>&1 ||
+    fail "could not snapshot the image for the first-boot probe"
+  mv "$probe/usr/bin/pacman" "$probe/usr/bin/pacman.image"
+  probe_pacman /var/tmp/first-boot-probe.requests /usr/bin/pacman.image >"$probe/usr/bin/pacman"
+  chmod 0755 "$probe/usr/bin/pacman"
+  : >"$probe/var/tmp/first-boot-probe.requests"
+  isolated_chroot "$probe" unshare --net env -i PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/bin \
+    HOME=/root TERM=dumb LANG=C.UTF-8 OMARCHY_PATH=/usr/share/omarchy OMARCHY_INSTALL=/usr/share/omarchy/install \
+    OMARCHY_INSTALL_USER= OMARCHY_IMAGE_DEFERRED_HARDWARE=1 OMARCHY_IMAGE_BOOT_REBUILD=/var/lib/omarchy/image/boot-rebuild \
+    /bin/bash -c '
+      while IFS= read -r step; do
+        [[ -n $step ]] || continue
+        echo "== $step"
+        [[ -f $OMARCHY_PATH/$step ]] || { echo "not shipped"; continue; }
+        timeout 600 /bin/bash -c "source \"\$1\"" bash "$OMARCHY_PATH/$step" </dev/null
+        echo "== $step exit $?"
+      done </var/lib/omarchy/image/deferred-steps' >>"$logs/first-boot-probe.log" 2>&1 ||
+    fail "the first-boot probe did not run (logs/first-boot-probe.log)"
+  requests=$(<"$probe/var/tmp/first-boot-probe.requests")
+  btrfs subvolume delete "$probe" >>"$logs/first-boot-probe.log" 2>&1 || fail "could not remove the first-boot probe"
+  [[ -z $requests ]] || fail "first boot would need the network: its hardware steps ask pacman for $(paste -sd';' - <<<"$requests") (logs/first-boot-probe.log)"
 }
 
 # The Mac boots Limine from the moment the install finishes. The runtime's

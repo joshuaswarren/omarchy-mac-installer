@@ -396,6 +396,30 @@ def check_pristine(root: Path) -> None:
     require(not (root / "boot/omarchy/encrypt.state").exists(), "the image carries encrypt.state")
 
 
+def pacman_repositories(config: Path) -> list[str]:
+    names = []
+    for line in config_lines(config):
+        match = re.fullmatch(r"\[([^]]+)\]", line)
+        if match and match.group(1) != "options":
+            names.append(match.group(1))
+    return names
+
+
+def check_sync_databases(root: Path) -> None:
+    """First boot resolves packages offline: the image keeps one sync database per
+    repository its /etc/pacman.conf names, and none for the build's own."""
+    sync = root / "var/lib/pacman/sync"
+    expected = sorted(f"{name}.db" for name in pacman_repositories(root / "etc/pacman.conf"))
+    require(expected, "/etc/pacman.conf names no repository")
+    require(sync.is_dir() and not sync.is_symlink(), "the image keeps no pacman sync databases")
+    present = sorted(entry.name for entry in sync.iterdir())
+    require(present == expected, f"the image's sync databases {present} are not its pacman.conf's {expected}")
+    for name in present:
+        database = sync / name
+        require(database.is_file() and not database.is_symlink() and database.stat().st_size > 0,
+                f"the sync database {name} is not a regular, non-empty file")
+
+
 def check_state(root: Path) -> None:
     check_provisioning(root)
     check_pristine(root)
@@ -418,7 +442,7 @@ def check_state(root: Path) -> None:
             "resolv.conf is not the resolved stub")
     shadow = [line for line in (root / "etc/shadow").read_text().splitlines() if line.startswith("root:")]
     require(len(shadow) == 1 and shadow[0].split(":")[1][:1] in ("*", "!"), "root can log in without a password")
-    require(not (root / "var/lib/pacman/sync").exists(), "the image keeps build-time sync databases")
+    check_sync_databases(root)
     cache = root / "var/cache/pacman/pkg"
     require(not cache.is_dir() or not any(cache.iterdir()), "the image keeps a package cache")
     require(not human_users(root), f"the image has a user: {human_users(root)}")
@@ -485,6 +509,7 @@ def check_tree(root: Path, factory: Path | None = None, profile: str = "release"
     if factory is not None:
         require(factory.is_dir(), "@factory is missing")
         check_secret_material(factory, "@factory")
+        check_sync_databases(factory)
         require(check_lab_access(factory, "@factory", profile) == digest, "@factory's lab access is not the image's")
     return digest
 
