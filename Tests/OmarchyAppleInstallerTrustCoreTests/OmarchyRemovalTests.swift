@@ -4,74 +4,470 @@
   @testable import OmarchyAppleInstallerTrustCore
 
   final class OmarchyRemovalTests: XCTestCase {
-    func testPlanReturnsOmarchyAndBothAdjacentFreeGapsToMacOS() throws {
-      let plan = try OmarchyRemovalPlan(snapshot: fixture())
-      XCTAssertEqual(plan.members.map(\.uuid), ["stub", "efi", "boot", "linux"])
-      XCTAssertEqual(plan.reclaimBytes, 275_000_000_000)
-      XCTAssertEqual(plan.targetMacOSBytes, 994_000_000_000)
+    typealias F = RemovalFixtures
+
+    // MARK: Recognised layouts
+
+    func testConvergedLayoutFromM2ReturnsAllFourPartitionsToMacOS() throws {
+      let plan = try OmarchyRemovalPlan(disks: FakeRemovalDisk())
+      XCTAssertEqual(plan.kind, .installation)
+      XCTAssertEqual(plan.installation?.name, "Omarchy")
+      XCTAssertEqual(
+        plan.members.map(\.uuid),
+        [F.convergedInstall.stub, F.convergedInstall.esp] + F.convergedInstall.linux)
+      XCTAssertEqual(plan.reclaimBytes, 319_999_180_800)
+      XCTAssertEqual(plan.targetMacOSBytes, 994_662_584_320)
     }
 
-    func testUnknownExtraPartitionAndIncompleteInstallationAreRefused() {
-      for index in 0..<7 {
-        var snapshot = fixture()
-        snapshot.partitions.remove(at: index)
-        XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
-      }
-      var snapshot = fixture()
-      snapshot.partitions.append(snapshot.partitions[3])
-      XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
+    func testOlderOmarchyMacInstallIsRecognisedWithItsOneRootPartition() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      XCTAssertEqual(plan.installation?.name, "Asahi Alarm Minimal")
+      XCTAssertEqual(plan.members.map(\.identifier), ["disk0s3", "disk0s4", "disk0s5"])
+      XCTAssertEqual(plan.reclaimBytes, 32_800_505_856)
+      XCTAssertEqual(
+        plan.summary,
+        "Found “Asahi Alarm Minimal”. Removal permanently deletes it and everything stored in it, then returns its space to macOS."
+      )
+      let ticket = plan.ticket(id: UUID())
+      XCTAssertEqual(ticket.confirmation, "delete omarchy installation and data")
+      XCTAssertEqual(
+        ticket.deletions,
+        [
+          OmarchyRemovalItem(
+            title: "Startup container “Asahi Alarm Minimal”", detail: "disk0s3 · APFS",
+            bytes: 2_499_805_184),
+          OmarchyRemovalItem(
+            title: "EFI partition “EFI - ASAHI”", detail: "disk0s4", bytes: 524_288_000),
+          OmarchyRemovalItem(title: "Linux partition", detail: "disk0s5", bytes: 29_776_412_672),
+        ])
+      XCTAssertEqual(
+        ticket.kept.map(\.title),
+        ["macOS “Macintosh HD”", "Apple system container", "Apple Recovery"])
+      XCTAssertEqual(ticket.kept[0].detail, "disk0s2 · grows to 494.4 GB")
+      XCTAssertTrue(ticket.notes.isEmpty)
     }
 
-    func testWrongTypesLabelsAndGapsAreRefused() {
-      let mutations: [(Int, String?, String?, UInt64?)] = [
-        (2, "Apple_APFS_Recovery", nil, nil), (3, "Apple_APFS", nil, nil),
-        (3, nil, "EFI", nil), (4, "Microsoft Basic Data", nil, nil),
-        (5, nil, nil, 735_000_000_001),
+    func testFedoraInstallWithTrailingFreeSpaceReclaimsEverythingUpToRecovery() throws {
+      let plan = try OmarchyRemovalPlan(
+        disks: FakeRemovalDisk(F.fedora(), install: F.fedoraInstall))
+      XCTAssertEqual(plan.members.count, 4)
+      XCTAssertEqual(
+        plan.reclaimBytes, 2_499_805_184 + 524_288_000 + 1_073_741_824 + 70_000_000_000)
+    }
+
+    func testUEFIOnlyInstallIsRemovableAndWarnsAboutExternalSystems() throws {
+      let plan = try OmarchyRemovalPlan(
+        disks: FakeRemovalDisk(F.uefiOnly(), install: F.uefiInstall))
+      XCTAssertEqual(plan.members.map(\.identifier), ["disk0s3", "disk0s4"])
+      XCTAssertEqual(
+        plan.ticket(id: UUID()).notes,
+        [
+          "This installation has no Linux partitions of its own. If a Linux system elsewhere, for example on an external disk, starts through it, that system won’t start after removal. Its data isn’t touched."
+        ])
+    }
+
+    func testFreeSpaceOnlyIsOfferedAsGrowOnlyWithItsOwnPhrase() throws {
+      let plan = try OmarchyRemovalPlan(disks: FakeRemovalDisk(F.freeSpaceOnly(), install: nil))
+      XCTAssertEqual(plan.kind, .freeSpace)
+      XCTAssertTrue(plan.members.isEmpty)
+      XCTAssertEqual(plan.reclaimBytes, 32_800_505_856)
+      XCTAssertEqual(
+        plan.summary,
+        "No installation was found, but 32.8 GB directly after macOS is unallocated. macOS can take it back. Nothing will be deleted."
+      )
+      let ticket = plan.ticket(id: UUID())
+      XCTAssertEqual(ticket.confirmation, "return free space to macos")
+      XCTAssertTrue(ticket.deletions.isEmpty)
+    }
+
+    func testFreeSpaceOnlyIgnoresTheStartupSetting() throws {
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil)
+      disk.startupState = .unknown
+      XCTAssertNoThrow(try OmarchyRemovalPlan(disks: disk))
+    }
+
+    func testFreeSpaceBeyondMacOSGrowthLimitIsRefused() {
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil)
+      disk.limitOverride = 461_584_287_744
+      assertRefusal(
+        disk,
+        "32.8 GB directly after macOS is unallocated, but macOS reports it can only grow to 461.6 GB. Nothing was changed."
+      )
+    }
+
+    func testSmallOrNoGapIsReportedAsNothingToDo() {
+      assertRefusal(
+        FakeRemovalDisk(F.snapshot(macOSSize: 400_000_000_000, [.free(500_000_000)]), install: nil),
+        "No Omarchy installation, or other installation made with the Asahi installer, was found. 500.0 MB directly after macOS is unallocated; that’s too little to return, so it was left as it is. Nothing was changed."
+      )
+      assertRefusal(
+        FakeRemovalDisk(F.snapshot(macOSSize: 400_000_000_000, []), install: nil),
+        "No Omarchy installation, or other installation made with the Asahi installer, was found, and there’s no unallocated space after macOS. Nothing was changed."
+      )
+    }
+
+    // MARK: Refusal fixtures
+
+    func testForeignAPFSContainerIsRefusedByName() {
+      assertRefusal(
+        FakeRemovalDisk(F.foreignAPFS(), install: nil),
+        "Found a partition that isn’t part of an installation made with the Asahi installer: disk0s3 (APFS container, 50.0 GB, volumes “Shared”). Removal only deletes partitions it can prove belong to one installation, so it stopped. Nothing was changed."
+      )
+    }
+
+    func testWindowsPartitionIsRefusedByName() {
+      assertRefusal(
+        FakeRemovalDisk(F.windows(), install: nil),
+        "Found a partition that isn’t part of an installation made with the Asahi installer: disk0s3 (Microsoft Basic Data, “BOOTCAMP”, 60.0 GB). Removal only deletes partitions it can prove belong to one installation, so it stopped. Nothing was changed."
+      )
+    }
+
+    func testSecondMacOSIsRefused() {
+      assertRefusal(
+        FakeRemovalDisk(F.secondMacOS(), install: nil),
+        "Found another system: disk0s3 (APFS container, 80.0 GB, volumes “Macintosh HD 2”, “Macintosh HD 2 - Data”, “Preboot”, “Recovery”, “VM”). It looks like another macOS installation, and removal never deletes one. Nothing was changed."
+      )
+    }
+
+    func testFreeSpaceBehindAnotherPartitionIsRefusedAndExplained() {
+      assertRefusal(
+        FakeRemovalDisk(F.nonContiguousFree(), install: nil),
+        "Found disk0s3 (Linux partition, 10.0 GB) without the startup container every installation made with the Asahi installer has. This looks like a partly removed installation, which needs a manual review. 32.8 GB of unallocated space isn’t directly after macOS: disk0s3 sits between them, so macOS can’t grow into it. Nothing was changed."
+      )
+    }
+
+    func testInstallationNextToWindowsIsRefusedWithoutTouchingEither() {
+      let snapshot = F.snapshot(
+        macOSSize: 400_000_000_000,
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000, name: "EFI - ASAHI"),
+          .part(F.alarmInstall.linux[0], "Linux Filesystem", 29_776_412_672),
+          .part(F.id(44), "Microsoft Basic Data", 60_000_000_000, name: "BOOTCAMP"),
+        ], installs: [F.alarmInstall])
+      let disk = FakeRemovalDisk(snapshot, install: F.alarmInstall)
+      assertRefusal(
+        disk,
+        "Found a partition that isn’t part of an installation made with the Asahi installer: disk0s6 (Microsoft Basic Data, “BOOTCAMP”, 60.0 GB). Removal only deletes partitions it can prove belong to one installation, so it stopped. Nothing was changed."
+      )
+      XCTAssertEqual(disk.evidenceReads, 0)
+    }
+
+    func testTwoInstallationsAreRefused() {
+      let snapshot = F.snapshot(
+        macOSSize: 400_000_000_000,
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000, name: "EFI - ASAHI"),
+          .part(F.alarmInstall.linux[0], "Linux Filesystem", 29_776_412_672),
+          .part(F.uefiInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.uefiInstall.esp, "EFI", 500_170_752, name: "EFI - UEFI"),
+        ], installs: [F.alarmInstall, F.uefiInstall])
+      assertRefusal(
+        FakeRemovalDisk(snapshot, install: F.alarmInstall),
+        "Found more than one installation: disk0s3 (APFS container, 2.5 GB, volumes “Asahi Alarm Minimal”, “Asahi Alarm Minimal - Data”, “Preboot”, “Recovery”); disk0s6 (APFS container, 2.5 GB, volumes “UEFI boot”, “UEFI boot - Data”, “Preboot”, “Recovery”). Removal handles a single installation, so it stopped. Nothing was changed."
+      )
+    }
+
+    func testPartlyRemovedInstallationIsRefused() {
+      let snapshot = F.snapshot(
+        macOSSize: 400_000_000_000,
+        [
+          .free(2_499_805_184),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000, name: "EFI - ASAHI"),
+          .part(F.alarmInstall.linux[0], "Linux Filesystem", 29_776_412_672),
+        ])
+      assertRefusal(
+        FakeRemovalDisk(snapshot, install: nil),
+        "Found disk0s3 (EFI partition, “EFI - ASAHI”, 524.3 MB); disk0s4 (Linux partition, 29.8 GB) without the startup container every installation made with the Asahi installer has. This looks like a partly removed installation, which needs a manual review. Nothing was changed."
+      )
+    }
+
+    func testUnexpectedPartitionShapesAreRefused() {
+      let cases: [[F.Row]] = [
+        // Startup container without its ESP.
+        [.part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184)],
+        // ESP not next to the startup container.
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184), .free(100_000_000),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000),
+        ],
+        // Three Linux partitions.
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000),
+          .part(F.id(5), "Linux Filesystem", 1_000_000_000),
+          .part(F.id(6), "Linux Filesystem", 1_000_000_000),
+          .part(F.id(7), "Linux Filesystem", 1_000_000_000),
+        ],
+        // ESP larger than 1 GiB.
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.alarmInstall.esp, "EFI", 2_000_000_000),
+        ],
       ]
-      for (index, type, name, offset) in mutations {
-        var snapshot = fixture()
-        let old = snapshot.partitions[index]
-        snapshot.partitions[index] = RemovalPartition(
-          identifier: old.identifier, uuid: old.uuid, type: type ?? old.type,
-          offset: offset ?? old.offset, size: old.size, name: name ?? old.name)
-        XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
+      for rows in cases {
+        let disk = FakeRemovalDisk(
+          F.snapshot(macOSSize: 400_000_000_000, rows, installs: [F.alarmInstall]),
+          install: nil)
+        XCTAssertThrowsError(try OmarchyRemovalPlan(disks: disk)) { error in
+          XCTAssertTrue(
+            (error as? RemovalFailure)?.message.hasPrefix(
+              "Found a startup container, but the partitions with it don’t match one installation")
+              == true, "\(error)")
+        }
+        XCTAssertEqual(disk.evidenceReads, 0)
       }
     }
 
-    func testAdditionalOrRenamedStubVolumesAreRefused() {
-      var snapshot = fixture()
-      let original = snapshot.containers[1]
-      snapshot.containers[1] = RemovalContainer(
-        uuid: original.uuid, storeUUID: original.storeUUID,
-        volumes: original.volumes + [
-          RemovalVolume(uuid: "extra", name: "Other macOS", roles: ["System"])
-        ])
-      XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
-      snapshot.containers[1] = RemovalContainer(
-        uuid: original.uuid, storeUUID: original.storeUUID,
-        volumes: original.volumes.dropLast() + [
-          RemovalVolume(uuid: "changed", name: "Other", roles: ["System"])
-        ])
-      XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
+    func testLUKSRetypedPartitionAndOddStubSizesAreRefused() {
+      var luks = F.alarm()
+      let root = luks.partitions[4]
+      luks.partitions[4] = RemovalPartition(
+        identifier: root.identifier, uuid: root.uuid,
+        type: "CA7D7CCB-63ED-4C53-861C-1742536059CC", offset: root.offset, size: root.size,
+        name: "")
+      assertRefusal(
+        FakeRemovalDisk(luks, install: F.alarmInstall),
+        "Found a partition that isn’t part of an installation made with the Asahi installer: disk0s5 (CA7D7CCB-63ED-4C53-861C-1742536059CC, 29.8 GB). Removal only deletes partitions it can prove belong to one installation, so it stopped. Nothing was changed."
+      )
+      let grown = F.snapshot(
+        macOSSize: 400_000_000_000,
+        [
+          .part(F.alarmInstall.stub, "Apple_APFS", 5_000_000_000),
+          .part(F.alarmInstall.esp, "EFI", 524_288_000),
+        ], installs: [F.alarmInstall])
+      assertRefusalPrefix(FakeRemovalDisk(grown, install: nil), "Found another system:")
     }
 
-    func testBootedMacOSCannotBeRemovalTarget() {
-      let original = fixture()
-      let snapshot = RemovalSnapshot(
-        disk: original.disk, devicePath: original.devicePath, diskSize: original.diskSize,
-        macOSStoreUUID: "stub", macOSContainerUUID: "stub-container",
-        partitions: original.partitions, containers: original.containers)
-      XCTAssertThrowsError(try OmarchyRemovalPlan(snapshot: snapshot))
+    func testStubVolumesMustBeExactlyOneInstallationsVolumeGroup() {
+      var snapshot = F.alarm()
+      let index = snapshot.containers.firstIndex { $0.storeUUID == F.alarmInstall.stub }!
+      let stub = snapshot.containers[index]
+      snapshot.containers[index] = RemovalContainer(
+        uuid: stub.uuid, storeUUID: stub.storeUUID,
+        volumes: stub.volumes.map {
+          $0.roles == ["Data"]
+            ? RemovalVolume(
+              uuid: $0.uuid, name: $0.name, roles: $0.roles, group: F.id(999),
+              identifier: $0.identifier) : $0
+        })
+      assertRefusalPrefix(
+        FakeRemovalDisk(snapshot, install: F.alarmInstall), "Found another system:")
+      snapshot = F.alarm()
+      snapshot.containers[index] = RemovalContainer(
+        uuid: stub.uuid, storeUUID: stub.storeUUID,
+        volumes: stub.volumes + [RemovalVolume(uuid: F.id(998), name: "VM", roles: ["VM"])])
+      assertRefusalPrefix(
+        FakeRemovalDisk(snapshot, install: F.alarmInstall), "Found another system:")
     }
+
+    func testFrameMustBeISCThenBootedMacOSThenRecovery() {
+      for index in [0, 1, 6] {
+        var snapshot = F.converged()
+        snapshot.partitions.remove(at: index)
+        assertRefusalPrefix(FakeRemovalDisk(snapshot), "The internal disk doesn’t have the layout")
+      }
+      let original = F.converged()
+      let booted = RemovalSnapshot(
+        disk: original.disk, devicePath: original.devicePath, diskSize: original.diskSize,
+        macOSStoreUUID: F.convergedInstall.stub, macOSContainerUUID: F.id(800),
+        partitions: original.partitions, containers: original.containers)
+      assertRefusalPrefix(FakeRemovalDisk(booted), "The internal disk doesn’t have the layout")
+    }
+
+    func testOverlappingOrDuplicatedPartitionsAreRefused() {
+      var overlap = F.converged()
+      let esp = overlap.partitions[3]
+      overlap.partitions[3] = RemovalPartition(
+        identifier: esp.identifier, uuid: esp.uuid, type: esp.type, offset: esp.offset - 4096,
+        size: esp.size, name: esp.name)
+      assertRefusalPrefix(FakeRemovalDisk(overlap), "The internal disk’s partition map")
+      var duplicate = F.converged()
+      duplicate.partitions.append(duplicate.partitions[3])
+      assertRefusalPrefix(FakeRemovalDisk(duplicate), "The internal disk’s partition map")
+    }
+
+    // MARK: Evidence from the installation's files
+
+    func testUnrelatedLinuxPartitionNextToAnInstallationIsNotErased() {
+      let snapshot = F.snapshot(
+        macOSSize: 400_000_000_000,
+        [
+          .part(F.uefiInstall.stub, "Apple_APFS", 2_499_805_184),
+          .part(F.uefiInstall.esp, "EFI", 500_170_752, name: "EFI - UEFI"),
+          .part(F.id(25), "Linux Filesystem", 30_000_000_000),
+        ], installs: [F.uefiInstall])
+      assertRefusal(
+        FakeRemovalDisk(snapshot, install: F.uefiInstall),
+        "Found the installation “UEFI boot” (disk0s3, disk0s4, disk0s5), but the installer record on its EFI partition doesn’t match the disk: disk0s5 wasn’t created by that installer. It can’t be confirmed as one installation, so nothing was changed."
+      )
+    }
+
+    func testEveryEvidenceCheckRefusesWithItsReason() {
+      let esp = F.alarmInstall.esp.lowercased()
+      let other = F.id(77).lowercased()
+      let cases: [(String, (inout RemovalInstallFiles) -> Void)] = [
+        ("its EFI partition has no m1n1/boot.bin", { $0.espBootObject = nil }),
+        ("its EFI partition has no readable asahi/stub_info.json", { $0.stubInfo = nil }),
+        (
+          "its EFI partition has no readable asahi/stub_info.json",
+          { $0.stubInfo = Data("{not json".utf8) }
+        ),
+        (
+          "the asahi/stub_info.json on its EFI partition names a different startup container",
+          { $0.stubInfo = Data(#"{"vgid": "\#(F.id(601))"}"#.utf8) }
+        ),
+        (
+          "its EFI partition has no installer record (asahi/installer.log)",
+          { $0.installerLog = nil }
+        ),
+        (
+          "the installer record on its EFI partition (asahi/installer.log) has entries that couldn’t be read",
+          { $0.installerLog?.append(Data("\nINFO New partition: Partition(name='disk0s9'".utf8)) }
+        ),
+        (
+          "the installer record on its EFI partition doesn’t match the disk: 1 partition it created is gone",
+          {
+            $0.installerLog?.append(
+              Data(
+                "\nINFO New partition: Partition(name='disk0s9', offset=1, size=1, free=False, type='Linux Filesystem', uuid='\(F.id(78))', desc=None)"
+                  .utf8))
+          }
+        ),
+        (
+          "its startup container holds a full system (a Library folder), unlike a startup container made by the Asahi installer",
+          { $0.stubHasLibrary = true }
+        ),
+        (
+          "its startup container has no m1n1 boot object (Finish Installation.app)",
+          { $0.stubBootObject = nil }
+        ),
+        (
+          "the boot object in its startup container isn’t m1n1",
+          {
+            $0.stubBootObject = Data(
+              "kernel STACKBOT chosen.asahi,efi-system-partition=\(esp)\n\0".utf8)
+          }
+        ),
+        (
+          "the m1n1 boot object in its startup container doesn’t point to this EFI partition",
+          {
+            $0.stubBootObject = Data(
+              "##m1n1_ver##1\0STACKBOTchosen.asahi,efi-system-partition=\(other)\n\0".utf8)
+          }
+        ),
+        (
+          "the m1n1 boot object in its startup container doesn’t point to this EFI partition",
+          {
+            $0.stubBootObject = Data(
+              "##m1n1_ver##1\0STACKBOTchosen.asahi,efi-system-partition=\(esp)\nchosen.asahi,efi-system-partition=\(esp)\n\0"
+                .utf8)
+          }
+        ),
+        (
+          "the m1n1 boot object in its startup container doesn’t point to this EFI partition",
+          {
+            $0.stubBootObject = Data(
+              "##m1n1_ver##1\0STACKBOTchosen.asahi,efi-system-partition=\(esp)".utf8)
+          }
+        ),
+      ]
+      for (reason, change) in cases {
+        let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+        change(&disk.files!)
+        assertRefusal(
+          disk,
+          "Found the installation “Asahi Alarm Minimal” (disk0s3, disk0s4, disk0s5), but \(reason). It can’t be confirmed as one installation, so nothing was changed."
+        )
+      }
+    }
+
+    func testRealInstallerLogLinesFromTheM2Parse() {
+      // Verbatim (cut after `info={`) from the M2 ESP's asahi/installer.log.
+      let log = Data(
+        """
+        09-27 12:59 root         INFO     New partition: Partition(name='disk0s3', offset=675187716096, size=2499805184, free=False, type='Apple_APFS', uuid='A0913035-21F1-4CC5-B940-A26FD42BFA5C', desc=None, label='Omarchy', info={'AESHardware': True, 'APFSContainerReference': 'disk2', 'Bootable': True, 'BusProtocol': 'Apple Fabric', 'C
+        09-27 12:59 root         INFO     New partition: Partition(name='disk0s4', offset=677687521280, size=524288000, free=False, type='EFI', uuid='BB18E021-9D1B-499C-8F25-849B7F5FCDCC', desc=None, label=None, info={'AESHardware': True, 'Bootable': False, 'BusProtocol': 'Apple Fabric', 'CanBeMadeBootable': False, 'CanBeMadeBootableReq
+        09-27 12:59 root         INFO     New partition: Partition(name='disk0s5', offset=678211809280, size=2147483648, free=False, type='Linux Filesystem', uuid='E94DF227-99CE-438F-BE4B-9B7687487BDC', desc=None, label=None, info={'AESHardware': True, 'Bootable': False, 'BusProtocol': 'Apple Fabric', 'CanBeMadeBootable': False, 'CanBeM
+        09-27 13:00 root         INFO     New partition: Partition(name='disk0s6', offset=680359292928, size=314827603968, free=False, type='Linux Filesystem', uuid='2CE86A5F-AF65-404E-A04C-B51092F45D8F', desc=None, label=None, info={'AESHardware': True, 'Bootable': False, 'BusProtocol': 'Apple Fabric', 'CanBeMadeBootable': False, 'CanB
+        09-27 13:00 root         INFO       chosen.asahi,efi-system-partition=bb18e021-9d1b-499c-8f25-849b7f5fcdcc
+        """.utf8)
+      let install = F.convergedInstall
+      XCTAssertEqual(
+        RemovalEvidence.createdPartitions(log: log),
+        [
+          RemovalCreatedPartition(uuid: install.stub, type: "Apple_APFS"),
+          RemovalCreatedPartition(uuid: install.esp, type: "EFI"),
+          RemovalCreatedPartition(uuid: install.linux[0], type: "Linux Filesystem"),
+          RemovalCreatedPartition(uuid: install.linux[1], type: "Linux Filesystem"),
+        ])
+    }
+
+    func testTicketFromAnOlderHelperStillDecodes() throws {
+      let json = #"{"id":"\#(UUID().uuidString)","reclaimBytes":1,"macOSBytesAfter":2}"#
+      let ticket = try JSONDecoder().decode(OmarchyRemovalTicket.self, from: Data(json.utf8))
+      XCTAssertEqual(ticket.kind, .installation)
+      XCTAssertEqual(ticket.confirmation, OmarchyRemovalTicket.confirmation)
+      XCTAssertTrue(ticket.deletions.isEmpty)
+    }
+
+    func testDuplicatedInstallerRecordIsUnreadable() {
+      let log = Data(
+        """
+        New partition: Partition(name='disk0s3', offset=1, size=1, free=False, type='Apple_APFS', uuid='\(F.id(3))', desc=None)
+        New partition: Partition(name='disk0s3', offset=1, size=1, free=False, type='Apple_APFS', uuid='\(F.id(3))', desc=None)
+        """.utf8)
+      XCTAssertNil(RemovalEvidence.createdPartitions(log: log))
+      XCTAssertEqual(
+        RemovalEvidence.createdPartitions(log: Data("no records here".utf8)), [])
+    }
+
+    func testUnreadableInstallationFilesAreReported() {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      disk.files = nil
+      assertRefusal(
+        disk,
+        "Found the installation “Asahi Alarm Minimal” (disk0s3, disk0s4, disk0s5), but its files couldn’t be checked: disk0s4 couldn’t be mounted read-only. Nothing was changed."
+      )
+    }
+
+    func testStartupDiskMustBeTheRunningMacOS() {
+      let cases: [(RemovalStartup, String)] = [
+        (
+          .other("Asahi Alarm Minimal"),
+          "Your Mac is set to start up from “Asahi Alarm Minimal”. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
+        ),
+        (
+          .nextStartupOverride,
+          "A one-time startup choice is set for the next restart. Restart once, come back to macOS, then check again. Nothing was changed."
+        ),
+        (
+          .unknown,
+          "macOS couldn’t report which system your Mac starts up from. Choose your macOS disk in System Settings > General > Startup Disk, then check again. Nothing was changed."
+        ),
+      ]
+      for (startup, message) in cases {
+        let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+        disk.startupState = startup
+        assertRefusal(disk, message)
+      }
+    }
+
+    // MARK: Execution
 
     func testExecutionPreservesApplePartitionsAndGrowsMacOSByUUID() throws {
       let disk = FakeRemovalDisk()
       let original = try disk.snapshot()
-      let plan = try OmarchyRemovalPlan(snapshot: original)
+      let plan = try OmarchyRemovalPlan(disks: disk)
       var journal = [String]()
       try OmarchyRemovalExecutor(disks: disk).execute(plan) { journal.append($0) }
+      let install = F.convergedInstall
       XCTAssertEqual(
-        disk.operations, ["container:stub", "erase:efi", "erase:boot", "erase:linux", "grow:mac"])
+        disk.operations,
+        ["container:\(install.stub)", "erase:\(install.esp)"] + install.linux.map { "erase:\($0)" }
+          + ["grow:\(F.mac)"])
       let result = try disk.snapshot()
       XCTAssertEqual(result.partitions.first, original.partitions.first)
       XCTAssertEqual(result.partitions.last, original.partitions.last)
@@ -80,21 +476,83 @@
       XCTAssertEqual(journal.last, "complete")
     }
 
+    func testOlderOmarchyMacInstallIsRemovedAndReclaimed() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in }
+      XCTAssertEqual(
+        disk.operations,
+        [
+          "container:\(F.alarmInstall.stub)", "erase:\(F.alarmInstall.esp)",
+          "erase:\(F.alarmInstall.linux[0])", "grow:\(F.mac)",
+        ])
+      XCTAssertEqual(disk.state.partitions.map(\.uuid), [F.isc, F.mac, F.recovery])
+      XCTAssertEqual(disk.state.partitions[1].size, 494_384_793_600)
+    }
+
+    func testFreeSpaceOnlyOnlyGrowsMacOS() throws {
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      var journal = [String]()
+      try OmarchyRemovalExecutor(disks: disk).execute(plan) { journal.append($0) }
+      XCTAssertEqual(disk.operations, ["grow:\(F.mac)"])
+      XCTAssertEqual(journal, ["returning-space-to-macos", "complete"])
+      XCTAssertEqual(disk.state.partitions[1].size, 494_384_793_600)
+    }
+
+    func testFreeSpaceGrowthLimitAtExecutionLeavesNoJournal() throws {
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.limitOverride = 461_584_287_744
+      var journal = [String]()
+      XCTAssertThrowsError(
+        try OmarchyRemovalExecutor(disks: disk).execute(plan) { journal.append($0) })
+      XCTAssertTrue(journal.isEmpty)
+      XCTAssertTrue(disk.operations.isEmpty)
+    }
+
+    func testChangedFilesOrStartupSinceReviewStopBeforeAnyChange() throws {
+      let changes: [(FakeRemovalDisk) -> Void] = [
+        { $0.files?.installerLog?.append(Data("\nmore".utf8)) },
+        { $0.files?.stubHasLibrary = true },
+        { $0.startupState = .nextStartupOverride },
+      ]
+      for change in changes {
+        let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+        let plan = try OmarchyRemovalPlan(disks: disk)
+        disk.afterPlanning = change
+        var journal = [String]()
+        XCTAssertThrowsError(
+          try OmarchyRemovalExecutor(disks: disk).execute(plan) { journal.append($0) })
+        XCTAssertTrue(disk.operations.isEmpty)
+        XCTAssertTrue(journal.isEmpty)
+      }
+    }
+
     func testEveryCommandFailureStopsWithoutReplayingOrGrowing() throws {
       for failure in 1...5 {
         let disk = FakeRemovalDisk(failAt: failure)
-        let plan = try OmarchyRemovalPlan(snapshot: disk.snapshot())
+        let plan = try OmarchyRemovalPlan(disks: disk)
         XCTAssertThrowsError(try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in })
         XCTAssertEqual(disk.operations.count, failure)
-        XCTAssertEqual(disk.state.partitions[0].uuid, "isc")
-        XCTAssertEqual(disk.state.partitions.last?.uuid, "recovery")
+        XCTAssertEqual(disk.state.partitions[0].uuid, F.isc)
+        XCTAssertEqual(disk.state.partitions.last?.uuid, F.recovery)
         XCTAssertEqual(disk.state.partitions[1].size, plan.macOS.size)
       }
     }
 
+    func testGrowthLimitAfterDeletionStopsBeforeResizing() throws {
+      let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      disk.limitOverride = 470_000_000_000
+      XCTAssertThrowsError(try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in })
+      XCTAssertEqual(disk.operations.count, 3)
+      XCTAssertFalse(disk.operations.contains("grow:\(F.mac)"))
+    }
+
     func testJournalFailurePreventsFirstMutation() throws {
       let disk = FakeRemovalDisk()
-      let plan = try OmarchyRemovalPlan(snapshot: disk.snapshot())
+      let plan = try OmarchyRemovalPlan(disks: disk)
       XCTAssertThrowsError(
         try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in
           throw RemovalFailure(message: "journal full")
@@ -105,7 +563,7 @@
     func testChangedMacOSOrRecoveryIdentityStopsBeforeDeletion() throws {
       for index in [0, 1, 6] {
         let disk = FakeRemovalDisk()
-        let plan = try OmarchyRemovalPlan(snapshot: disk.snapshot())
+        let plan = try OmarchyRemovalPlan(disks: disk)
         disk.state.partitions[index].size += 4096
         XCTAssertThrowsError(try OmarchyRemovalExecutor(disks: disk).execute(plan) { _ in })
         XCTAssertTrue(disk.operations.isEmpty)
@@ -114,7 +572,7 @@
 
     func testSuccessfulCommandWithoutActualGrowthIsNotSuccess() throws {
       let disk = FakeRemovalDisk(skipGrowth: true)
-      let plan = try OmarchyRemovalPlan(snapshot: disk.snapshot())
+      let plan = try OmarchyRemovalPlan(disks: disk)
       var journal = [String]()
       XCTAssertThrowsError(
         try OmarchyRemovalExecutor(disks: disk).execute(plan) { journal.append($0) })
@@ -122,24 +580,18 @@
     }
 
     func testRenumberedBSDIdentifiersStillMatchUUIDBoundPlan() throws {
-      let plan = try OmarchyRemovalPlan(snapshot: fixture())
-      var changed = fixture()
+      let plan = try OmarchyRemovalPlan(disks: FakeRemovalDisk())
+      var changed = F.converged()
       changed.partitions = changed.partitions.enumerated().map { index, part in
         RemovalPartition(
           identifier: "disk0s\(index + 20)", uuid: part.uuid, type: part.type, offset: part.offset,
           size: part.size, name: part.name)
       }
       XCTAssertNoThrow(try plan.validate(changed, removed: []))
+      XCTAssertEqual(try plan.live(plan.members[0], in: changed).identifier, "disk0s22")
     }
 
-    func testM4RejectedBeforeDiskCommands() {
-      let disk = MacRemovalDiskOperator(
-        commands: { _ in
-          XCTFail("No disk command expected")
-          return Data()
-        }, targetType: { "j614s" })
-      XCTAssertThrowsError(try disk.snapshot())
-    }
+    // MARK: Helper service
 
     func testServerEnforcesExactPhraseAndSingleUseTicket() async throws {
       let root = try temporaryDirectory()
@@ -148,9 +600,11 @@
       let server = server(root: root, disk: disk)
       let inspection = try await server.removal(ticketID: nil, confirmation: "", authorization: nil)
       let ticket = try XCTUnwrap(inspection.ticket)
+      XCTAssertEqual(ticket.kind, .installation)
+      XCTAssertEqual(ticket.deletions.count, 4)
       for phrase in [
         "", "delete omarchy", "Delete omarchy installation and data",
-        OmarchyRemovalTicket.confirmation + " ",
+        OmarchyRemovalTicket.confirmation + " ", OmarchyRemovalTicket.freeSpaceConfirmation,
       ] {
         do {
           _ = try await server.removal(
@@ -159,17 +613,77 @@
         } catch {}
         XCTAssertTrue(disk.operations.isEmpty)
       }
+      let freshReply = try await server.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let fresh = try XCTUnwrap(freshReply.ticket)
       let result = try await server.removal(
-        ticketID: ticket.id, confirmation: OmarchyRemovalTicket.confirmation,
+        ticketID: fresh.id, confirmation: OmarchyRemovalTicket.confirmation,
         authorization: authorization())
       XCTAssertTrue(result.completed, result.message)
+      XCTAssertEqual(
+        result.message,
+        "“Omarchy” and its data have been removed. The freed space is now part of macOS.")
       do {
         _ = try await server.removal(
-          ticketID: ticket.id, confirmation: OmarchyRemovalTicket.confirmation,
+          ticketID: fresh.id, confirmation: OmarchyRemovalTicket.confirmation,
           authorization: authorization())
         XCTFail("Replayed ticket accepted")
       } catch {}
       XCTAssertEqual(disk.operations.count, 5)
+    }
+
+    func testServerFreeSpaceNeedsItsOwnPhraseAndNeverClaimsRemoval() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil)
+      let service = server(root: root, disk: disk)
+      let firstReply = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let first = try XCTUnwrap(firstReply.ticket)
+      XCTAssertEqual(first.kind, .freeSpace)
+      do {
+        _ = try await service.removal(
+          ticketID: first.id, confirmation: OmarchyRemovalTicket.confirmation,
+          authorization: authorization())
+        XCTFail("Deletion phrase accepted for free space")
+      } catch {}
+      let secondReply = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let second = try XCTUnwrap(secondReply.ticket)
+      let result = try await service.removal(
+        ticketID: second.id, confirmation: "return free space to macos",
+        authorization: authorization())
+      XCTAssertTrue(result.completed)
+      XCTAssertEqual(result.message, "The free space is now part of macOS.")
+      XCTAssertEqual(disk.operations, ["grow:\(F.mac)"])
+    }
+
+    func testServerFreeSpaceResizeFailureDoesNotMentionRemoval() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let disk = FakeRemovalDisk(F.freeSpaceOnly(), install: nil, failAt: 1)
+      let service = server(root: root, disk: disk)
+      let ticketReply = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(ticketReply.ticket)
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertFalse(result.completed)
+      XCTAssertTrue(result.requiresReview)
+      XCTAssertTrue(result.message.hasPrefix("macOS couldn’t confirm it took the free space."))
+      XCTAssertFalse(result.message.contains("Omarchy"))
+    }
+
+    func testServerRefusalCarriesTheExactFinding() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let service = server(root: root, disk: FakeRemovalDisk(F.windows(), install: nil))
+      do {
+        _ = try await service.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("Windows layout accepted")
+      } catch {
+        XCTAssertTrue((error as? RemovalFailure)?.message.contains("“BOOTCAMP”") == true)
+      }
     }
 
     func testCredentialAndAdministratorRejectionPrecedeDeletion() async throws {
@@ -203,10 +717,27 @@
         ticketID: XCTUnwrap(inspection.ticket).id, confirmation: OmarchyRemovalTicket.confirmation,
         authorization: authorization())
       XCTAssertFalse(result.completed)
-      XCTAssertTrue(result.message.contains("some Omarchy data may already be deleted"))
+      XCTAssertTrue(result.message.contains("some data in “Omarchy” may already be deleted"))
       let restarted = server(root: root, disk: disk)
       do {
         _ = try await restarted.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("Interrupted removal was ignored")
+      } catch { XCTAssertTrue(error.localizedDescription.contains("earlier removal")) }
+    }
+
+    func testCompleteJournalFromEarlierVersionDoesNotBlock() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let old = #"{"plan":{"members":[],"targetMacOSBytes":1},"phase":"complete"}"#
+      try Data(old.utf8).write(to: root.appendingPathComponent("removal-\(UUID()).json"))
+      let service = server(root: root, disk: FakeRemovalDisk())
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      XCTAssertNotNil(inspection.ticket)
+      try Data(#"{"phase":"removing-x"}"#.utf8).write(
+        to: root.appendingPathComponent("removal-\(UUID()).json"))
+      do {
+        _ = try await service.removal(ticketID: nil, confirmation: "", authorization: nil)
         XCTFail("Interrupted removal was ignored")
       } catch { XCTAssertTrue(error.localizedDescription.contains("earlier removal")) }
     }
@@ -222,103 +753,14 @@
         ticketID: XCTUnwrap(inspection.ticket).id, confirmation: OmarchyRemovalTicket.confirmation,
         authorization: authorization())
       XCTAssertFalse(result.completed)
-      XCTAssertTrue(result.message.contains("Omarchy was removed"))
+      XCTAssertTrue(result.message.contains("“Omarchy” was removed"))
       XCTAssertFalse(result.message.contains("No disk changes"))
       let files = try FileManager.default.contentsOfDirectory(
         at: root, includingPropertiesForKeys: nil)
       let data = try Data(contentsOf: XCTUnwrap(files.first))
-      XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("test-password"))
-    }
-
-    func testNativePlistParserMatchesApprovedShapeAndUsesFixedCommands() throws {
-      let replies = try diskPlists()
-      let disk = MacRemovalDiskOperator(
-        commands: { arguments in
-          guard let reply = replies[arguments.joined(separator: " ")] else {
-            XCTFail("Unexpected command: \(arguments)")
-            throw RemovalFailure(message: "unexpected command")
-          }
-          return reply
-        }, targetType: { "j314s" })
-      let snapshot = try disk.snapshot()
-      let plan = try OmarchyRemovalPlan(snapshot: snapshot)
-      XCTAssertEqual(plan.reclaimBytes, 275_000_000_000)
-      XCTAssertEqual(plan.members.count, 4)
-      XCTAssertEqual(snapshot.containers.count, 2)
-    }
-
-    func testNativeParserAcceptsAppleSSDReportedAsUnknownWhenListedPhysical() throws {
-      var responses = try diskPlists()
-      var whole = try XCTUnwrap(
-        PropertyListSerialization.propertyList(from: responses["info -plist disk0"]!, format: nil)
-          as? [String: Any])
-      whole["VirtualOrPhysical"] = "Unknown"
-      responses["info -plist disk0"] = try PropertyListSerialization.data(
-        fromPropertyList: whole, format: .xml, options: 0)
-      responses["list -plist internal physical"] = responses["list -plist disk0"]
-      let replies = responses
-      let disk = MacRemovalDiskOperator(
-        commands: { arguments in
-          guard let reply = replies[arguments.joined(separator: " ")] else {
-            throw RemovalFailure(message: "unexpected command")
-          }
-          return reply
-        }, targetType: { "j314s" })
-      let plan = try OmarchyRemovalPlan(snapshot: disk.snapshot())
-      XCTAssertEqual(plan.reclaimBytes, 275_000_000_000)
-    }
-
-    func testUnknownDiskMustBeListedAsInternalPhysical() throws {
-      var responses = try diskPlists()
-      var whole = try XCTUnwrap(
-        PropertyListSerialization.propertyList(from: responses["info -plist disk0"]!, format: nil)
-          as? [String: Any])
-      whole["VirtualOrPhysical"] = "Unknown"
-      responses["info -plist disk0"] = try PropertyListSerialization.data(
-        fromPropertyList: whole, format: .xml, options: 0)
-      responses["list -plist internal physical"] = try PropertyListSerialization.data(
-        fromPropertyList: ["AllDisksAndPartitions": []], format: .xml, options: 0)
-      let replies = responses
-      let disk = MacRemovalDiskOperator(
-        commands: { replies[$0.joined(separator: " ")]! }, targetType: { "j314s" })
-      XCTAssertThrowsError(try disk.snapshot())
-    }
-
-    func testExplicitlyVirtualDiskIsRejectedDespiteConflictingListing() throws {
-      var responses = try diskPlists()
-      var whole = try XCTUnwrap(
-        PropertyListSerialization.propertyList(from: responses["info -plist disk0"]!, format: nil)
-          as? [String: Any])
-      whole["VirtualOrPhysical"] = "Virtual"
-      responses["info -plist disk0"] = try PropertyListSerialization.data(
-        fromPropertyList: whole, format: .xml, options: 0)
-      let replies = responses
-      let disk = MacRemovalDiskOperator(
-        commands: { replies[$0.joined(separator: " ")]! }, targetType: { "j314s" })
-      XCTAssertThrowsError(try disk.snapshot())
-    }
-
-    func testNativeParserRejectsExternalAndMultiplePhysicalStores() throws {
-      for changedRoot: [String: Any] in [
-        [
-          "Internal": false, "APFSContainerReference": "disk4",
-          "APFSPhysicalStores": [["APFSPhysicalStore": "disk0s2"]],
-        ],
-        [
-          "Internal": true, "APFSContainerReference": "disk4",
-          "APFSPhysicalStores": [
-            ["APFSPhysicalStore": "disk0s2"], ["APFSPhysicalStore": "disk9s2"],
-          ],
-        ],
-      ] {
-        var responses = try diskPlists()
-        responses["info -plist /"] = try PropertyListSerialization.data(
-          fromPropertyList: changedRoot, format: .xml, options: 0)
-        let replies = responses
-        let disk = MacRemovalDiskOperator(
-          commands: { replies[$0.joined(separator: " ")]! }, targetType: { "j314s" })
-        XCTAssertThrowsError(try disk.snapshot())
-      }
+      let text = String(decoding: data, as: UTF8.self)
+      XCTAssertFalse(text.contains("test-password"))
+      XCTAssertFalse(text.contains("Test Owner"))
     }
 
     func testHelperRejectsForeignTicketBeforeAuthenticationOrDeletion() async throws {
@@ -374,6 +816,29 @@
           MachineOwnerAuthorization(username: "nobody", password: Data("unused".utf8))))
     }
 
+    // MARK: Helpers
+
+    private func assertRefusal(
+      _ disk: FakeRemovalDisk, _ message: String, file: StaticString = #filePath,
+      line: UInt = #line
+    ) {
+      XCTAssertThrowsError(try OmarchyRemovalPlan(disks: disk), file: file, line: line) { error in
+        XCTAssertEqual((error as? RemovalFailure)?.message, message, file: file, line: line)
+      }
+      XCTAssertTrue(disk.operations.isEmpty, file: file, line: line)
+    }
+
+    private func assertRefusalPrefix(
+      _ disk: FakeRemovalDisk, _ prefix: String, file: StaticString = #filePath,
+      line: UInt = #line
+    ) {
+      XCTAssertThrowsError(try OmarchyRemovalPlan(disks: disk), file: file, line: line) { error in
+        let message = (error as? RemovalFailure)?.message ?? "\(error)"
+        XCTAssertTrue(message.hasPrefix(prefix), message, file: file, line: line)
+        XCTAssertTrue(message.hasSuffix("Nothing was changed."), message, file: file, line: line)
+      }
+    }
+
     private func server(root: URL, disk: FakeRemovalDisk) -> ClosedEngineHelperServer {
       ClosedEngineHelperServer(
         workingDirectory: root, executor: UnusedRemovalHandoffExecutor(),
@@ -407,130 +872,33 @@
     }
   }
 
-  /// These commands mutate only an in-memory partition map, exercising the real executor.
-  private final class FakeRemovalDisk: RemovalDiskOperating, @unchecked Sendable {
-    var state = fixture()
-    var operations = [String]()
-    let failAt: Int?
-    let skipGrowth: Bool
-    init(failAt: Int? = nil, skipGrowth: Bool = false) {
-      self.failAt = failAt
-      self.skipGrowth = skipGrowth
-    }
-    func snapshot() throws -> RemovalSnapshot { state }
-    func deleteContainer(storeUUID: String) throws {
-      try record("container:\(storeUUID)")
-      state.partitions.removeAll { $0.uuid == storeUUID }
-      state.containers.removeAll { $0.storeUUID == storeUUID }
-    }
-    func erasePartition(uuid: String) throws {
-      try record("erase:\(uuid)")
-      state.partitions.removeAll { $0.uuid == uuid }
-    }
-    func growContainer(storeUUID: String) throws {
-      try record("grow:\(storeUUID)")
-      if !skipGrowth, let index = state.partitions.firstIndex(where: { $0.uuid == storeUUID }) {
-        state.partitions[index].size = 994_000_000_000
-      }
-    }
-    private func record(_ operation: String) throws {
-      operations.append(operation)
-      if operations.count == failAt { throw RemovalFailure(message: "injected command failure") }
-    }
-  }
-
   private final class BlockingRemovalDisk: RemovalDiskOperating, @unchecked Sendable {
     let entered = DispatchSemaphore(value: 0)
     let resume = DispatchSemaphore(value: 0)
     private let disk = FakeRemovalDisk()
     func waitUntilEntered() -> Bool { entered.wait(timeout: .now() + 5) == .success }
     func snapshot() throws -> RemovalSnapshot { try disk.snapshot() }
-    func deleteContainer(storeUUID: String) throws {
+    func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence {
+      try self.disk.evidence(for: installation, disk: disk)
+    }
+    func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup {
+      try disk.startup(snapshot)
+    }
+    func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 {
+      try self.disk.growLimit(macOS, disk: disk)
+    }
+    func deleteContainer(_ stub: RemovalPartition, disk: String) throws {
       entered.signal()
       guard resume.wait(timeout: .now() + 10) == .success else {
         throw RemovalFailure(message: "test timeout")
       }
-      try disk.deleteContainer(storeUUID: storeUUID)
+      try self.disk.deleteContainer(stub, disk: disk)
     }
-    func erasePartition(uuid: String) throws { try disk.erasePartition(uuid: uuid) }
-    func growContainer(storeUUID: String) throws { try disk.growContainer(storeUUID: storeUUID) }
-  }
-
-  private func diskPlists() throws -> [String: Data] {
-    let model = fixture()
-    var objects = [String: [String: Any]]()
-    func uuid(_ index: Int) -> String { String(format: "00000000-0000-0000-0000-%012d", index) }
-    let root: [String: Any] = [
-      "Internal": true, "APFSContainerReference": "disk4",
-      "APFSPhysicalStores": [["APFSPhysicalStore": "disk0s2"]],
-    ]
-    objects["info -plist /"] = root
-    objects["info -plist disk0"] = [
-      "Internal": true, "WholeDisk": true, "VirtualOrPhysical": "Physical",
-      "Content": "GUID_partition_scheme", "DeviceTreePath": model.devicePath,
-      "Size": model.diskSize,
-    ]
-    objects["list -plist disk0"] = [
-      "AllDisksAndPartitions": [
-        [
-          "DeviceIdentifier": "disk0", "Content": "GUID_partition_scheme",
-          "Partitions": model.partitions.map { ["DeviceIdentifier": $0.identifier] },
-        ]
-      ]
-    ]
-    for (index, part) in model.partitions.enumerated() {
-      objects["info -plist \(part.identifier)"] = [
-        "DeviceIdentifier": part.identifier, "ParentWholeDisk": "disk0",
-        "DiskUUID": uuid(index + 1), "Content": part.type,
-        "PartitionMapPartitionOffset": part.offset, "Size": part.size, "VolumeName": part.name,
-      ]
+    func erasePartition(_ partition: RemovalPartition, disk: String) throws {
+      try self.disk.erasePartition(partition, disk: disk)
     }
-    let containers: [[String: Any]] = model.containers.enumerated().map { index, container in
-      let partition = model.partitions.first { $0.uuid == container.storeUUID }!
-      let volumes: [[String: Any]] = container.volumes.enumerated().map { volumeIndex, volume in
-        [
-          "APFSVolumeUUID": uuid(100 + index * 10 + volumeIndex), "Name": volume.name,
-          "Roles": volume.roles,
-        ]
-      }
-      return [
-        "ContainerReference": index == 0 ? "disk4" : "disk2", "APFSContainerUUID": uuid(50 + index),
-        "PhysicalStores": [["DeviceIdentifier": partition.identifier]], "Volumes": volumes,
-      ]
+    func growContainer(_ macOS: RemovalPartition, disk: String) throws {
+      try self.disk.growContainer(macOS, disk: disk)
     }
-    objects["list -plist internal physical"] = objects["list -plist disk0"]
-    objects["apfs list -plist"] = ["Containers": containers]
-    return try objects.mapValues {
-      try PropertyListSerialization.data(fromPropertyList: $0, format: .xml, options: 0)
-    }
-  }
-
-  private func fixture() -> RemovalSnapshot {
-    let rows: [(String, String, UInt64, UInt64, String)] = [
-      ("isc", "Apple_APFS_ISC", 24_576, 524_288_000, ""),
-      ("mac", "Apple_APFS", 1_000_000_000, 719_000_000_000, ""),
-      ("stub", "Apple_APFS", 730_000_000_000, 2_500_000_000, ""),
-      ("efi", "EFI", 732_500_000_000, 500_000_000, "EFI - OMARC"),
-      ("boot", "Linux Filesystem", 733_000_000_000, 2_000_000_000, ""),
-      ("linux", "Linux Filesystem", 735_000_000_000, 185_000_000_000, ""),
-      ("recovery", "Apple_APFS_Recovery", 995_000_000_000, 5_000_000_000, ""),
-    ]
-    let parts = rows.enumerated().map { index, row in
-      RemovalPartition(
-        identifier: "disk0s\(index + 1)", uuid: row.0, type: row.1, offset: row.2, size: row.3,
-        name: row.4)
-    }
-    let roles = ["System", "Data", "Preboot", "Recovery"]
-    let names = ["Omarchy", "Omarchy - Data", "Preboot", "Recovery"]
-    let stub = RemovalContainer(
-      uuid: "stub-container", storeUUID: "stub",
-      volumes: zip(roles, names).map { RemovalVolume(uuid: $0, name: $1, roles: [$0]) })
-    let mac = RemovalContainer(
-      uuid: "mac-container", storeUUID: "mac",
-      volumes: [RemovalVolume(uuid: "mac-system", name: "Macintosh HD", roles: ["System"])])
-    return RemovalSnapshot(
-      disk: "disk0", devicePath: "IODeviceTree:/arm-io/ans", diskSize: 1_000_000_000_000,
-      macOSStoreUUID: "mac", macOSContainerUUID: "mac-container", partitions: parts,
-      containers: [mac, stub])
   }
 #endif

@@ -88,17 +88,15 @@
       if ticketID == nil {
         removalPlan = nil
         let plan = try await Task.detached {
-          try OmarchyRemovalPlan(snapshot: disks.snapshot())
+          try OmarchyRemovalPlan(disks: disks)
         }.value
-        let ticket = OmarchyRemovalTicket(
-          id: UUID(), reclaimBytes: plan.reclaimBytes, macOSBytesAfter: plan.targetMacOSBytes)
+        let ticket = plan.ticket(id: UUID())
         removalPlan = (ticket, plan, Date().addingTimeInterval(300))
-        return OmarchyRemovalReply(
-          ticket: ticket, message: "The installation and all its data will be permanently deleted.")
+        return OmarchyRemovalReply(ticket: ticket, message: plan.summary)
       }
-      guard confirmation == OmarchyRemovalTicket.confirmation,
-        let authorization, let approved = removalPlan,
-        approved.ticket.id == ticketID, approved.expires > Date()
+      guard let authorization, let approved = removalPlan,
+        approved.ticket.id == ticketID, approved.expires > Date(),
+        confirmation == approved.ticket.confirmation
       else {
         throw RemovalFailure(
           message:
@@ -136,21 +134,26 @@
             }
             phase = next
           }
+          let name = approved.plan.installation?.name
           return OmarchyRemovalReply(
             completed: true,
-            message: "Omarchy and its data have been removed. The freed space is now part of macOS."
-          )
+            message: name.map {
+              "“\($0)” and its data have been removed. The freed space is now part of macOS."
+            } ?? "The free space is now part of macOS.")
         } catch {
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."
           let message: String
           if phase == "checking" {
             message = "\(detail) No disk changes were made."
+          } else if approved.plan.kind == .freeSpace {
+            message =
+              "macOS couldn’t confirm it took the free space. The space may still be unallocated. \(detail) Don’t start again; the removal record was kept for recovery."
           } else if phase == "returning-space-to-macos" || phase == "complete" {
             message =
-              "Omarchy was removed, but the installer couldn’t confirm its space went back to macOS. The space may still be unallocated. \(detail) Don’t start removal again; the removal record was kept for recovery."
+              "“\(approved.plan.installation?.name ?? "Omarchy")” was removed, but the installer couldn’t confirm its space went back to macOS. The space may still be unallocated. \(detail) Don’t start removal again; the removal record was kept for recovery."
           } else {
             message =
-              "Removal stopped, and some Omarchy data may already be deleted. \(detail) Don’t start removal again; the removal record was kept for recovery."
+              "Removal stopped, and some data in “\(approved.plan.installation?.name ?? "Omarchy")” may already be deleted. \(detail) Don’t start removal again; the removal record was kept for recovery."
           }
           return OmarchyRemovalReply(requiresReview: phase != "checking", message: message)
         }
@@ -165,7 +168,7 @@
         let properties = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
         guard properties.isRegularFile == true, properties.isSymbolicLink != true,
           let journal = try? JSONDecoder().decode(
-            RemovalJournal.self, from: Data(contentsOf: entry)),
+            RemovalJournalPhase.self, from: Data(contentsOf: entry)),
           journal.phase == "complete"
         else {
           throw RemovalFailure(
@@ -346,6 +349,12 @@
 
   private struct RemovalJournal: Codable {
     let plan: OmarchyRemovalPlan
+    let phase: String
+  }
+
+  /// The gate reads only the phase, so journals written by earlier versions,
+  /// whose plan had fewer fields, still count as complete.
+  private struct RemovalJournalPhase: Decodable {
     let phase: String
   }
 
