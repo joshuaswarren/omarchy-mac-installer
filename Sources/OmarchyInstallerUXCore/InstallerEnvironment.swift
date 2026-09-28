@@ -146,16 +146,17 @@
       return overflow ? nil : total
     }
 
+    /// Shared by the bar, its accessibility value, and the visible warning.
+    public func macOSSpaceCaution(for allocation: UInt64) -> String? {
+      guard fixedMacOSBytes == nil, let free = macOSFreeBeforeAllocationBytes else { return nil }
+      let remaining = free - min(free, allocation)
+      guard remaining < Self.recommendedMacOSFreeBytes else { return nil }
+      return
+        "macOS will keep less free space than recommended: about \(remaining / 1_000_000_000) GB instead of 38 GB. A macOS update may not install until you free up space in macOS. This estimate includes installation staging space."
+    }
+
     public func spaceCautions(for allocation: UInt64) -> [String] {
-      var cautions: [String] = []
-      if fixedMacOSBytes == nil, let free = macOSFreeBeforeAllocationBytes {
-        let remaining = free - min(free, allocation)
-        if remaining < Self.recommendedMacOSFreeBytes {
-          cautions.append(
-            "macOS will keep less free space than recommended: about \(remaining / 1_000_000_000) GB instead of 38 GB. A macOS update may not install until you free up space in macOS. This estimate includes installation staging space."
-          )
-        }
-      }
+      var cautions = macOSSpaceCaution(for: allocation).map { [$0] } ?? []
       if let recommended = recommendedOmarchyBytes, allocation < recommended {
         if allocation <= minimumBytes {
           cautions.append(

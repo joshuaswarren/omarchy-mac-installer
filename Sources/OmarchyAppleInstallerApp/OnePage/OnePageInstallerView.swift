@@ -752,16 +752,12 @@ private struct DiskSplitPanel: View {
             macOSBytes: plan.macOSBytes(for: displayedOmarchyBytes),
             omarchyBytes: displayedOmarchyBytes,
             unallocatedBytes: plan.unallocatedBytes(for: displayedOmarchyBytes),
-            recommendedMacOSContainerBytes: plan.recommendedMacOSContainerBytes,
+            macOSSpaceCaution: plan.macOSSpaceCaution(for: displayedOmarchyBytes),
             onAdjustOmarchyFraction: editable ? { adjust($0) } : nil,
             onCommitOmarchyFraction: editable ? { commit($0) } : nil,
             isFrozen: isBusy || sizeInput.isEditing
           )
           .transaction { $0.animation = nil }
-          if plan.recommendedMacOSContainerBytes != nil {
-            Text("Reserve line: 38 GB free for macOS")
-              .font(OmarchyTheme.detail).foregroundStyle(OmarchyTheme.caution)
-          }
           if editable {
             VStack(alignment: .leading, spacing: 6) {
               HStack(spacing: 8) {

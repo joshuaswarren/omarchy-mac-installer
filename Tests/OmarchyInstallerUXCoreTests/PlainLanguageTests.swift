@@ -14,6 +14,10 @@
       XCTAssertEqual(plan.recommendedMacOSContainerBytes, 203_000_000_000)
       XCTAssertTrue(plan.spaceCautions(for: 40_000_000_000)[0].contains("minimum size, 40 GB"))
       XCTAssertEqual(plan.spaceCautions(for: 42_000_000_000).count, 1)
+      XCTAssertNil(plan.macOSSpaceCaution(for: 42_000_000_000))
+      XCTAssertEqual(
+        plan.macOSSpaceCaution(for: 42_000_000_001),
+        plan.spaceCautions(for: 42_000_000_001).first)
       XCTAssertTrue(
         plan.spaceCautions(for: 42_000_000_001)[0].contains("about 37 GB instead of 38 GB"))
       let warnings = plan.spaceCautions(for: 43_000_000_000)
@@ -26,6 +30,7 @@
         bindingDigest: "free", fixedMacOSBytes: 180_000_000_000,
         recommendedOmarchyBytes: 77_000_000_000)
       XCTAssertNil(free.recommendedMacOSContainerBytes)
+      XCTAssertNil(free.macOSSpaceCaution(for: 77_000_000_000))
       XCTAssertEqual(free.spaceCautions(for: 40_000_000_000).count, 1)
       XCTAssertTrue(free.spaceCautions(for: 77_000_000_000).isEmpty)
     }

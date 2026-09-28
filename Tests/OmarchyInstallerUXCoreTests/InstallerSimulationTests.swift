@@ -6,6 +6,36 @@
 
   @MainActor
   final class InstallerSimulationTests: XCTestCase {
+    func testReserveColorPreviewCrossesBoundaryAndClearsAgain() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .reserveColorPreview, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      for size: UInt64 in [42_000_000_000, 43_000_000_000, 42_000_000_000] {
+        await session.replan(omarchyBytes: size)
+        guard case .planReview(let plan, _) = session.phase else {
+          return XCTFail("Expected disk review")
+        }
+        XCTAssertEqual(plan.omarchyBytes, size)
+        XCTAssertEqual(plan.macOSSpaceCaution(for: size) != nil, size > 42_000_000_000)
+      }
+    }
+
+    func testLowReserveStartsWithBothCautions() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .lowReserve, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      guard case .planReview(let plan, _) = session.phase else {
+        return XCTFail("Expected disk review")
+      }
+      XCTAssertNotNil(plan.macOSSpaceCaution(for: plan.omarchyBytes))
+      XCTAssertEqual(plan.spaceCautions(for: plan.omarchyBytes).count, 2)
+      XCTAssertFalse(plan.isResizable)
+    }
+
     func testTightDiskSimulationKeepsHardMacOSReserve() async {
       let session = InstallerSession(
         environment: InstallerSimulationEnvironment(scenario: .tightDisk, delay: .zero))
