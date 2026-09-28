@@ -85,7 +85,8 @@ let package = Package(
     .testTarget(
       name: "OmarchyAppleInstallerTrustCoreTests",
       dependencies: ["OmarchyAppleInstallerTrustCore"],
-      path: "Tests/OmarchyAppleInstallerTrustCoreTests"
+      path: "Tests/OmarchyAppleInstallerTrustCoreTests",
+      resources: [.copy("Fixtures")]
     ),
     .testTarget(
       name: "OmarchyInstallerLifecycleTests",
