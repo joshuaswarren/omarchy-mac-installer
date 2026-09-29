@@ -176,6 +176,12 @@
         "j514m", "j516s", "j516c", "j516m",
       ].map { "apple,\($0)" }
       XCTAssertEqual(identifiers, Set(everyM1M2M3Mac))
+      let manifest = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: scripts.appendingPathComponent("supported-models.json")))
+      let supported = try XCTUnwrap((manifest as? [String: Any])?["supported"] as? [String])
+      XCTAssertEqual(Set(supported), Set(everyM1M2M3Mac))
+      XCTAssertEqual(
+        InstallerSimulationEnvironment.simulatedCatalogDevices.sorted(), everyM1M2M3Mac.sorted())
       for identifier in identifiers {
         XCTAssertNotNil(MacModelNames.name(for: identifier), identifier)
       }

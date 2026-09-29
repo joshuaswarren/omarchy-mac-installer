@@ -12,6 +12,12 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "make-unsigned-catalog.py"
 TEMPLATE = Path(__file__).resolve().parents[1] / "release-inputs.template.json"
+MANIFEST = Path(__file__).resolve().parents[1] / "supported-models.json"
+M3_MACS = [
+    "apple,j433", "apple,j434", "apple,j504", "apple,j613", "apple,j615",
+    "apple,j514s", "apple,j514c", "apple,j514m", "apple,j516s", "apple,j516c",
+    "apple,j516m",
+]
 BASE_URL = "https://downloads.example.test/releases/os-v1.0.0-mac.1.20260902"
 NOW = "2026-09-04T00:00:00Z"
 
@@ -157,6 +163,59 @@ class CatalogGeneratorTests(unittest.TestCase):
         document = json.loads(json.dumps(self.inputs))
         document["device_identifiers"] = ["apple,j314s", "apple,j314s"]
         self.assertRejected(document, "duplicates")
+
+    def test_every_m3_mac_is_required(self) -> None:
+        for identifier in M3_MACS:
+            document = json.loads(json.dumps(self.inputs))
+            document["device_identifiers"].remove(identifier)
+            self.assertRejected(document, f"missing {identifier}")
+
+    def test_an_m1_and_m2_only_list_is_rejected(self) -> None:
+        document = json.loads(json.dumps(self.inputs))
+        document["device_identifiers"] = [
+            identifier
+            for identifier in document["device_identifiers"]
+            if identifier not in M3_MACS
+        ]
+        self.assertRejected(document, "every M1, M2 and M3 Mac must be enabled")
+
+    def test_refused_and_unknown_macs_are_rejected_with_a_reason(self) -> None:
+        for identifier, fragment in (
+            ("apple,j575d", "no j575dap device or T6032 chip"),
+            ("apple,j614s", "M4 and later"),
+            ("apple,j604", "not in scripts/supported-models.json"),
+        ):
+            document = json.loads(json.dumps(self.inputs))
+            document["device_identifiers"].append(identifier)
+            self.assertRejected(document, fragment)
+
+    def test_the_manifest_is_every_m1_m2_and_m3_mac(self) -> None:
+        manifest = json.loads(MANIFEST.read_text())
+        self.assertEqual(len(manifest["supported"]), 34)
+        self.assertTrue(set(M3_MACS) <= set(manifest["supported"]))
+        self.assertEqual(set(manifest["refused"]), {"apple,j575d", "apple,j614s"})
+        for template in sorted(MANIFEST.parent.glob("release-inputs*.template.json")):
+            identifiers = json.loads(template.read_text())["device_identifiers"]
+            self.assertEqual(
+                sorted(identifiers), sorted(manifest["supported"]), template.name
+            )
+
+    def test_the_generated_catalog_enables_every_supported_mac(self) -> None:
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        catalog = json.loads((self.directory / "catalog.json").read_text())
+        check = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT.with_name("supported_models.py")),
+                "check-catalog",
+                str(self.directory / "catalog.json"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+        self.assertTrue(all(m["status"] == "enabled" for m in catalog["models"]))
 
     def test_an_uppercase_evidence_revision_is_rejected(self) -> None:
         document = json.loads(json.dumps(self.inputs))

@@ -16,6 +16,10 @@ This first extraction preserves the installer behavior and Git attribution. The 
 | `test/` | Portable aggregate runner and extracted packaging tests |
 | `evidence/` | Recorded journal fixture required by the Swift tests and preview |
 
+## Supported Macs
+
+Every catalog that offers a Mac release enables every M1, M2 and M3 Mac: the 34 boards in [`scripts/supported-models.json`](scripts/supported-models.json). `make-unsigned-catalog.py` refuses inputs that miss, add or refuse one, and `publish-channels envelope` refuses to wrap a catalog that lists a Mac but leaves any of them out or disabled; only an empty "No Mac release yet" catalog lists none. The file also names the boards that stay refused and why: the M3 Ultra Mac Studio (`apple,j575d`), which the pinned v0.9.2 engine cannot inspect, and M4 and later (`apple,j614s`). M3 Macs run with software rendering (llvmpipe) until their GPU driver lands.
+
 ## Start with the tests
 
 The portable suite requires Bash 5+, Python 3.12+, Git and standard Unix tools, including GNU `sha256sum`. It runs on Linux and can run on macOS with those tools installed:
