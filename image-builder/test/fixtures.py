@@ -289,11 +289,17 @@ def import_set(set_dir: Path, output: Path, signer: Signer, receipt: str) -> dic
     return candidate_set.snapshot(set_dir, output, receipt, SOURCE, trust=signer.trust)
 
 
+# The build identity build-mac-image appends to the image-target manifest.
+PACKAGE_SET_SHA256 = "9" * 64
+BUILT = "2026-09-28T03:04:05Z"
+
+
 def image_target(summary: dict, profile: str = "test") -> str:
     """The image-target manifest build-mac-image writes for SUMMARY's set."""
     return (f"format=1\nplatform=apple-silicon\ncandidate_set={summary['set']}\n"
             f"candidate_source_commit={summary['source_commit']}\nbuilder_commit={'c' * 40}\n"
-            f"builder_tree_clean=true\nimage_profile={profile}\n")
+            f"builder_tree_clean=true\nimage_profile={profile}\n"
+            f"package_set_sha256={PACKAGE_SET_SHA256}\nbuilt={BUILT}\n")
 
 
 def make_root(root: Path, candidates: Path) -> None:
