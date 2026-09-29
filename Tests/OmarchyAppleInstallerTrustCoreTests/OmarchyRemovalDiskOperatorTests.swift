@@ -35,102 +35,77 @@
         }, "\(fake.log)")
     }
 
-    func testUnmountedVolumesAreMountedReadOnlyPrivatelyAndUnmountedAgain() throws {
+    func testUnmountedStubIsMountedReadOnlyPrivatelyAndUnmountedAgain() throws {
       let model = F.alarm()
       let fake = FakeDiskutil(model)
       let files = F.files(for: F.alarmInstall, in: model)
-      fake.onMount = { identifier, path in
-        let root = URL(fileURLWithPath: path)
-        if identifier == "disk0s4" {
-          try self.write(files, esp: root, stub: nil)
-        } else {
-          try self.write(files, esp: nil, stub: root)
-        }
+      fake.espFiles = files
+      fake.onMount = { _, path in try self.write(files, esp: nil, stub: URL(fileURLWithPath: path))
       }
       let plan = try OmarchyRemovalPlan(disks: fake.makeOperator())
       XCTAssertEqual(plan.members.count, 3)
       let mounts = fake.log.filter { $0.first == "mount" }
       XCTAssertEqual(
-        mounts.map { Array($0.prefix(3)) },
-        [["mount", "readOnly", "nobrowse"], ["mount", "readOnly", "nobrowse"]])
-      XCTAssertEqual(mounts.map(\.last), ["disk0s4", "disk4s2"])
-      XCTAssertEqual(
-        fake.log.filter { $0.first == "unmount" },
-        [["unmount", "disk0s4"], ["unmount", "disk4s2"]])
+        mounts.map { Array($0.prefix(3)) }, [["mount", "readOnly", "nobrowse"]])
+      XCTAssertEqual(mounts.map(\.last), ["disk4s2"])
+      XCTAssertEqual(fake.log.filter { $0.first == "unmount" }, [["unmount", "disk4s2"]])
       for path in fake.createdMountPoints {
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
       }
     }
 
-    func testDirtyEFIPartitionIsMountedReadOnlyWithoutDiskArbitrationsCheck() throws {
+    /// A dirty FAT made removal refuse (DiskArbitration won't mount it) or hang
+    /// (FSKit mounted it but never finished unmounting it) on the M2 Max,
+    /// macOS 26.6.2. The EFI partition is now read from its raw device.
+    func testUnmountedEFIPartitionIsReadFromItsRawDeviceAndNeverMounted() throws {
       let model = F.alarm()
       let fake = FakeDiskutil(model)
       let files = F.files(for: F.alarmInstall, in: model)
-      fake.onMount = { identifier, path in
-        let root = URL(fileURLWithPath: path)
-        if identifier == "disk0s4" {
-          try self.write(files, esp: root, stub: nil)
-        } else {
-          try self.write(files, esp: nil, stub: root)
-        }
-      }
+      fake.espFiles = files
+      fake.dirtyESP = true
       fake.refuseDiskutilMount = ["disk0s4"]
-      let plan = try OmarchyRemovalPlan(disks: fake.makeOperator())
-      XCTAssertEqual(plan.members.count, 3)
-      let mounts = fake.log.filter { ["mount", "fatMount"].contains($0.first) }
-      XCTAssertEqual(mounts.map { [$0.first!, $0.last!] }.count, 3)
-      XCTAssertEqual(mounts[0].first, "mount")
-      XCTAssertEqual(mounts[0].last, "disk0s4")
-      XCTAssertEqual(Array(mounts[1].prefix(2)), ["fatMount", "disk0s4"])
-      XCTAssertEqual(mounts[1][2], mounts[0][mounts[0].count - 2], "same private mount point")
-      XCTAssertEqual(mounts[2].first, "mount")
-      XCTAssertEqual(mounts[2].last, "disk4s2")
-      XCTAssertEqual(
-        fake.log.filter { $0.first == "unmount" },
-        [["unmount", "disk0s4"], ["unmount", "disk4s2"]])
-      for path in fake.createdMountPoints {
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+      fake.onMount = { _, path in try self.write(files, esp: nil, stub: URL(fileURLWithPath: path))
       }
+      let esp = try XCTUnwrap(model.partitions.first { $0.identifier == "disk0s4" })
+      let plan = try OmarchyRemovalPlan(disks: fake.makeOperator())
+      XCTAssertEqual(plan.installation?.name, "Asahi Alarm Minimal")
+      XCTAssertEqual(
+        fake.log.filter { $0.first == "openFAT" }, [["openFAT", "disk0s4", "4096", "\(esp.size)"]])
+      XCTAssertFalse(
+        fake.log.contains { ["mount", "unmount"].contains($0.first) && $0.last == "disk0s4" },
+        "\(fake.log)")
+      let opened = try XCTUnwrap(fake.log.firstIndex { $0.first == "openFAT" })
+      XCTAssertEqual(fake.log[opened - 1], ["info", "-plist", "disk0s4"], "checked before")
+      XCTAssertEqual(fake.log[opened + 1], ["info", "-plist", "disk0s4"], "and after it is read")
     }
 
-    func testFATFallbackIsOnlyForTheEFIPartitionAndStillMustBeReadOnly() throws {
+    func testUnreadableEFIPartitionOrStubRefusesWithoutMountingTheEFIPartition() throws {
       let model = F.alarm()
       let files = F.files(for: F.alarmInstall, in: model)
       func attempt(_ configure: (FakeDiskutil) -> Void) -> (FakeDiskutil, String) {
         let fake = FakeDiskutil(model)
-        fake.onMount = { identifier, path in
-          let root = URL(fileURLWithPath: path)
-          if identifier == "disk0s4" {
-            try self.write(files, esp: root, stub: nil)
-          } else {
-            try self.write(files, esp: nil, stub: root)
-          }
+        fake.espFiles = files
+        fake.onMount = { _, path in
+          try self.write(files, esp: nil, stub: URL(fileURLWithPath: path))
         }
         configure(fake)
         var message = ""
         XCTAssertThrowsError(try OmarchyRemovalPlan(disks: fake.makeOperator())) { error in
           message = (error as? RemovalFailure)?.message ?? ""
         }
+        XCTAssertFalse(fake.log.contains { $0.first == "mount" && $0.last == "disk0s4" })
         return (fake, message)
       }
-      let (stub, stubMessage) = attempt { $0.refuseDiskutilMount = ["disk4s2"] }
-      XCTAssertFalse(stub.log.contains { $0.first == "fatMount" })
+      let (_, stubMessage) = attempt { $0.refuseDiskutilMount = ["disk4s2"] }
       XCTAssertTrue(stubMessage.contains("disk4s2 couldn’t be mounted read-only"), stubMessage)
-      let (both, bothMessage) = attempt {
-        $0.refuseDiskutilMount = ["disk0s4"]
-        $0.refuseFATMount = true
-      }
-      XCTAssertEqual(both.log.filter { $0.first == "fatMount" }.count, 1)
-      XCTAssertTrue(bothMessage.contains("disk0s4 couldn’t be mounted read-only"), bothMessage)
-      for path in both.createdMountPoints {
-        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
-      }
-      let (writable, writableMessage) = attempt {
-        $0.refuseDiskutilMount = ["disk0s4"]
-        $0.mountWritable = true
-      }
-      XCTAssertTrue(writableMessage.contains("disk0s4 wasn’t mounted read-only"), writableMessage)
-      XCTAssertEqual(writable.log.filter { $0.first == "unmount" }, [["unmount", "disk0s4"]])
+      let (unreadable, unreadableMessage) = attempt { $0.espFiles = nil }
+      XCTAssertTrue(
+        unreadableMessage.contains("disk0s4 couldn’t be read without mounting it"),
+        unreadableMessage)
+      XCTAssertFalse(unreadable.log.contains { $0.first == "mount" }, "stopped before the stub")
+      let (_, corruptMessage) = attempt { $0.corruptESP = true }
+      XCTAssertTrue(
+        corruptMessage.contains("m1n1/boot.bin couldn’t be read safely"), corruptMessage)
     }
 
     func testWritableMountOrFailedUnmountRefuses() throws {
@@ -138,13 +113,14 @@
       for failure in ["writable", "unmount"] {
         let fake = FakeDiskutil(model)
         let files = F.files(for: F.alarmInstall, in: model)
-        fake.onMount = { identifier, path in
-          try self.write(files, esp: URL(fileURLWithPath: path), stub: nil)
+        fake.espFiles = files
+        fake.onMount = { _, path in
+          try self.write(files, esp: nil, stub: URL(fileURLWithPath: path))
         }
         if failure == "writable" { fake.mountWritable = true } else { fake.failUnmount = true }
         XCTAssertThrowsError(try OmarchyRemovalPlan(disks: fake.makeOperator())) { error in
           let message = (error as? RemovalFailure)?.message ?? ""
-          XCTAssertTrue(message.contains("its files couldn’t be checked: disk0s4"), message)
+          XCTAssertTrue(message.contains("its files couldn’t be checked: disk4s2"), message)
         }
         XCTAssertEqual(fake.log.filter { $0.first == "unmount" }.count, 1)
       }
@@ -153,6 +129,7 @@
     func testEvidenceIsReadOnlyFromTheReviewedDevice() throws {
       let model = F.alarm()
       let fake = FakeDiskutil(model)
+      fake.espFiles = F.files(for: F.alarmInstall, in: model)
       let disk = fake.makeOperator()
       guard case .installation(let found, _, _) = try RemovalLayout.recognize(model) else {
         return XCTFail("installation expected")
@@ -277,6 +254,40 @@
           "The running macOS isn’t the one removal returns the space to.")
       }
       XCTAssertTrue(fake.blessed.isEmpty)
+    }
+
+    func testDiskToolsReturnOutputQuoteTheirErrorAndAreStoppedWhenTheyHang() throws {
+      let run = MacRemovalDiskOperator.systemRun
+      XCTAssertEqual(try run("/bin/sh", ["-c", "printf ok; printf noise >&2"], 5), Data("ok".utf8))
+      XCTAssertThrowsError(try run("/bin/sh", ["-c", "echo first >&2; echo busy >&2; exit 3"], 5)) {
+        XCTAssertEqual(
+          ($0 as? RemovalFailure)?.message,
+          "macOS could not complete the disk operation (code 3): busy")
+      }
+      let started = Date()
+      XCTAssertThrowsError(try run("/bin/sleep", ["30"], 1)) {
+        XCTAssertEqual(
+          ($0 as? RemovalFailure)?.message,
+          "macOS didn’t finish the disk operation within 1 seconds.")
+      }
+      XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+      XCTAssertEqual(try run("/bin/sh", ["-c", "sleep 1; printf done"], nil), Data("done".utf8))
+    }
+
+    func testOnlyReadsAndTheStubMountMayTimeOut() {
+      let queries = [
+        ["info", "-plist", "disk0s4"], ["list", "-plist", "internal", "physical"],
+        ["apfs", "list", "-plist"], ["apfs", "listVolumeGroups", "-plist"],
+        ["apfs", "resizeContainer", "disk0s2", "limits", "-plist"],
+        ["mount", "readOnly", "nobrowse", "-mountPoint", "/private/x", "disk4s2"],
+        ["unmount", "disk4s2"],
+      ]
+      let changes = [
+        ["apfs", "deleteContainer", "disk0s3"], ["eraseVolume", "free", "none", "disk0s4"],
+        ["apfs", "resizeContainer", "disk0s2", "0"],
+      ]
+      for argv in queries { XCTAssertTrue(MacRemovalDiskOperator.isQuery(argv), "\(argv)") }
+      for argv in changes { XCTAssertFalse(MacRemovalDiskOperator.isQuery(argv), "\(argv)") }
     }
 
     func testBlessRunnerQuotesItsLastLineWithoutThePassword() throws {
@@ -460,7 +471,12 @@
     var failUnmount = false
     /// `diskutil mount` refuses these, as it does a dirty FAT.
     var refuseDiskutilMount = Set<String>()
-    var refuseFATMount = false
+    /// The EFI partition's files, served from a FAT32 image read in place of
+    /// its raw device; nil makes opening it fail.
+    var espFiles: RemovalInstallFiles?
+    var dirtyESP = false
+    /// Points m1n1/boot.bin's cluster chain back at itself.
+    var corruptESP = false
     var duplicateGroupMembership = false
     var nvram: String
     var bless: String? = "/dev/disk3s1\n"
@@ -506,13 +522,16 @@
           self.createdMountPoints.append(url.resolvingSymlinksInPath().path)
           return url
         },
-        fatMount: { device, path in
+        openFAT: { device, blockSize, size in
           self.lock.lock()
           defer { self.lock.unlock() }
-          self.log.append(["fatMount", device, path])
-          if self.refuseFATMount { throw RemovalFailure(message: "mount_msdos failed") }
-          try self.onMount?(device, path)
-          self.mountPoints[device] = path
+          self.log.append(["openFAT", device, "\(blockSize)", "\(size)"])
+          guard let files = self.espFiles else { throw RemovalFailure(message: "no device") }
+          var image = FATImageBuilder.esp(files, dirty: self.dirtyESP)
+          if self.corruptESP, let first = image.firstCluster["m1n1/boot.bin"] {
+            image.setFAT(first, first)
+          }
+          return try OmarchyRemovalFATVolumeTests.volume(image.data)
         })
     }
 
@@ -639,6 +658,7 @@
           "DiskUUID": part.uuid, "Content": part.type,
           "PartitionMapPartitionOffset": part.offset, "Size": part.size,
           "VolumeName": part.name, "MountPoint": mountPoints[identifier] ?? "",
+          "DeviceBlockSize": 4096,
           "WritableVolume": !mountWritable ? mountPoints[identifier] == nil : true,
         ]
       }

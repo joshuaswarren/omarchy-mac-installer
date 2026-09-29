@@ -285,6 +285,8 @@ test_image_pin=""
 profile=release
 lab_access_dir=/lab-access
 lab_access_sha256=""
+package_set_digest=""
+built=""
 declare -a unavailable=()
 
 field() {
@@ -745,8 +747,9 @@ image_profile() {
 # (omacom/omarchy-mac#528) and the pacman platform guard (#539) both read
 # format and platform and ignore the rest: the candidate set, the builder and
 # the profile, which tie a booted Mac (target.booted after its first boot) to
-# the image it came from. The image's own digest is not here, since root.img
-# holds this file: IMAGE, PROVENANCE and the catalog carry it.
+# the image it came from. write_build_identity adds the build's own identity
+# once the package set is known. The image's own digest is not here, since
+# root.img holds this file: IMAGE, PROVENANCE and the catalog carry it.
 write_image_target() {
   local set_name source_commit image_profile
   set_name=$(field candidate_set)
@@ -762,6 +765,35 @@ write_image_target() {
     >"$target/var/lib/omarchy/image/target"
   chmod 0644 "$target/var/lib/omarchy/image/target"
   chown root:root "$target/var/lib/omarchy" "$target/var/lib/omarchy/image" "$target/var/lib/omarchy/image/target"
+}
+
+# The build's identity, appended to the image-target manifest once the package
+# set is recorded and before @factory is sealed from @, so both carry it and a
+# factory reset keeps it: package_set_sha256, the digest IMAGE and PROVENANCE
+# record, and built, when this build recorded it (UTC), which IMAGE and
+# PROVENANCE record too. It is computed here, once, and those records reuse it.
+# The pair names one build's IMAGE and PROVENANCE, and through them its
+# payload, where the package set alone would also name a rebuild from the same
+# inputs. Neither is secret, and both are checked against a strict pattern
+# before they are written.
+write_build_identity() {
+  local manifest=$target/var/lib/omarchy/image/target digest time
+  digest=$(package_set_sha256) || fail "could not digest the package set for the image target"
+  time=$(date -u +%Y-%m-%dT%H:%M:%SZ) || fail "could not read the build time"
+  [[ $digest =~ ^[0123456789abcdef]{64}$ &&
+    $time =~ ^[[:digit:]]{4}-[[:digit:]]{2}-[[:digit:]]{2}T[[:digit:]]{2}:[[:digit:]]{2}:[[:digit:]]{2}Z$ ]] ||
+    fail "the build identity is malformed: package_set_sha256=$digest built=$time"
+  [[ -f $manifest && ! -L $manifest ]] || fail "the image has no image-target manifest to record the build in"
+  ! grep -Eq '^(package_set_sha256|built)=' "$manifest" || fail "the image-target manifest already records a build"
+  printf 'package_set_sha256=%s\nbuilt=%s\n' "$digest" "$time" >>"$manifest"
+  package_set_digest=$digest
+  built=$time
+}
+
+# IMAGE and PROVENANCE carry the identity the manifest recorded, or none is written.
+require_build_identity() {
+  [[ $package_set_digest =~ ^[0123456789abcdef]{64}$ && -n $built ]] ||
+    fail "the build recorded no identity in the image target"
 }
 
 install_runtime() {
@@ -1069,6 +1101,7 @@ configure_image() {
   arm_first_boot
   # Recorded once the boot setup, which could change packages, is done.
   record_packages
+  write_build_identity
   [[ -s $target/boot/efi/m1n1/boot.bin && -s $target/boot/efi/EFI/BOOT/BOOTAA64.EFI ]] ||
     fail "the boot chain is incomplete"
   [[ -d $target/boot/efi/omarchy && -z $(ls -A "$target/boot/efi/omarchy") ]] ||
@@ -1351,8 +1384,10 @@ package_set_sha256() {
   awk -F'|' '{ print $1 "|" $2 "|" $5 }' "$work/packages" | LC_ALL=C sort | sha256sum | cut -d' ' -f1
 }
 
+# PROVENANCE, on standard output.
 write_provenance() {
   local zip=$1 name path
+  require_build_identity
   {
     printf 'format=2\nkind=mac-image\nlane=%s\nkernel=%s\nplatform=%s\n' "$lane" "$KERNEL" "$PLATFORM"
     printf 'builder_commit=%s\nbuilder_tree_clean=%s\nworkflow_run=%s\n' \
@@ -1371,7 +1406,8 @@ write_provenance() {
     while read -r name; do
       [[ -z $name ]] || printf 'unavailable=%s\n' "$name"
     done <"$work/unavailable"
-    printf 'package_set_sha256=%s\n' "$(package_set_sha256)"
+    printf 'package_set_sha256=%s\n' "$package_set_digest"
+    printf 'built=%s\n' "$built"
     printf 'package_count=%s\n' "$(wc -l <"$work/packages")"
     awk '{ printf "package=%d|%s\n", NR, $0 }' "$work/packages"
     for name in boot.img root.img; do
@@ -1384,11 +1420,13 @@ write_provenance() {
     printf 'installer_data_sha256=%s\n' "$(sha256_of /out/installer_data.json)"
     printf 'inspection_sha256=%s\n' "$(sha256_of /out/INSPECTION)"
     printf 'payload=%s|%s|%s\n' "${zip##*/}" "$(stat -c %s "$zip")" "$(sha256_of "$zip")"
-  } >/out/PROVENANCE
+  }
 }
 
+# IMAGE, on standard output.
 write_image() {
-  local zip=$1 key
+  local key
+  require_build_identity
   {
     printf 'format=2\nlane=%s\nplatform=%s\nbuilder_commit=%s\nbuilder_tree_clean=%s\n' \
       "$lane" "$PLATFORM" "$MAC_IMAGE_BUILDER_COMMIT" "$MAC_IMAGE_BUILDER_CLEAN"
@@ -1399,12 +1437,13 @@ write_image() {
     printf 'hardware_setup=%s\n' "$hardware_setup"
     printf 'test_image_pin=%s\n' "$test_image_pin"
     [[ $profile == release ]] || printf 'profile=%s\nlab_access_sha256=%s\n' "$profile" "$lab_access_sha256"
-    printf 'package_set_sha256=%s\n' "$(package_set_sha256)"
+    printf 'package_set_sha256=%s\n' "$package_set_digest"
+    printf 'built=%s\n' "$built"
     (cd "$work/final" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r path; do
       printf 'image_sha256=%s|%s\n' "$path" "$(sha256_of "$work/final/$path")"
     done
     printf 'input_digest=%s\n' "$(sha256_of /inputs)"
-  } >/out/IMAGE
+  }
 }
 
 # Runs FUNCTION in the background under job control, so a stop (docker stop,
@@ -1490,8 +1529,8 @@ build_payload() {
   write_installer_data "${zip##*/}" /out/installer_data.json
   python3 "$ROOT/bin/mac-image-check" payload "$lane" "$zip" /out/installer_data.json --profile "$profile" ||
     fail "the payload does not pass the layout check"
-  write_provenance "$zip"
-  write_image "$zip"
+  write_provenance "$zip" >/out/PROVENANCE
+  write_image >/out/IMAGE
   cp /inputs /out/inputs
   python3 "$ROOT/bin/mac-image-check" descriptor "$lane" /out || fail "IMAGE does not pass the descriptor check"
   python3 "$ROOT/bin/mac-image-check" provenance "$lane" /out || fail "PROVENANCE does not pass the provenance check"

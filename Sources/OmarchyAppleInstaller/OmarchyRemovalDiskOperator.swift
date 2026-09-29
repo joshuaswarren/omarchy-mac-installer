@@ -11,15 +11,15 @@
   /// All executable paths and verbs are fixed here, never supplied by the XPC peer.
   struct MacRemovalDiskOperator: RemovalDiskOperating {
     var commands: @Sendable ([String]) throws -> Data = {
-      try Self.systemRun("/usr/sbin/diskutil", $0)
+      try Self.systemRun("/usr/sbin/diskutil", $0, timeout: Self.isQuery($0) ? 120 : nil)
     }
     var targetType: @Sendable () throws -> String = {
       try SysctlHardwarePropertyReader().string(named: "hw.targettype")
     }
     var startupTools: @Sendable (RemovalStartupTool) throws -> Data = { tool in
       switch tool {
-      case .blessGetBoot: try Self.systemRun("/usr/sbin/bless", ["--getBoot"])
-      case .nvramPrint: try Self.systemRun("/usr/sbin/nvram", ["-p"])
+      case .blessGetBoot: try Self.systemRun("/usr/sbin/bless", ["--getBoot"], timeout: 120)
+      case .nvramPrint: try Self.systemRun("/usr/sbin/nvram", ["-p"], timeout: 120)
       }
     }
     /// Runs `/usr/sbin/bless` with these arguments and the password line on
@@ -31,18 +31,11 @@
       try RemovalFileTree(mountPoint: $0, device: $1)
     }
     var makeMountPoint: @Sendable () throws -> URL = Self.privateMountPoint
-    /// An EFI partition that Linux last mounted and didn't cleanly unmount is a
-    /// dirty FAT. `diskutil mount` first runs DiskArbitration's check, which
-    /// refuses a dirty FAT even for a read-only mount. FSKit's msdos module
-    /// (`mount -F`, macOS 15.4 and later), or the msdos kext before it, mounts
-    /// it read-only without that check and leaves it as it is.
-    var fatMount: @Sendable (_ device: String, _ mountPoint: String) throws -> Void = {
-      device, mountPoint in
-      let arguments = ["-t", "msdos", "-o", "rdonly,nobrowse", "/dev/" + device, mountPoint]
-      do { _ = try Self.systemRun("/sbin/mount", ["-F"] + arguments) } catch {
-        _ = try Self.systemRun("/sbin/mount", arguments)
-      }
-    }
+    /// Opens an unmounted EFI partition's FAT32 file system for reading from its
+    /// raw device; it is never mounted (see RemovalFATVolume).
+    var openFAT:
+      @Sendable (_ device: String, _ blockSize: Int, _ size: UInt64) throws ->
+        any RemovalFileReading = { try RemovalFATVolume.rawDevice($0, blockSize: $1, size: $2) }
 
     func snapshot() throws -> RemovalSnapshot {
       let target = try targetType().lowercased()
@@ -141,8 +134,7 @@
     }
 
     func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence {
-      let esp = try withVolume(installation.esp.identifier, uuid: installation.esp.uuid, fat: true)
-      {
+      let esp = try withEFIPartition(installation.esp.identifier, uuid: installation.esp.uuid) {
         info in
         try string(info, "ParentWholeDisk") == disk && info["Content"] as? String == "EFI"
       } read: { tree in
@@ -171,17 +163,47 @@
           stubBootObject: stub.1))
     }
 
-    /// Reads a volume in place when macOS already mounted it, otherwise mounts it
-    /// read-only at a private directory and unmounts it again. The volume must be
-    /// the one the approved snapshot names, by BSD identifier and UUID.
-    private func withVolume<T>(
-      _ identifier: String, uuid expected: String, fat: Bool = false,
-      belongs: ([String: Any]) throws -> Bool, read body: (RemovalFileTree) throws -> T
+    /// Reads an EFI partition in place when macOS already mounted it, otherwise
+    /// straight from its raw device. It must be the one the approved snapshot
+    /// names, by BSD identifier and UUID, before and after it is read.
+    private func withEFIPartition<T>(
+      _ identifier: String, uuid expected: String, belongs: ([String: Any]) throws -> Bool,
+      read body: (any RemovalFileReading) throws -> T
     ) throws -> T {
+      let info = try reviewed(identifier, uuid: expected, belongs: belongs)
+      if let mounted = info["MountPoint"] as? String, !mounted.isEmpty {
+        return try body(openTree(mounted, identifier))
+      }
+      let volume: any RemovalFileReading
+      do {
+        volume = try openFAT(
+          identifier, Int(try number(info, "DeviceBlockSize")), try number(info, "Size"))
+      } catch {
+        throw RemovalFailure(message: "\(identifier) couldn’t be read without mounting it.")
+      }
+      let result = try body(volume)
+      _ = try reviewed(identifier, uuid: expected, belongs: belongs)
+      return result
+    }
+
+    private func reviewed(
+      _ identifier: String, uuid expected: String, belongs: ([String: Any]) throws -> Bool
+    ) throws -> [String: Any] {
       let info = try plist(["info", "-plist", identifier])
       guard try string(info, "DeviceIdentifier") == identifier,
         try uuid(info, "DiskUUID") == expected, try belongs(info)
       else { throw RemovalFailure(message: "\(identifier) isn’t the volume that was reviewed.") }
+      return info
+    }
+
+    /// Reads a volume in place when macOS already mounted it, otherwise mounts it
+    /// read-only at a private directory and unmounts it again. The volume must be
+    /// the one the approved snapshot names, by BSD identifier and UUID.
+    private func withVolume<T>(
+      _ identifier: String, uuid expected: String,
+      belongs: ([String: Any]) throws -> Bool, read body: (RemovalFileTree) throws -> T
+    ) throws -> T {
+      let info = try reviewed(identifier, uuid: expected, belongs: belongs)
       if let mounted = info["MountPoint"] as? String, !mounted.isEmpty {
         return try body(openTree(mounted, identifier))
       }
@@ -196,14 +218,8 @@
         _ = try run(["mount", "readOnly", "nobrowse", "-mountPoint", path, identifier])
       } catch {
         release()
-        do {
-          guard fat else { throw error }
-          try fatMount(identifier, path)
-        } catch {
-          release()
-          _ = Darwin.rmdir(path)
-          throw RemovalFailure(message: "\(identifier) couldn’t be mounted read-only.")
-        }
+        _ = Darwin.rmdir(path)
+        throw RemovalFailure(message: "\(identifier) couldn’t be mounted read-only.")
       }
       let result = Result<T, any Error>(catching: {
         let mounted = try plist(["info", "-plist", identifier])
@@ -373,27 +389,74 @@
     }
     private func run(_ arguments: [String]) throws -> Data { try commands(arguments) }
 
-    static func systemRun(_ executable: String, _ arguments: [String]) throws -> Data {
+    /// Reading the disk, and mounting or unmounting the startup container to
+    /// read it, may be given up on. A change to the partition map never is.
+    static func isQuery(_ arguments: [String]) -> Bool {
+      switch arguments.first {
+      case "info", "list", "mount", "unmount": return true
+      case "apfs":
+        return ["list", "listVolumeGroups"].contains(arguments.dropFirst().first ?? "")
+          || (arguments.count == 5 && arguments[1] == "resizeContainer"
+            && arguments[3] == "limits")
+      default: return false
+      }
+    }
+
+    /// Runs a fixed tool. With `timeout`, a tool that hasn't finished in that
+    /// many seconds is stopped and removal refuses, rather than waiting on a
+    /// disk service that stopped answering. A failure quotes the tool's last
+    /// line of standard error.
+    static func systemRun(_ executable: String, _ arguments: [String], timeout: Int? = nil)
+      throws -> Data
+    {
+      let limit = 8 * 1_024 * 1_024
       let process = Process()
       process.executableURL = URL(fileURLWithPath: executable)
       process.arguments = arguments
       process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"]
-      let pipe = Pipe()
-      process.standardOutput = pipe
-      process.standardError = FileHandle.nullDevice
+      let outputPipe = Pipe()
+      let errorPipe = Pipe()
+      process.standardOutput = outputPipe
+      process.standardError = errorPipe
       process.standardInput = FileHandle.nullDevice
-      try process.run()
-      let result = pipe.fileHandleForReading.readDataToEndOfFile()
-      process.waitUntilExit()
-      guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-        throw RemovalFailure(
-          message:
-            "macOS could not complete the disk operation (code \(process.terminationStatus)).")
+      let output = BoundedStandardErrorCollector(limit: limit)
+      let errors = BoundedStandardErrorCollector(limit: 16_384)
+      do {
+        try output.start(reading: outputPipe.fileHandleForReading)
+        try errors.start(reading: errorPipe.fileHandleForReading)
+      } catch {
+        throw RemovalFailure(message: "macOS could not start the disk operation.")
       }
-      guard result.count <= 8 * 1_024 * 1_024 else {
+      defer {
+        output.cancel()
+        errors.cancel()
+      }
+      let exited = DispatchSemaphore(value: 0)
+      process.terminationHandler = { _ in exited.signal() }
+      try process.run()
+      if let timeout {
+        if exited.wait(timeout: .now() + .seconds(timeout)) == .timedOut {
+          process.terminate()
+          _ = exited.wait(timeout: .now() + 5)
+          throw RemovalFailure(
+            message: "macOS didn’t finish the disk operation within \(timeout) seconds.")
+        }
+      } else {
+        exited.wait()
+      }
+      let result = output.finish()
+      guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+        let said = String(decoding: errors.finish().data, as: UTF8.self)
+          .split(whereSeparator: \.isNewline)
+          .map { $0.trimmingCharacters(in: .whitespaces) }.last { !$0.isEmpty }
+        throw RemovalFailure(
+          message: "macOS could not complete the disk operation (code \(process.terminationStatus))"
+            + (said.map { ": \($0.prefix(300))" } ?? "."))
+      }
+      guard !result.truncated else {
         throw RemovalFailure(message: "The disk response was too large.")
       }
-      return result
+      return result.data
     }
     static func privateMountPoint() throws -> URL {
       var template = Array(
