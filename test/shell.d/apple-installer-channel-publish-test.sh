@@ -176,20 +176,21 @@ sign_catalog() {
   shasum -a 256 "$1" | cut -d' ' -f1 | tr -d '\n' >"$2"
 }
 
+# Every supported Mac, as a real catalog lists them.
 write_catalog() {
   local output=$1 sequence=$2 payload_url=$3 payload_size=$4
-  python3 - "$output" "$sequence" "$payload_url" "$payload_size" <<'PY'
+  python3 - "$output" "$sequence" "$payload_url" "$payload_size" "$ROOT/scripts/supported-models.json" <<'PY'
 import json
 import sys
 
-output, sequence, payload_url, payload_size = sys.argv[1:5]
+output, sequence, payload_url, payload_size, manifest = sys.argv[1:6]
 catalog = {
     "schemaVersion": 4,
     "sequence": int(sequence),
     "issuedAt": "2026-09-04T00:00:00Z",
     "models": [
         {
-            "deviceIdentifier": "apple,j314s",
+            "deviceIdentifier": identifier,
             "status": "enabled",
             "payloadArtifact": {
                 "sourceURL": payload_url,
@@ -197,6 +198,7 @@ catalog = {
                 "sizeBytes": int(payload_size),
             },
         }
+        for identifier in json.load(open(manifest))["supported"]
     ],
 }
 with open(output, "w", encoding="utf-8") as stream:
@@ -252,6 +254,33 @@ json.loads(base64.b64decode(d["catalog"]))
 ' "$STREAM_DIR/releases/os-v4.0.2-mac.1.20260902/catalog.signed.json" ||
   fail "envelope decodes to a catalog and a signature"
 pass "an envelope holds the catalog and its signature in one object"
+
+# --- a catalog that offers Macs offers every M1, M2 and M3 Mac ---------------
+refused_envelope() {
+  local name=$1 edit=$2 expected=$3
+  write_catalog "$WORK/$name.catalog" 100 "$BASE/releases/x/payload.zip" 128
+  python3 -c "
+import json, sys
+path = sys.argv[1]
+catalog = json.load(open(path))
+models = catalog['models']
+$edit
+json.dump(catalog, open(path, 'w'))
+" "$WORK/$name.catalog" || fail "$name catalog is written"
+  sign_catalog "$WORK/$name.catalog" "$WORK/$name.sig"
+  if "$PUBLISHER" envelope --catalog "$WORK/$name.catalog" --signature "$WORK/$name.sig" \
+    --output "$WORK/$name.envelope" >"$WORK/$name.log" 2>&1; then
+    fail "envelope refuses a catalog with $name"
+  fi
+  grep -q -- "$expected" "$WORK/$name.log" || fail "the $name refusal says $expected" "$(cat "$WORK/$name.log")"
+  [[ ! -e $WORK/$name.envelope ]] || fail "no envelope is written for a catalog with $name"
+}
+refused_envelope "a-missing-m3-mac" "catalog['models'] = [m for m in models if m['deviceIdentifier'] != 'apple,j613']" "missing apple,j613"
+refused_envelope "a-disabled-m3-mac" "models[-1]['status'] = 'disabled'" "apple,j516m is listed but disabled"
+refused_envelope "only-m1-and-m2" "catalog['models'] = models[:23]" "missing apple,j433"
+refused_envelope "an-m3-ultra" "models.append(dict(models[0], deviceIdentifier='apple,j575d'))" "apple,j575d is refused"
+refused_envelope "an-m4-mac" "models.append(dict(models[0], deviceIdentifier='apple,j614s'))" "M4 and later"
+pass "envelope refuses a catalog missing, disabling or overreaching any M1, M2 or M3 Mac"
 
 # --- promotion writes both channel objects and verifies them back -----------
 OMARCHY_PUBLISH_ASSUME_YES=os-v4.0.2-mac.1.20260902 "$PUBLISHER" os-promote --tag os-v4.0.2-mac.1.20260902 --to stable \
