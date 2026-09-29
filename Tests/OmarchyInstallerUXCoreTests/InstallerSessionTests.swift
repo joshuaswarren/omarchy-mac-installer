@@ -539,6 +539,60 @@
       XCTAssertNotNil(failure.technicalDetail)
     }
 
+    func testQuitAllowedDuringPayloadWaitAndBlockedOnlyDuringExecution() async throws {
+      let environment = MockInstallerEnvironment()
+      let payloadGate = OperationGate()
+      let helperGate = OperationGate()
+      environment.payloadWaitGate = payloadGate
+      environment.executeGate = helperGate
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      let credentials = try authorization()
+      let task = Task { await session.submit(credentials) }
+      await waitUntil { environment.payloadWaitCount > 0 || environment.executeCount > 0 }
+      XCTAssertEqual(environment.payloadWaitCount, 1)
+      XCTAssertEqual(environment.executeCount, 0)
+      XCTAssertFalse(session.isExecutionInProgress)
+      await payloadGate.release()
+      await helperGate.waitUntilEntered()
+      XCTAssertTrue(session.isExecutionInProgress)
+      await helperGate.release()
+      await task.value
+      XCTAssertFalse(session.isExecutionInProgress)
+    }
+
+    func testQuitDuringPayloadWaitPreventsLateSuccessfulWaitFromSubmitting() async throws {
+      let environment = MockInstallerEnvironment()
+      let gate = OperationGate()
+      environment.payloadWaitGate = gate
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      let credentials = try authorization()
+      let task = Task { await session.submit(credentials) }
+      await gate.waitUntilEntered()
+      session.cancelPrefetchOnQuit()
+      await gate.release()
+      await task.value
+      XCTAssertEqual(environment.executeCount, 0)
+      XCTAssertFalse(session.hasExecutionStarted)
+      XCTAssertFalse(session.isExecutionInProgress)
+    }
+
+    func testPayloadWaitFailureNeverSubmitsAndAllowsFreshReview() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.payloadWaitError = PayloadPrefetchError.failed("verification failed")
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.executeCount, 0)
+      XCTAssertFalse(session.hasExecutionStarted)
+      XCTAssertFalse(session.isExecutionInProgress)
+      XCTAssertFalse(environment.hasApprovedPlan)
+      XCTAssertTrue(session.canInspect)
+      guard case .failed(let failure) = session.phase else { return XCTFail("Expected failure") }
+      XCTAssertTrue(failure.plainDetail.contains("no disk changes"))
+    }
+
     func testPreSubmissionFailureAllowsFreshReviewAndRevokesApproval() async throws {
       let environment = MockInstallerEnvironment()
       environment.executeResults = [
@@ -552,7 +606,7 @@
       XCTAssertFalse(environment.hasApprovedPlan)
       XCTAssertTrue(session.canInspect)
       guard case .failed(let failure) = session.phase else { return XCTFail("Expected failure") }
-      XCTAssertTrue(failure.plainDetail.contains("no disk changes"))
+      XCTAssertTrue(failure.plainDetail.contains("not started"))
       await session.inspect()
       guard case .welcome = session.phase else { return XCTFail("Expected a fresh check") }
     }
@@ -1166,6 +1220,9 @@
     var inspectGate: OperationGate?
     var prepareGate: OperationGate?
     var executeGate: OperationGate?
+    var payloadWaitGate: OperationGate?
+    var payloadWaitError: (any Error)?
+    private(set) var payloadWaitCount = 0
     var savedProgress: (@Sendable (AssetProgressUpdate) -> Void)?
     var savedJournal: (@Sendable (Data) -> Void)?
     var inspectError: (any Error)?
@@ -1280,7 +1337,9 @@
     }
 
     func waitUntilPayloadVerified() async throws {
-      await prefetchGate?.wait()
+      payloadWaitCount += 1
+      await payloadWaitGate?.wait()
+      if let payloadWaitError { throw payloadWaitError }
     }
 
     func cancelPayloadPrefetch() {

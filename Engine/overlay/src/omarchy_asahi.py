@@ -536,7 +536,12 @@ class AsahiStage1Adapter:
         if target["plan_digest"] != plan.plan_digest:
             raise AsahiAdapterError("installed checkpoint plan changed")
         self._refresh_parts()
-        prepared = self._find_prepared_target(plan)
+        try:
+            prepared = self._find_prepared_target(plan)
+        except AsahiAdapterError as error:
+            raise AsahiAdapterError(
+                "prepared resume target does not match checkpoint"
+            ) from error
         # Bind the adapter only after every recorded identity field matches.
         actual = {
             "plan_digest": plan.plan_digest,
@@ -546,7 +551,7 @@ class AsahiStage1Adapter:
             "uuid": prepared.uuid,
         }
         if actual != target:
-            raise AsahiAdapterError("prepared target identity changed")
+            raise AsahiAdapterError("prepared resume target does not match checkpoint")
         self.target_part = prepared
         self.installer.part = prepared
 

@@ -326,7 +326,9 @@ class AsahiStage1AdapterTests(unittest.TestCase):
                 installer = FakeInstaller(FakeDiskUtil([[part]]))
                 adapter = self._adapter(installer)
                 adapter.preflight(self.plan)
-                with self.assertRaises(AsahiAdapterError):
+                with self.assertRaisesRegex(
+                    AsahiAdapterError, "prepared resume target does not match checkpoint"
+                ):
                     adapter.validate_prepared_checkpoint(self.plan, evidence)
                 self.assertIsNone(adapter.target_part)
                 self.assertFalse(any(call[0] == "prepare_volume" for call in installer.ins.calls))

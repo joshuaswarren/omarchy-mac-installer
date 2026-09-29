@@ -446,6 +446,16 @@
             : "Save the error details and check the verified installation record before trying again. \(engineDiagnosticsLocation)",
           replanAvailable: unchanged
         )
+      case .preparedResumeMismatch:
+        return FailureDisplay(
+          headline: "The prepared installation no longer matches its saved checkpoint",
+          plainDetail: unchanged
+            ? "The current disk no longer matches the saved checkpoint. No disk changes were made."
+            : "The installation already prepared disk space for Omarchy. That disk space no longer matches the saved checkpoint. No further installation step was started by this resume attempt; earlier disk changes are not undone.",
+          technicalDetail: technicalDetail,
+          remedy:
+            "Keep the installation journal and copy the error details. Review the saved checkpoints to see whether file installation also completed. Restore the expected disk state or get help reconciling it before resuming; do not delete the journal or start a fresh install over it. \(engineDiagnosticsLocation)"
+        )
       case .deviceUnsupported:
         return FailureDisplay(
           headline: blockedHeadline,
@@ -508,6 +518,21 @@
       retryRecoveryAvailable: Bool = false
     ) -> FailureDisplay {
       let technical = String(describing: error)
+
+      if let preflight = error as? InstallerPreSubmissionFailure,
+        let submission = preflight.underlying as? EngineXPCSubmissionError,
+        submission == .helperUnresponsive || submission == .connectionFailed
+      {
+        return FailureDisplay(
+          headline: "The installation service isn’t responding",
+          plainDetail: retryRecoveryAvailable
+            ? "No new installation request was sent. Your verified installation checkpoint is preserved."
+            : "The app couldn’t get a response from the installation service. Installation has not started.",
+          technicalDetail: String(describing: preflight.underlying),
+          remedy: "Run the downloaded \(installerPackage) again, then reopen this app.",
+          retryRecoveryAvailable: retryRecoveryAvailable
+        )
+      }
 
       if retryRecoveryAvailable {
         return FailureDisplay(

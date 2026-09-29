@@ -146,9 +146,11 @@ class Stage1CoordinatorTests(unittest.TestCase):
         self.journal.event("apfs_preparation_started")
         self.journal.checkpoint("apfs-target-prepared", "apfs_preparation", b"target")
         adapter = RecordingStage1Adapter(failure="validate_prepared_checkpoint")
+        before = self.path.read_bytes()
         with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
             run_stage1(self.plan, self.journal, adapter)
         self.assertEqual(adapter.calls, ["validate_prepared_checkpoint"])
+        self.assertEqual(self.path.read_bytes(), before)
         self.assertFalse(self.journal.has_event("stub_and_esp_started"))
 
     def test_resume_validates_installed_content_before_recovery(self):

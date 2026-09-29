@@ -14,7 +14,15 @@
   public struct InstallerExecutionCoordinator: Sendable {
     private let processAdapter = ClosedEngineProcessAdapter()
 
-    public init() {}
+    private let ping: @Sendable (AuthenticatedEngineXPCSubmitter) async throws -> Void
+
+    public init() {
+      ping = { try await $0.ping() }
+    }
+
+    init(ping: @escaping @Sendable (AuthenticatedEngineXPCSubmitter) async throws -> Void) {
+      self.ping = ping
+    }
 
     public func execute(
       _ prepared: PreparedInstallerPlanExecution,
@@ -71,7 +79,7 @@
           journalProgress: journalProgress
         )
         // Ping sends no execution request, handoff or credentials.
-        try await submitter.ping()
+        try await ping(submitter)
       } catch {
         throw InstallerPreSubmissionFailure(error)
       }
