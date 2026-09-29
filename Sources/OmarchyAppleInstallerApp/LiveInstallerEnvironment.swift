@@ -567,14 +567,16 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
     let existing = Self.existingInstalls(in: engine)
     let space = existing.isEmpty ? Self.spaceCheck(engine: engine, host: host) : nil
-    var chipAndSpace =
+    let chipAndFreeSpace =
       "\(host.identity.chip) · \(PlainLanguage.bytes(host.storage.containerFreeBytes)) free"
+    var chipAndSpace = chipAndFreeSpace
     if case .fits(let maximumBytes) = space {
       chipAndSpace += " · up to \(PlainLanguage.bytes(maximumBytes)) for Omarchy"
     }
 
     return HostDisplay(
       chipAndSpace: chipAndSpace,
+      chipAndFreeSpace: chipAndFreeSpace,
       supported: !blocked && engine?.support == .supported,
       blockingReason: blockingReason(host: host, engineFailure: engineFailure),
       existingInstalls: existing,
