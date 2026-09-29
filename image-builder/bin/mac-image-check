@@ -28,6 +28,7 @@ lab image as profile=lab, which only the edge lane accepts.
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import importlib.util
 import json
@@ -627,6 +628,20 @@ def once(fields: dict[str, list[str]], key: str, where: str) -> str:
     return fields[key][0]
 
 
+BUILT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def build_time(value: str) -> bool:
+    """VALUE is a UTC build time as the builder writes it (builder/inspection.py's build_time)."""
+    if BUILT.fullmatch(value) is None:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
 def check_provenance(lane: str, directory: Path) -> None:
     provenance = directory / "PROVENANCE"
     require(provenance.is_file(), f"{directory} has no PROVENANCE")
@@ -635,8 +650,9 @@ def check_provenance(lane: str, directory: Path) -> None:
             f"PROVENANCE does not describe a {lane} Apple image build")
     fields = parse_fields(provenance)
     for key in ("payload", "installer_data_sha256", "inspection_sha256", "builder_commit", "inputs_sha256",
-                "package_count", "package_set_sha256"):
+                "package_count", "package_set_sha256", "built"):
         once(fields, key, "PROVENANCE")
+    require(build_time(fields["built"][0]), "PROVENANCE names no UTC build time")
     require(once(fields, "hardware_setup", "PROVENANCE") in ("build", "deferred"), "PROVENANCE has no hardware setup")
     require(not fields.get("local_package"), "PROVENANCE names unpublished local packages")
     require(len(fields.get("package", [])) == int(fields["package_count"][0]), "PROVENANCE miscounts its packages")
@@ -688,7 +704,8 @@ def check_image_target_record(report: dict, fields: dict[str, list[str]], profil
     target = report.get("image_target")
     require(isinstance(target, dict), "INSPECTION does not record the image target's provenance")
     for key, field in (("candidate_set", "input.candidate_set"), ("candidate_source_commit", "input.candidate_source_commit"),
-                       ("builder_commit", "builder_commit"), ("builder_tree_clean", "builder_tree_clean")):
+                       ("builder_commit", "builder_commit"), ("builder_tree_clean", "builder_tree_clean"),
+                       ("package_set_sha256", "package_set_sha256"), ("built", "built")):
         require(target.get(key) is not None and [target[key]] == fields.get(field),
                 f"the image target's {key} does not match PROVENANCE")
     require((target.get("image_profile") == "lab") == (profile == "lab")
@@ -721,9 +738,10 @@ def check_descriptor(lane: str, directory: Path) -> None:
     require(fields.get("format") == ["2"], "IMAGE is not format=2")
     require(fields.get("lane") == [lane], f"IMAGE does not describe a {lane} image")
     require(fields.get("platform") == [PLATFORM], f"IMAGE does not describe an {PLATFORM} image")
-    for key in (*IMAGE_INPUTS, "input_digest", "package_set_sha256", "hardware_setup", "builder_commit",
+    for key in (*IMAGE_INPUTS, "input_digest", "package_set_sha256", "built", "hardware_setup", "builder_commit",
                 "builder_tree_clean"):
         once(fields, key, "IMAGE")
+    require(build_time(fields["built"][0]), "IMAGE names no UTC build time")
     inputs = directory / "inputs"
     provenance = directory / "PROVENANCE"
     require(inputs.is_file() and provenance.is_file(), "the inputs record and PROVENANCE are not beside IMAGE")
@@ -736,7 +754,7 @@ def check_descriptor(lane: str, directory: Path) -> None:
     digest = file_sha256(inputs)
     require(fields["input_digest"] == [digest], "IMAGE input_digest does not match the inputs record")
     require(provenance_fields.get("inputs_sha256") == [digest], "IMAGE input_digest does not match PROVENANCE")
-    for key in ("package_set_sha256", "hardware_setup", "builder_commit", "builder_tree_clean"):
+    for key in ("package_set_sha256", "built", "hardware_setup", "builder_commit", "builder_tree_clean"):
         require(provenance_fields.get(key) == fields[key], f"IMAGE {key} does not match PROVENANCE")
     profile = check_recorded_profile(lane, fields, "IMAGE")
     for key in ("profile", "lab_access_sha256"):

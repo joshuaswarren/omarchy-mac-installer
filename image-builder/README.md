@@ -23,7 +23,7 @@ A build takes about 15 minutes and 25 GB of disk. On a host with a desktop sessi
 
 1. Installs a base system and `omarchy-settings` first, so its pacman platform guard is resident, then writes the root-owned image-target manifest (`/var/lib/omarchy/image/target`: `format=1`, `platform=apple-silicon`, read by deferred hardware setup and the platform guard, then the image's provenance, which the runtime ignores: `candidate_set`, `candidate_source_commit`, `builder_commit`, `builder_tree_clean` and `image_profile` of `lab`, `test` for a candidate-only set, or `release`), then installs the runtime with `omarchy-base.packages` and `omarchy-aarch64.packages` (as `omarchy-pkg-defaults apple-silicon` composes them) and, last, the Apple set: the runtime's Apple list (`omarchy-apple-silicon.packages`, or an older runtime's `omarchy-apple.packages`; a runtime with neither stops the build), the Aurora kernel, m1n1, U-Boot, the Limine hook, and the speaker stack's model profiles and DSP chain (`alsa-ucm-conf-asahi`, `asahi-audio`), which the runtime's audio step would otherwise fetch on a first boot that may have no network. Set packages are installed by their `omarchy-candidates/` name, so no other repository can supply them. Base names the pinned repositories lack are recorded as `unavailable=` in `PROVENANCE`.
 2. Runs the runtime's own `omarchy-apply-system --defer-provisioning --first-install` in an isolated chroot. The chroot never sees the build host's hardware: its device tree names the image's platform, it has UEFI (as U-Boot provides) without EFI variables, and no PCI, USB, input or DMI devices, so hardware setup installs the same packages on any aarch64 host whose kernel runs with a device tree (an Apple Silicon Mac, most arm64 boards; on an ACPI-only host the image's platform checks find no device tree and the build stops at the Limine activation). A runtime with deferred hardware setup (omacom/omarchy-mac#528) queues its hardware steps from the manifest; an older one runs them here for the image's platform.
-3. Sets the kernel command line in `/etc/default/grub`, which the Limine command line is derived from; the image installs no GRUB (`quiet splash`, and `plymouth.ignore-serial-consoles` as on mx-mac, since the Mac's device tree registers a serial console), and Plymouth's `omarchy` theme, which omarchy-settings leaves to Arch Linux ARM's `bgrt` on Apple Silicon. Applies the Apple presets (`80-omarchy-mac*.preset`, including omarchy-mac's audio preset), stages owner provisioning with the pinned Node.js, rebuilds the initramfs, runs `update-m1n1` with `LC_ALL=C` so the device trees go into m1n1's stage 2 in one order, activates Limine through omarchy-mac-boot's `setup-boot` operation of the runtime's lifecycle dispatcher (once before the Limine gate is set, for the console settings, and once after, for the activation; a runtime whose dispatcher has no `setup-boot`, or a boot package without it, keeps the runtime's own `install/hardware/apple` console and Limine leaves), and arms first boot with the boot package's own `arm` command.
+3. Sets the kernel command line in `/etc/default/grub`, which the Limine command line is derived from; the image installs no GRUB (`quiet splash`, and `plymouth.ignore-serial-consoles` as on mx-mac, since the Mac's device tree registers a serial console), and Plymouth's `omarchy` theme, which omarchy-settings leaves to Arch Linux ARM's `bgrt` on Apple Silicon. Applies the Apple presets (`80-omarchy-mac*.preset`, including omarchy-mac's audio preset), stages owner provisioning with the pinned Node.js, rebuilds the initramfs, runs `update-m1n1` with `LC_ALL=C` so the device trees go into m1n1's stage 2 in one order, activates Limine through omarchy-mac-boot's `setup-boot` operation of the runtime's lifecycle dispatcher (once before the Limine gate is set, for the console settings, and once after, for the activation; a runtime whose dispatcher has no `setup-boot`, or a boot package without it, keeps the runtime's own `install/hardware/apple` console and Limine leaves), and arms first boot with the boot package's own `arm` command. Once the installed package set is recorded, it appends the build's identity to the image-target manifest (see [Build identity](#build-identity)).
 4. Copies the root into a fresh image, keeping snapper's `/.snapshots` a btrfs subvolume (a file copy would flatten it into a plain directory and snapper would fail on the Mac), seals a snapshot of it into `@factory`, then inspects the images against the set's archives and packages them.
 
 ## Inspection
@@ -66,9 +66,32 @@ Inspection is not boot qualification. After the owner's first login on the Mac, 
 - `/var/lib/omarchy/image/deferred-steps` is gone: the deferred hardware setup finished (if not, `/var/log/omarchy-install.log` names the step it stopped at)
 - `pacman -Q alsa-ucm-conf-asahi asahi-audio` lists both, and in the owner's session `wpctl status` shows the model's `audio_effect.<model>-convolver` (on the M2 Max, `j416-convolver`) as the default sink, not a `stereo-fallback` one
 
+## Build identity
+
+A booted Mac names the build it came from in `/var/lib/omarchy/image/target` (`target.booted` after its first boot; `@factory` carries the same bytes, so a factory reset keeps it). After the provenance lines above, the builder appends, once the package set is recorded and before `@factory` is sealed:
+
+- `package_set_sha256=`: 64 lowercase hex digits, the same value as `IMAGE` and `PROVENANCE`'s `package_set_sha256`
+- `built=`: the UTC time this build recorded it, `YYYY-MM-DDTHH:MM:SSZ`, the same value as `IMAGE` and `PROVENANCE`'s `built`
+
+For example:
+
+```
+format=1
+platform=apple-silicon
+candidate_set=apple-test-f22c43fb7903-20260928
+candidate_source_commit=f22c43fb7903…
+builder_commit=6f1b40df2732…
+builder_tree_clean=true
+image_profile=test
+package_set_sha256=f9ead5a6…
+built=2026-09-28T03:04:05Z
+```
+
+The zip's own sha256 cannot be here, since root.img holds this file. To map a report to a release asset, find the release whose `IMAGE` asset has the report's `package_set_sha256` and `built` (the package set alone also matches a rebuild from the same inputs, and a lab and a release image of one set); that `IMAGE`'s `image_sha256` lines and `PROVENANCE`'s `payload=` name the payload, whose sha256 is the catalog's `payloadDigest`. Every value is checked against a strict pattern before it is written (`candidate_set` is `[A-Za-z0-9._-]+`), none is secret, and inspection refuses an image whose manifest lacks one or holds a malformed one; `mac-image-check provenance` and `descriptor` require the manifest's values, as `INSPECTION` read them, to be `PROVENANCE`'s and `IMAGE`'s.
+
 ## Reproducibility
 
-`IMAGE` records the inputs (the builder commit and whether its tree was clean, the set's receipt, manifest and source commit, and the inputs record's digest) and `package_set_sha256`, the sha256 of every installed package's name, version and archive sha256. Two builds from the same builder commit, inputs record and candidate set give the same `package_set_sha256` and the same input lines; any changed input changes them. Filesystem images are not byte-identical between builds, and the default UKI's initramfs is autodetected as mkinitcpio does, so its module list follows the build host's devices; the Mac's boot modules come from the asahi hook either way.
+`IMAGE` records the inputs (the builder commit and whether its tree was clean, the set's receipt, manifest and source commit, and the inputs record's digest) and `package_set_sha256`, the sha256 of every installed package's name, version and archive sha256. Two builds from the same builder commit, inputs record and candidate set give the same `package_set_sha256` and the same input lines; any changed input changes them. `built` is the one line that differs between them, by design: it tells the builds apart. Filesystem images are not byte-identical between builds, and the default UKI's initramfs is autodetected as mkinitcpio does, so its module list follows the build host's devices; the Mac's boot modules come from the asahi hook either way.
 
 ## Checks
 

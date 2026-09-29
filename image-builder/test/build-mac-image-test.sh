@@ -276,6 +276,46 @@ for unset_variable in MAC_IMAGE_BUILDER_COMMIT MAC_IMAGE_BUILDER_CLEAN; do
 done
 pass "the image-target manifest is not written without the builder commit and tree state"
 
+# ── build identity ─────────────────────────────────────────────────────────
+printf 'omarchy|4.0.0-1|omarchy-candidates|omarchy-4.0.0-1-aarch64.pkg.tar.xz|%s\nglibc|2.43-1|core|glibc-2.43-1-aarch64.pkg.tar.xz|%s\n' \
+  "$(printf '3%.0s' {1..64})" "$(printf '5%.0s' {1..64})" >"$scratch/packages"
+digest=$(package_set_sha256)
+[[ $digest =~ ^[0-9a-f]{64}$ ]] || fail "the package set digest is 64 hex digits: $digest"
+before=$(<"$target/var/lib/omarchy/image/target")
+(fail() { builder_fail "$@"; }; write_build_identity; printf '%s\n' "$built" >"$scratch/built")
+recorded_built=$(<"$scratch/built")
+[[ $recorded_built =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+  fail "the build time is UTC, YYYY-MM-DDTHH:MM:SSZ: $recorded_built"
+[[ $(<"$target/var/lib/omarchy/image/target") == "$before"$'\n'"package_set_sha256=$digest"$'\n'"built=$recorded_built" ]] ||
+  fail "the build identity follows the manifest's other lines, unchanged" "$(<"$target/var/lib/omarchy/image/target")"
+[[ $(stat -c %a "$target/var/lib/omarchy/image/target" 2>/dev/null || stat -f %Lp "$target/var/lib/omarchy/image/target") == 644 ]] ||
+  fail "the image-target manifest stays mode 0644"
+pass "the image-target manifest records the build's package set digest and UTC build time after its other lines"
+
+if (fail() { builder_fail "$@"; }; write_build_identity) >/dev/null 2>&1; then
+  fail "the build identity is refused when the manifest already records one"
+fi
+pass "the build identity is written once"
+
+cp "$target/var/lib/omarchy/image/target" "$scratch/target.keep"
+printf '%s\n' "$before" >"$target/var/lib/omarchy/image/target"
+for bad_date in '2026-09-28 03:04:05' '2026-09-28T03:04:05+10:00' $'2026-09-28T03:04:05Z\nsecret=x' ''; do
+  if (date() { printf '%s\n' "$bad_date"; }; fail() { builder_fail "$@"; }; write_build_identity) >/dev/null 2>&1; then
+    fail "a malformed build time is refused: $bad_date"
+  fi
+  [[ $(<"$target/var/lib/omarchy/image/target") == "$before" ]] || fail "a refused build identity leaves the manifest unchanged"
+done
+if (package_set_sha256() { echo "not-a-digest"; }; fail() { builder_fail "$@"; }; write_build_identity) >/dev/null 2>&1; then
+  fail "a malformed package set digest is refused"
+fi
+[[ $(<"$target/var/lib/omarchy/image/target") == "$before" ]] || fail "a refused build identity leaves the manifest unchanged"
+rm "$target/var/lib/omarchy/image/target"
+if (fail() { builder_fail "$@"; }; write_build_identity) >/dev/null 2>&1; then
+  fail "the build identity is refused without a manifest"
+fi
+mv "$scratch/target.keep" "$target/var/lib/omarchy/image/target"
+pass "the build identity is refused when malformed or when there is no manifest, and never half-written"
+
 # ── first boot ─────────────────────────────────────────────────────────────
 make_first_boot() {
   rm -rf "$target"

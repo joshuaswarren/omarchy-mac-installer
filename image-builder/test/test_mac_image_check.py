@@ -21,6 +21,7 @@ loader.exec_module(check)
 NAME = "omarchy-2026.09.25-aarch64-apple-silicon-mac-edge-os-package.zip"
 LAB = ["profile=lab", "lab_access_sha256=" + "d" * 64]
 LAB_NAME = "omarchy-2026.09.25-aarch64-apple-silicon-mac-edge-lab-os-package.zip"
+BUILT = "2026-09-25T03:04:05Z"
 INPUTS = {
     "candidate_set": "apple-test-fixture",
     "candidate_source_commit": "a" * 40,
@@ -56,7 +57,7 @@ def package_set(packages) -> str:
 
 def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
           profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None,
-          sources=(("omarchy", "a" * 40),), runtime_sources=None) -> None:
+          sources=(("omarchy", "a" * 40),), runtime_sources=None, provenance_edit=None) -> None:
     lab = "profile=lab" in profile
     name = name or (LAB_NAME if lab else NAME)
     payload = out / "payload"
@@ -83,7 +84,8 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
                     "omarchy-volume.icns"], cwd=payload, check=True)
     (out / "installer_data.json").write_text(json.dumps(check.expected_metadata(name)))
     target = {"candidate_set": INPUTS["candidate_set"], "candidate_source_commit": INPUTS["candidate_source_commit"],
-              "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "lab" if lab else "test"}
+              "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "lab" if lab else "test",
+              "package_set_sha256": package_set(packages), "built": BUILT}
     if target_edit:
         target = target_edit(target)
     report = {"result": inspection, "runtime_sources": dict(sources) if runtime_sources is None else runtime_sources}
@@ -100,15 +102,17 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     lines += [f"candidate={n}|{v}|{f}|{s}" for n, v, _, f, s in candidates]
     lines += [f"candidate_source={n}|{c}" for n, c in sources]
     lines += ["hardware_setup=build", *(profile if provenance_profile is None else provenance_profile),
-              f"package_set_sha256={package_set(packages)}", f"package_count={len(packages)}"]
+              f"package_set_sha256={package_set(packages)}", f"built={BUILT}", f"package_count={len(packages)}"]
     lines += [f"package={i}|{'|'.join(p)}" for i, p in enumerate(packages, 1)]
     lines += [f"installer_data_sha256={sha(out / 'installer_data.json')}", f"inspection_sha256={sha(out / 'INSPECTION')}",
               f"payload={name}|{zip_path.stat().st_size}|{sha(zip_path)}"]
+    if provenance_edit:
+        lines = provenance_edit(lines)
     (out / "PROVENANCE").write_text("\n".join(lines) + "\n")
     digests = check.check_payload("edge", zip_path, out / "installer_data.json", "lab" if name == LAB_NAME else "release")
     image = ["format=2", "lane=edge", "platform=apple-silicon", "builder_commit=" + "c" * 40, "builder_tree_clean=true",
              *[f"{k}={v}" for k, v in INPUTS.items()],
-             "hardware_setup=build", *profile, f"package_set_sha256={package_set(packages)}",
+             "hardware_setup=build", *profile, f"package_set_sha256={package_set(packages)}", f"built={BUILT}",
              *[f"image_sha256={m}|{d}" for m, d in sorted(digests.items())], f"input_digest={sha(out / 'inputs')}"]
     if image_edit:
         image = image_edit(image)
@@ -164,6 +168,28 @@ class BuildDirectoryTest(unittest.TestCase):
         with self.assertRaisesRegex(check.CheckError, "package_set_sha256"):
             check.check_descriptor("edge", self.out)
 
+    def test_image_and_provenance_record_one_build_time(self):
+        def replace_built(value):
+            return lambda lines: [f"built={value}" if l.startswith("built=") else l for l in lines]
+        cases = (
+            ("descriptor", dict(image_edit=replace_built("2026-09-25T03:04:06Z")), "IMAGE built does not match"),
+            ("descriptor", dict(image_edit=lambda lines: [l for l in lines if not l.startswith("built=")]),
+             "does not name built once"),
+            ("descriptor", dict(image_edit=lambda lines: lines + [f"built={BUILT}"]), "does not name built once"),
+            ("descriptor", dict(image_edit=replace_built("2026-09-25 03:04:05")), "IMAGE names no UTC build time"),
+            ("provenance", dict(provenance_edit=lambda lines: [l for l in lines if not l.startswith("built=")]),
+             "does not name built once"),
+            ("provenance", dict(provenance_edit=replace_built("2026-02-30T03:04:05Z")),
+             "PROVENANCE names no UTC build time"),
+        )
+        for mode, options, message in cases:
+            with self.subTest(message=message, mode=mode):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, **options)
+                with self.assertRaisesRegex(check.CheckError, message):
+                    getattr(check, f"check_{mode}")("edge", self.out)
+
     def test_inspection_must_read_this_builds_provenance_in_the_image(self):
         cases = {
             "does not record the image target": lambda t: None,
@@ -172,6 +198,9 @@ class BuildDirectoryTest(unittest.TestCase):
             "builder_commit does not match": lambda t: {**t, "builder_commit": "d" * 40},
             "builder_tree_clean does not match": lambda t: {**t, "builder_tree_clean": "false"},
             "profile does not match": lambda t: {**t, "image_profile": "lab"},
+            "package_set_sha256 does not match": lambda t: {**t, "package_set_sha256": "0" * 64},
+            "built does not match": lambda t: {**t, "built": "2026-09-25T03:04:06Z"},
+            "image target's built does not match": lambda t: {k: v for k, v in t.items() if k != "built"},
         }
         for message, edit in cases.items():
             with self.subTest(message):
