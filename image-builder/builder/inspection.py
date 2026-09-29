@@ -10,6 +10,7 @@ A missing or mismatched component fails the inspection.
 """
 from __future__ import annotations
 
+from datetime import datetime
 import gzip
 import hashlib
 import importlib.util
@@ -38,9 +39,27 @@ SPLASH_WORDS = ("quiet", "splash", "plymouth.ignore-serial-consoles")
 # The m1n1 options update-m1n1 copies from /etc/m1n1.conf into stage 2.
 M1N1_OPTION = re.compile(r"(chosen\.[^=]*|display|mitigations)=.*")
 # What the image-target manifest records, in the order the builder writes it.
-# The runtime reads format and platform; the rest ties a Mac to its image.
+# The runtime reads format and platform; the rest ties a Mac to its image:
+# package_set_sha256 and built, the build identity, name the build's IMAGE and
+# PROVENANCE. An image built before the identity was recorded has neither, and
+# is still inspected: the identity is both keys or none.
 TARGET_FIELDS = ("format", "platform", "candidate_set", "candidate_source_commit", "builder_commit",
-                 "builder_tree_clean", "image_profile")
+                 "builder_tree_clean", "image_profile", "package_set_sha256", "built")
+IDENTITY_FIELDS = ("package_set_sha256", "built")
+# The candidate set's name and the build time, as the builder writes them.
+CANDIDATE_SET_NAME = re.compile(r"[A-Za-z0-9._-]+")
+BUILT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+
+
+def build_time(value: str) -> bool:
+    """VALUE is a UTC build time as the builder writes it: YYYY-MM-DDTHH:MM:SSZ, a real instant."""
+    if BUILT.fullmatch(value) is None:
+        return False
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
 
 
 def _load(name: str, file: str):
@@ -411,7 +430,11 @@ def read_image_target(path: Path) -> dict[str, str]:
     """TARGET_FIELDS from a manifest read as the runtime reads it: comments and
     unknown keys ignored, any other line refused. Each known key appears once."""
     fields: dict[str, str] = {}
-    for line in path.read_text().splitlines():
+    # Lines end at a newline only, as the runtime's read -r splits them: a carriage
+    # return stays in its value.
+    with path.open(newline="") as stream:
+        text = stream.read()
+    for line in text.split("\n"):
         if not line or line.startswith("#"):
             continue
         require("=" in line, f"/var/lib/omarchy/image/target is malformed: {line}")
@@ -420,6 +443,8 @@ def read_image_target(path: Path) -> dict[str, str]:
             require(key not in fields, f"/var/lib/omarchy/image/target names {key} twice")
             fields[key] = value
     missing = [key for key in TARGET_FIELDS if key not in fields]
+    if all(key in missing for key in IDENTITY_FIELDS):
+        missing = [key for key in missing if key not in IDENTITY_FIELDS]
     require(not missing, f"/var/lib/omarchy/image/target does not record {', '.join(missing)}")
     return fields
 
@@ -433,7 +458,8 @@ def check_image_target(root: Path, candidates: Candidates, profile: str, report:
     fields = read_image_target(path)
     require(fields["format"] == "1" and fields["platform"] == PLATFORM,
             f"/var/lib/omarchy/image/target does not name {PLATFORM}")
-    require(fields["candidate_set"] == candidates.summary["set"]
+    require(CANDIDATE_SET_NAME.fullmatch(fields["candidate_set"]) is not None
+            and fields["candidate_set"] == candidates.summary["set"]
             and fields["candidate_source_commit"] == candidates.summary["source_commit"],
             "/var/lib/omarchy/image/target records another candidate set")
     require(re.fullmatch(r"[0-9a-f]{40}", fields["builder_commit"]) is not None,
@@ -442,9 +468,16 @@ def check_image_target(root: Path, candidates: Candidates, profile: str, report:
             "/var/lib/omarchy/image/target does not say whether the builder tree was clean")
     expected = image_profile(profile, candidates)
     require(fields["image_profile"] == expected, f"/var/lib/omarchy/image/target does not record the {expected} profile")
-    report["image_target"] = {key: fields[key] for key in TARGET_FIELDS if key not in ("format", "platform")}
-    return (f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned, {expected} image of "
-            f"{fields['candidate_set']} from builder {fields['builder_commit'][:12]}")
+    report["image_target"] = {key: fields[key] for key in TARGET_FIELDS
+                              if key in fields and key not in ("format", "platform")}
+    detail = (f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned, {expected} image of "
+              f"{fields['candidate_set']} from builder {fields['builder_commit'][:12]}")
+    if "built" not in fields:
+        return detail + ", built before images recorded their build identity"
+    require(re.fullmatch(r"[0-9a-f]{64}", fields["package_set_sha256"]) is not None,
+            "/var/lib/omarchy/image/target names no package set digest")
+    require(build_time(fields["built"]), "/var/lib/omarchy/image/target names no UTC build time")
+    return f"{detail}, package set {fields['package_set_sha256'][:12]}, built {fields['built']}"
 
 
 def empty_marker(path: Path, what: str) -> None:

@@ -358,7 +358,28 @@ class InspectionTest(unittest.TestCase):
             ("another platform", lambda p: p.write_text(good.replace("apple-silicon", "qualcomm")), "apple-silicon"),
             ("writable", lambda p: p.chmod(0o666), "mode"),
             ("an older image's two lines", lambda p: p.write_text("format=1\nplatform=apple-silicon\n"),
-             "does not record candidate_set, candidate_source_commit, builder_commit, builder_tree_clean, image_profile"),
+             "does not record candidate_set, candidate_source_commit, builder_commit, builder_tree_clean, image_profile$"),
+            ("a package set digest without a build time", lambda p: p.write_text(good.replace(f"built={fixtures.BUILT}\n", "")),
+             "does not record built$"),
+            ("a build time without a package set digest", lambda p: p.write_text(
+                good.replace(f"package_set_sha256={fixtures.PACKAGE_SET_SHA256}\n", "")),
+             "does not record package_set_sha256$"),
+            ("a short package set digest", lambda p: p.write_text(
+                good.replace(fixtures.PACKAGE_SET_SHA256, fixtures.PACKAGE_SET_SHA256[:12])), "package set digest"),
+            ("an uppercase package set digest", lambda p: p.write_text(
+                good.replace(fixtures.PACKAGE_SET_SHA256, "A" * 64)), "package set digest"),
+            ("a local build time", lambda p: p.write_text(
+                good.replace(fixtures.BUILT, "2026-09-28T13:04:05+10:00")), "UTC build time"),
+            ("a build time without seconds", lambda p: p.write_text(
+                good.replace(fixtures.BUILT, "2026-09-28T03:04Z")), "UTC build time"),
+            ("an impossible build time", lambda p: p.write_text(
+                good.replace(fixtures.BUILT, "2026-13-40T25:04:05Z")), "UTC build time"),
+            ("a build time with a carriage return", lambda p: p.write_text(
+                good.replace(fixtures.BUILT, fixtures.BUILT + "\r")), "UTC build time"),
+            ("an empty build time", lambda p: p.write_text(good.replace(fixtures.BUILT, "")), "UTC build time"),
+            ("a candidate set name with a space", lambda p: p.write_text(
+                good.replace(f"candidate_set={self.summary['set']}", f"candidate_set={self.summary['set']} x")),
+             "another candidate set"),
             ("another set", lambda p: p.write_text(good.replace(self.summary["set"], "apple-test-other")),
              "another candidate set"),
             ("another source commit", lambda p: p.write_text(
@@ -379,7 +400,21 @@ class InspectionTest(unittest.TestCase):
         self.assertEqual(report["checks"]["image-target"]["result"], "passed")
         self.assertEqual(report["image_target"], {
             "candidate_set": self.summary["set"], "candidate_source_commit": self.summary["source_commit"],
-            "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "test"})
+            "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "test",
+            "package_set_sha256": fixtures.PACKAGE_SET_SHA256, "built": fixtures.BUILT})
+        self.assertIn(f"package set {fixtures.PACKAGE_SET_SHA256[:12]}, built {fixtures.BUILT}",
+                      report["checks"]["image-target"]["detail"])
+
+    def test_an_image_built_before_the_build_identity_passes(self):
+        legacy = fixtures.image_target(self.summary).split("package_set_sha256=")[0]
+        for tree in (self.root, self.factory):
+            (tree / "var/lib/omarchy/image/target").write_text(legacy)
+        report = self.inspect()
+        self.assertEqual(report["checks"]["image-target"]["result"], "passed", report["checks"]["image-target"])
+        self.assertEqual(report["checks"]["factory"]["result"], "passed", report["checks"]["factory"])
+        self.assertIn("built before images recorded their build identity", report["checks"]["image-target"]["detail"])
+        self.assertNotIn("package_set_sha256", report["image_target"])
+        self.assertNotIn("built", report["image_target"])
 
     def test_image_target_keeps_the_runtimes_reading_rules(self):
         target = self.root / "var/lib/omarchy/image/target"
@@ -405,6 +440,10 @@ class InspectionTest(unittest.TestCase):
             ("no image target", lambda f: (f / "var/lib/omarchy/image/target").unlink()),
             ("another image target", lambda f: fixtures.write(f, "var/lib/omarchy/image/target",
                                                               fixtures.image_target(self.summary, "lab"))),
+            ("another build's identity", lambda f: fixtures.write(f, "var/lib/omarchy/image/target",
+                fixtures.image_target(self.summary).replace(fixtures.BUILT, "2026-09-29T00:00:00Z"))),
+            ("no build identity", lambda f: fixtures.write(f, "var/lib/omarchy/image/target",
+                fixtures.image_target(self.summary).split("package_set_sha256=")[0])),
             ("a keyring", lambda f: (f / "etc/pacman.d/gnupg").mkdir(parents=True)),
         ):
             with self.subTest(name):
