@@ -18,7 +18,7 @@ This first extraction preserves the installer behavior and Git attribution. The 
 
 ## Supported Macs
 
-Every catalog that offers a Mac release enables every M1, M2 and M3 Mac: the 34 boards in [`scripts/supported-models.json`](scripts/supported-models.json). `make-unsigned-catalog.py` refuses inputs that miss, add or refuse one, and `publish-channels envelope` refuses to wrap a catalog that lists a Mac but leaves any of them out or disabled; only an empty "No Mac release yet" catalog lists none. The file also names the boards that stay refused and why: the M3 Ultra Mac Studio (`apple,j575d`), which the pinned v0.9.2 engine cannot inspect, and M4 and later (`apple,j614s`). M3 Macs run with software rendering (llvmpipe) until their GPU driver lands.
+Every catalog that offers a Mac release enables every M1, M2 and M3 Mac: the 34 boards in [`scripts/supported-models.json`](scripts/supported-models.json). `make-unsigned-catalog.py` refuses inputs that miss, add or refuse one, and `publish-channels envelope` refuses to wrap a catalog that lists a Mac but leaves any of them out or disabled; only an empty "No Mac release yet" catalog lists none. `os-promote` does not re-check an envelope staged before this rule, so a rollback to an older catalog stays possible. The file also names the boards that stay refused and why: the M3 Ultra Mac Studio (`apple,j575d`), which the pinned v0.9.2 engine cannot inspect, and M4 and later (`apple,j614s`). M3 Macs run with software rendering (llvmpipe) until their GPU driver lands.
 
 ## Start with the tests
 

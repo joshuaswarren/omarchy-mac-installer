@@ -180,8 +180,10 @@
         with: Data(contentsOf: scripts.appendingPathComponent("supported-models.json")))
       let supported = try XCTUnwrap((manifest as? [String: Any])?["supported"] as? [String])
       XCTAssertEqual(Set(supported), Set(everyM1M2M3Mac))
-      XCTAssertEqual(
-        InstallerSimulationEnvironment.simulatedCatalogDevices.sorted(), everyM1M2M3Mac.sorted())
+      #if DEBUG
+        XCTAssertEqual(
+          InstallerSimulationEnvironment.simulatedCatalogDevices.sorted(), everyM1M2M3Mac.sorted())
+      #endif
       for identifier in identifiers {
         XCTAssertNotNil(MacModelNames.name(for: identifier), identifier)
       }
