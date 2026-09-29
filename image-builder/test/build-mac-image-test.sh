@@ -316,6 +316,34 @@ fi
 mv "$scratch/target.keep" "$target/var/lib/omarchy/image/target"
 pass "the build identity is refused when malformed or when there is no manifest, and never half-written"
 
+mkdir -p "$scratch/final"
+: >"$scratch/final/root.img"
+image_record() {
+  (lane=edge hardware_setup=build test_image_pin="" profile=release
+    sha256_of() { printf '%064d\n' 0; }
+    fail() { builder_fail "$@"; }
+    "$@")
+}
+(fail() { builder_fail "$@"; }; package_set_digest="" built=""
+  [[ -e $target/var/lib/omarchy/image/target ]] || fail "the manifest is still there"
+  sed -i.bak '/^package_set_sha256=/d; /^built=/d' "$target/var/lib/omarchy/image/target"
+  rm -f "$target/var/lib/omarchy/image/target.bak"
+  write_build_identity
+  package_set_sha256() { echo recomputed; }
+  image_record write_image >"$scratch/IMAGE")
+manifest_identity=$(grep -E '^(package_set_sha256|built)=' "$target/var/lib/omarchy/image/target")
+image_identity=$(grep -E '^(package_set_sha256|built)=' "$scratch/IMAGE")
+[[ $image_identity == "$manifest_identity" && $(grep -c '^built=' "$scratch/IMAGE") == 1 ]] ||
+  fail "IMAGE records the manifest's package set digest and build time" "$image_identity" "$manifest_identity"
+pass "IMAGE records the package set digest and build time the manifest recorded, computed once"
+
+for writer in write_image write_provenance; do
+  if (package_set_digest="" built=""; image_record "$writer" z.zip) >/dev/null 2>&1; then
+    fail "$writer is refused before the build recorded its identity"
+  fi
+done
+pass "IMAGE and PROVENANCE are not written before the build recorded its identity"
+
 # ── first boot ─────────────────────────────────────────────────────────────
 make_first_boot() {
   rm -rf "$target"

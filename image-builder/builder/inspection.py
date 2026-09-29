@@ -40,9 +40,12 @@ SPLASH_WORDS = ("quiet", "splash", "plymouth.ignore-serial-consoles")
 M1N1_OPTION = re.compile(r"(chosen\.[^=]*|display|mitigations)=.*")
 # What the image-target manifest records, in the order the builder writes it.
 # The runtime reads format and platform; the rest ties a Mac to its image:
-# package_set_sha256 and built name the build's IMAGE and PROVENANCE.
+# package_set_sha256 and built, the build identity, name the build's IMAGE and
+# PROVENANCE. An image built before the identity was recorded has neither, and
+# is still inspected: the identity is both keys or none.
 TARGET_FIELDS = ("format", "platform", "candidate_set", "candidate_source_commit", "builder_commit",
                  "builder_tree_clean", "image_profile", "package_set_sha256", "built")
+IDENTITY_FIELDS = ("package_set_sha256", "built")
 # The candidate set's name and the build time, as the builder writes them.
 CANDIDATE_SET_NAME = re.compile(r"[A-Za-z0-9._-]+")
 BUILT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
@@ -440,6 +443,8 @@ def read_image_target(path: Path) -> dict[str, str]:
             require(key not in fields, f"/var/lib/omarchy/image/target names {key} twice")
             fields[key] = value
     missing = [key for key in TARGET_FIELDS if key not in fields]
+    if all(key in missing for key in IDENTITY_FIELDS):
+        missing = [key for key in missing if key not in IDENTITY_FIELDS]
     require(not missing, f"/var/lib/omarchy/image/target does not record {', '.join(missing)}")
     return fields
 
@@ -463,13 +468,16 @@ def check_image_target(root: Path, candidates: Candidates, profile: str, report:
             "/var/lib/omarchy/image/target does not say whether the builder tree was clean")
     expected = image_profile(profile, candidates)
     require(fields["image_profile"] == expected, f"/var/lib/omarchy/image/target does not record the {expected} profile")
+    report["image_target"] = {key: fields[key] for key in TARGET_FIELDS
+                              if key in fields and key not in ("format", "platform")}
+    detail = (f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned, {expected} image of "
+              f"{fields['candidate_set']} from builder {fields['builder_commit'][:12]}")
+    if "built" not in fields:
+        return detail + ", built before images recorded their build identity"
     require(re.fullmatch(r"[0-9a-f]{64}", fields["package_set_sha256"]) is not None,
             "/var/lib/omarchy/image/target names no package set digest")
     require(build_time(fields["built"]), "/var/lib/omarchy/image/target names no UTC build time")
-    report["image_target"] = {key: fields[key] for key in TARGET_FIELDS if key not in ("format", "platform")}
-    return (f"/var/lib/omarchy/image/target names {PLATFORM}, root-owned, {expected} image of "
-            f"{fields['candidate_set']} from builder {fields['builder_commit'][:12]}, package set "
-            f"{fields['package_set_sha256'][:12]}, built {fields['built']}")
+    return f"{detail}, package set {fields['package_set_sha256'][:12]}, built {fields['built']}"
 
 
 def empty_marker(path: Path, what: str) -> None:

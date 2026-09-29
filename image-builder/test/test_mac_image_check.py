@@ -57,7 +57,8 @@ def package_set(packages) -> str:
 
 def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
           profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None,
-          sources=(("omarchy", "a" * 40),), runtime_sources=None, provenance_edit=None) -> None:
+          sources=(("omarchy", "a" * 40),), runtime_sources=None, provenance_edit=None, legacy=False) -> None:
+    """A build directory as build-mac-image writes it; LEGACY, as a build before builds recorded their identity."""
     lab = "profile=lab" in profile
     name = name or (LAB_NAME if lab else NAME)
     payload = out / "payload"
@@ -86,6 +87,8 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     target = {"candidate_set": INPUTS["candidate_set"], "candidate_source_commit": INPUTS["candidate_source_commit"],
               "builder_commit": "c" * 40, "builder_tree_clean": "true", "image_profile": "lab" if lab else "test",
               "package_set_sha256": package_set(packages), "built": BUILT}
+    if legacy:
+        del target["package_set_sha256"], target["built"]
     if target_edit:
         target = target_edit(target)
     report = {"result": inspection, "runtime_sources": dict(sources) if runtime_sources is None else runtime_sources}
@@ -102,7 +105,8 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     lines += [f"candidate={n}|{v}|{f}|{s}" for n, v, _, f, s in candidates]
     lines += [f"candidate_source={n}|{c}" for n, c in sources]
     lines += ["hardware_setup=build", *(profile if provenance_profile is None else provenance_profile),
-              f"package_set_sha256={package_set(packages)}", f"built={BUILT}", f"package_count={len(packages)}"]
+              f"package_set_sha256={package_set(packages)}", *([] if legacy else [f"built={BUILT}"]),
+              f"package_count={len(packages)}"]
     lines += [f"package={i}|{'|'.join(p)}" for i, p in enumerate(packages, 1)]
     lines += [f"installer_data_sha256={sha(out / 'installer_data.json')}", f"inspection_sha256={sha(out / 'INSPECTION')}",
               f"payload={name}|{zip_path.stat().st_size}|{sha(zip_path)}"]
@@ -112,7 +116,8 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     digests = check.check_payload("edge", zip_path, out / "installer_data.json", "lab" if name == LAB_NAME else "release")
     image = ["format=2", "lane=edge", "platform=apple-silicon", "builder_commit=" + "c" * 40, "builder_tree_clean=true",
              *[f"{k}={v}" for k, v in INPUTS.items()],
-             "hardware_setup=build", *profile, f"package_set_sha256={package_set(packages)}", f"built={BUILT}",
+             "hardware_setup=build", *profile, f"package_set_sha256={package_set(packages)}",
+             *([] if legacy else [f"built={BUILT}"]),
              *[f"image_sha256={m}|{d}" for m, d in sorted(digests.items())], f"input_digest={sha(out / 'inputs')}"]
     if image_edit:
         image = image_edit(image)
@@ -174,16 +179,52 @@ class BuildDirectoryTest(unittest.TestCase):
         cases = (
             ("descriptor", dict(image_edit=replace_built("2026-09-25T03:04:06Z")), "IMAGE built does not match"),
             ("descriptor", dict(image_edit=lambda lines: [l for l in lines if not l.startswith("built=")]),
-             "does not name built once"),
+             "IMAGE built does not match PROVENANCE"),
             ("descriptor", dict(image_edit=lambda lines: lines + [f"built={BUILT}"]), "does not name built once"),
             ("descriptor", dict(image_edit=replace_built("2026-09-25 03:04:05")), "IMAGE names no UTC build time"),
             ("provenance", dict(provenance_edit=lambda lines: [l for l in lines if not l.startswith("built=")]),
-             "does not name built once"),
+             "records a build identity that PROVENANCE does not"),
+            ("provenance", dict(provenance_edit=lambda lines: lines + [f"built={BUILT}"]), "does not name built once"),
             ("provenance", dict(provenance_edit=replace_built("2026-02-30T03:04:05Z")),
              "PROVENANCE names no UTC build time"),
         )
         for mode, options, message in cases:
             with self.subTest(message=message, mode=mode):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, **options)
+                with self.assertRaisesRegex(check.CheckError, message):
+                    getattr(check, f"check_{mode}")("edge", self.out)
+
+    def test_a_build_from_before_builds_recorded_their_identity_passes(self):
+        # Published images (preview-3-f22c43fb7903, the m1 and m2 lab kits) carry no
+        # built= in IMAGE or PROVENANCE, and no identity in INSPECTION's image target.
+        for profile in ((), LAB):
+            with self.subTest(lab=bool(profile)):
+                shutil.rmtree(self.out)
+                self.out.mkdir()
+                build(self.out, legacy=True, profile=profile)
+                check.check_provenance("edge", self.out)
+                check.check_descriptor("edge", self.out)
+
+    def test_a_partial_build_identity_is_refused(self):
+        without_built = lambda lines: [l for l in lines if not l.startswith("built=")]
+        cases = (
+            ("provenance", dict(legacy=True, target_edit=lambda t: {**t, "package_set_sha256": package_set(PACKAGES)}),
+             "records a build identity that PROVENANCE does not"),
+            ("provenance", dict(legacy=True, target_edit=lambda t: {**t, "built": BUILT}),
+             "records a build identity that PROVENANCE does not"),
+            ("provenance", dict(target_edit=lambda t: {k: v for k, v in t.items() if k != "package_set_sha256"}),
+             "image target's package_set_sha256 does not match"),
+            ("provenance", dict(legacy=True, provenance_edit=lambda lines: lines + [f"built={BUILT}"]),
+             "image target's package_set_sha256 does not match"),
+            ("descriptor", dict(legacy=True, image_edit=lambda lines: lines + [f"built={BUILT}"]),
+             "IMAGE built does not match PROVENANCE"),
+            ("descriptor", dict(image_edit=without_built), "IMAGE built does not match PROVENANCE"),
+            ("descriptor", dict(provenance_edit=without_built), "IMAGE built does not match PROVENANCE"),
+        )
+        for mode, options, message in cases:
+            with self.subTest(message=message, mode=mode, options=sorted(options)):
                 shutil.rmtree(self.out)
                 self.out.mkdir()
                 build(self.out, **options)

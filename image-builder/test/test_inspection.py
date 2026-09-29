@@ -358,10 +358,12 @@ class InspectionTest(unittest.TestCase):
             ("another platform", lambda p: p.write_text(good.replace("apple-silicon", "qualcomm")), "apple-silicon"),
             ("writable", lambda p: p.chmod(0o666), "mode"),
             ("an older image's two lines", lambda p: p.write_text("format=1\nplatform=apple-silicon\n"),
-             "does not record candidate_set, candidate_source_commit, builder_commit, builder_tree_clean, image_profile, "
-             "package_set_sha256, built"),
-            ("an image without its build identity", lambda p: p.write_text(good.split("package_set_sha256=")[0]),
-             "does not record package_set_sha256, built"),
+             "does not record candidate_set, candidate_source_commit, builder_commit, builder_tree_clean, image_profile$"),
+            ("a package set digest without a build time", lambda p: p.write_text(good.replace(f"built={fixtures.BUILT}\n", "")),
+             "does not record built$"),
+            ("a build time without a package set digest", lambda p: p.write_text(
+                good.replace(f"package_set_sha256={fixtures.PACKAGE_SET_SHA256}\n", "")),
+             "does not record package_set_sha256$"),
             ("a short package set digest", lambda p: p.write_text(
                 good.replace(fixtures.PACKAGE_SET_SHA256, fixtures.PACKAGE_SET_SHA256[:12])), "package set digest"),
             ("an uppercase package set digest", lambda p: p.write_text(
@@ -402,6 +404,17 @@ class InspectionTest(unittest.TestCase):
             "package_set_sha256": fixtures.PACKAGE_SET_SHA256, "built": fixtures.BUILT})
         self.assertIn(f"package set {fixtures.PACKAGE_SET_SHA256[:12]}, built {fixtures.BUILT}",
                       report["checks"]["image-target"]["detail"])
+
+    def test_an_image_built_before_the_build_identity_passes(self):
+        legacy = fixtures.image_target(self.summary).split("package_set_sha256=")[0]
+        for tree in (self.root, self.factory):
+            (tree / "var/lib/omarchy/image/target").write_text(legacy)
+        report = self.inspect()
+        self.assertEqual(report["checks"]["image-target"]["result"], "passed", report["checks"]["image-target"])
+        self.assertEqual(report["checks"]["factory"]["result"], "passed", report["checks"]["factory"])
+        self.assertIn("built before images recorded their build identity", report["checks"]["image-target"]["detail"])
+        self.assertNotIn("package_set_sha256", report["image_target"])
+        self.assertNotIn("built", report["image_target"])
 
     def test_image_target_keeps_the_runtimes_reading_rules(self):
         target = self.root / "var/lib/omarchy/image/target"
