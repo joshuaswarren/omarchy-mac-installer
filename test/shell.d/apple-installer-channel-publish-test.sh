@@ -93,6 +93,10 @@ while (( $# > 0 )); do
 done
 path=${url#*://*/}
 file=$BUCKET_DIR/$path
+if [[ -n ${CURL_UNAVAILABLE:-} && $path == *$CURL_UNAVAILABLE ]]; then
+  [[ -n $write_out ]] && printf '503'
+  exit 22
+fi
 if [[ ! -f $file ]]; then
   [[ -n $write_out ]] && printf '404'
   exit 22
@@ -419,18 +423,24 @@ pass "promoting rc does not disturb stable"
 # make_app_zip OUT [FILLER BYTES] [EXTRA TOP-LEVEL ENTRY] [VERSION] [BUILD] [DECLARES HELPER 1/0]
 make_app_zip() {
   python3 - "$1" "$INSTALLER_APP_NAME.app" "${2:-4096}" "${3:-}" "${4:-2.0.0}" "${5:-1}" \
-    "${6:-1}" "$INSTALLER_HELPER_IDENTIFIER" <<'PY'
+    "${6:-1}" "$INSTALLER_HELPER_IDENTIFIER" "$INSTALLER_APP_IDENTIFIER" "$INSTALLER_TEAM_ID" <<'PY'
 import plistlib, sys, zipfile
-out, app, filler, extra, version, build, declares, helper = sys.argv[1:9]
+out, app, filler, extra, version, build, declares, helper, app_id, team = sys.argv[1:11]
+helper_req = f'anchor apple generic and identifier "{helper}" and certificate leaf[subject.OU] = "{team}"'
+app_req = f'anchor apple generic and identifier "{app_id}" and certificate leaf[subject.OU] = "{team}"'
 info = {"CFBundleShortVersionString": version, "CFBundleVersion": build}
 if declares == "1":
-    info["SMPrivilegedExecutables"] = {helper: 'identifier "' + helper + '"'}
+    info["SMPrivilegedExecutables"] = {helper: helper_req}
+helper_info = {"CFBundleIdentifier": helper, "CFBundleVersion": build, "SMAuthorizedClients": [app_req]}
+job = {"Label": helper, "MachServices": {helper: True},
+       "EnvironmentVariables": {"OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT": app_req}}
 with zipfile.ZipFile(out, "w") as archive:
     archive.writestr(f"{app}/Contents/Info.plist", plistlib.dumps(info))
     archive.writestr(f"{app}/Contents/MacOS/app", b"\0" * int(filler))
     entry = zipfile.ZipInfo(f"{app}/Contents/Library/LaunchServices/{helper}")
     entry.external_attr = 0o100755 << 16
-    archive.writestr(entry, b"\xcf\xfa\xed\xfe __TEXT __launchd_plist " + b"\0" * 64)
+    archive.writestr(entry, b"\xcf\xfa\xed\xfe __TEXT __launchd_plist "
+                     + plistlib.dumps(helper_info) + b"\0" + plistlib.dumps(job))
     if extra:
         archive.writestr(extra, "x")
 PY
@@ -516,8 +526,55 @@ grep -q "build 1 is not above build 1" "$WORK/OldBuild.log" ||
   fail "the refusal names the build" "$(cat "$WORK/OldBuild.log")"
 pass "only this version, a newer build, with a helper it can install, is uploaded"
 
+# --- the build check is never skipped: only a 404 means no earlier release
+: >"$CALLS"
+make_app_zip "$WORK/Next.zip" 6000 "" 2.0.3 9
+if CURL_UNAVAILABLE=installer/stable/installer.json OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.3 \
+  "$PUBLISHER" app-publish --zip "$WORK/Next.zip" --version 2.0.3 >"$WORK/unavailable.log" 2>&1; then
+  fail "an unreadable channel refuses the publish"
+fi
+grep -q "HTTP 503" "$WORK/unavailable.log" || fail "the refusal names the failure" "$(cat "$WORK/unavailable.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable channel uploads nothing"
+pass "a failed read of the channel never skips the build check"
+
+# --- a build with a leading zero compares as decimal, not octal
+# (on edge, so the stable and rc checks below are undisturbed)
+make_app_zip "$WORK/Eight.zip" 6050 "" 2.0.4 8
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.4 "$PUBLISHER" app-publish \
+  --zip "$WORK/Eight.zip" --version 2.0.4 --to edge >"$WORK/eight.log" 2>&1 ||
+  fail "build 8 publishes to edge" "$(cat "$WORK/eight.log")"
+make_app_zip "$WORK/Octal.zip" 6100 "" 2.0.6 09
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.6 "$PUBLISHER" app-publish \
+  --zip "$WORK/Octal.zip" --version 2.0.6 --to edge >"$WORK/octal.log" 2>&1 ||
+  fail "build 09 is compared as nine, above eight" "$(cat "$WORK/octal.log")"
+pass "build numbers compare as decimal"
+
+# --- the helper's pieces must be valid, not just present
+python3 - "$WORK/BadHelper.zip" "$INSTALLER_APP_NAME.app" "$INSTALLER_HELPER_IDENTIFIER" "$INSTALLER_TEAM_ID" <<'PY'
+import plistlib, sys, zipfile
+out, app, helper, team = sys.argv[1:5]
+req = f'anchor apple generic and identifier "{helper}" and certificate leaf[subject.OU] = "{team}"'
+info = {"CFBundleShortVersionString": "2.0.5", "CFBundleVersion": "10",
+        "SMPrivilegedExecutables": {helper: req}}
+helper_info = {"CFBundleIdentifier": helper, "CFBundleVersion": "10",
+               "SMAuthorizedClients": ['identifier "someone.else"']}
+job = {"Label": helper, "MachServices": {helper: True}}
+with zipfile.ZipFile(out, "w") as archive:
+    archive.writestr(f"{app}/Contents/Info.plist", plistlib.dumps(info))
+    entry = zipfile.ZipInfo(f"{app}/Contents/Library/LaunchServices/{helper}")
+    entry.external_attr = 0o100755 << 16
+    archive.writestr(entry, plistlib.dumps(helper_info) + plistlib.dumps(job))
+PY
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.5 "$PUBLISHER" app-publish \
+  --zip "$WORK/BadHelper.zip" --version 2.0.5 >"$WORK/badhelper.log" 2>&1; then
+  fail "a helper that doesn't authorize the app is refused"
+fi
+grep -q "does not authorize this app" "$WORK/badhelper.log" ||
+  fail "the refusal names the helper's client" "$(cat "$WORK/badhelper.log")"
+pass "the helper's embedded plists must name this build and this app"
+
 # --- republishing the same immutable version with different bytes is refused -
-make_app_zip "$WORK/Different.zip" 8192 "" 2.0.0 2
+make_app_zip "$WORK/Different.zip" 8192 "" 2.0.0 99
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
   --zip "$WORK/Different.zip" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
   fail "rewriting an immutable version is refused"
