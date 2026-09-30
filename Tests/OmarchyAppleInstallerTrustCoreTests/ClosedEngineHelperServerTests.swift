@@ -85,7 +85,8 @@
       let endpoint = ClosedEngineXPCServiceEndpoint(
         server: server,
         retirement: PackageInstalledAppRetirement(
-          applicationsDirectory: applications, privateDirectory: fixture.destination,
+          applicationsDirectory: applications,
+          privateDirectory: fixture.root.appendingPathComponent("aside", isDirectory: true),
           appNames: ["Current", "Legacy"],
           bundleIdentifier: "com.example.installer", packageOwner: getuid(),
           runningExecutablePaths: { [] }),

@@ -29,13 +29,16 @@
     private let runningExecutablePaths: @Sendable () -> [String]
 
     /// - Parameter privateDirectory: where a candidate is moved before it is
-    ///   checked and deleted. It must be writable only by root and on the
-    ///   same volume as `applicationsDirectory`; the helper's own state
-    ///   directory is both.
+    ///   checked again and deleted. It is writable only by root, on the same
+    ///   volume as `applicationsDirectory`, and deliberately not inside the
+    ///   helper's state directory, which self-uninstall deletes: a bundle
+    ///   that has to stay aside, say after a crash mid-move, is never swept
+    ///   up with it. It is created as needed and removed once empty.
     public init(
       applicationsDirectory: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
       privateDirectory: URL = URL(
-        fileURLWithPath: InstallerProductIdentity.helperWorkingDirectory, isDirectory: true),
+        fileURLWithPath: InstallerProductIdentity.helperWorkingDirectory + ".aside",
+        isDirectory: true),
       appNames: [String] = [
         InstallerProductIdentity.appName, InstallerProductIdentity.legacyAppName,
       ],
@@ -65,6 +68,8 @@
         let bundle = applicationsDirectory.appendingPathComponent(name + ".app", isDirectory: true)
         results[bundle.lastPathComponent] = retire(bundle)
       }
+      // Leaves nothing behind unless a bundle had to stay aside.
+      rmdir(privateDirectory.path)
       return results
     }
 
@@ -86,6 +91,14 @@
       }
       if isRunning(from: bundle) {
         return .keptRunning
+      }
+      // Only this app, as the package installed it, is ever moved; checked
+      // again on what was moved.
+      if let verdict = identity(of: bundle, owner: status.st_uid) {
+        return verdict
+      }
+      guard preparePrivateDirectory() else {
+        return .keptRemovalFailed("no private directory to move it into")
       }
       let moved = privateDirectory.appendingPathComponent(
         ".retiring-\(UUID().uuidString).app", isDirectory: true)
@@ -116,7 +129,21 @@
       guard lstat(moved.path, &status) == 0, status.st_mode & S_IFMT == S_IFDIR else {
         return .keptNotABundle
       }
-      let info = moved.appendingPathComponent("Contents/Info.plist")
+      if let verdict = identity(of: moved, owner: status.st_uid) {
+        return verdict
+      }
+      // A process started from it just before the move now runs from the
+      // moved path.
+      if isRunning(from: moved) || isRunning(from: bundle) {
+        return .keptRunning
+      }
+      return nil
+    }
+
+    /// Nil when the bundle carries this app's identifier and the package's
+    /// owner.
+    private func identity(of bundle: URL, owner: uid_t) -> Result? {
+      let info = bundle.appendingPathComponent("Contents/Info.plist")
       guard let data = try? Data(contentsOf: info),
         let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
           as? [String: Any]
@@ -127,15 +154,23 @@
       guard identifier == bundleIdentifier else {
         return .keptForeignIdentifier(identifier)
       }
-      guard status.st_uid == packageOwner else {
+      guard owner == packageOwner else {
         return .keptNotInstalledByPackage
       }
-      // A process started from it just before the move now runs from the
-      // moved path.
-      if isRunning(from: moved) || isRunning(from: bundle) {
-        return .keptRunning
-      }
       return nil
+    }
+
+    /// The private directory exists as a real directory owned like the
+    /// package's apps (root) and closed to everyone else.
+    private func preparePrivateDirectory() -> Bool {
+      if mkdir(privateDirectory.path, 0o700) != 0 && errno != EEXIST {
+        return false
+      }
+      var status = stat()
+      return lstat(privateDirectory.path, &status) == 0
+        && status.st_mode & S_IFMT == S_IFDIR
+        && status.st_uid == packageOwner
+        && status.st_mode & 0o077 == 0
     }
 
     private func isRunning(from bundle: URL) -> Bool {

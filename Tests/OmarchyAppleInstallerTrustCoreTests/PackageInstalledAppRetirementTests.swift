@@ -15,9 +15,9 @@
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
       applications = root.appendingPathComponent("Applications", isDirectory: true)
       aside = root.appendingPathComponent("private", isDirectory: true)
-      for directory in [applications!, aside!] {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-      }
+      // The aside directory is left for the retirement to create, closed to
+      // everyone else, as it does in production.
+      try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
     }
 
     override func tearDownWithError() throws {
@@ -107,7 +107,8 @@
       // The newcomer took the name after the move; it is not what was checked,
       // so it is left alone.
       XCTAssertTrue(exists("Current.app"))
-      XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: aside.path), [])
+      XCTAssertFalse(
+        FileManager.default.fileExists(atPath: aside.path), "an empty aside is removed")
     }
 
     func testAKeptBundleStaysAsideRatherThanReplaceANewcomer() throws {
@@ -124,6 +125,30 @@
       }
       XCTAssertTrue(reason.contains("name taken"), reason)
       XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: aside.path).count, 1)
+      var status = stat()
+      XCTAssertEqual(lstat(aside.path, &status), 0)
+      XCTAssertEqual(status.st_mode & 0o077, 0, "the aside directory is closed to everyone else")
+    }
+
+    func testOnlyThisAppAsThePackageInstalledItIsEverMoved() throws {
+      try makeBundle("Current", identifier: "someone.else")
+      try makeBundle("Legacy")
+      let results = retirement(packageOwner: getuid() == 0 ? 501 : 0).run()
+
+      XCTAssertEqual(results["Current.app"], .keptForeignIdentifier("someone.else"))
+      XCTAssertEqual(results["Legacy.app"], .keptNotInstalledByPackage)
+      XCTAssertTrue(exists("Current.app"))
+      XCTAssertTrue(exists("Legacy.app"))
+      // The aside directory is made only once a bundle passes the identity
+      // check, so neither was ever moved.
+      XCTAssertFalse(FileManager.default.fileExists(atPath: aside.path))
+    }
+
+    func testTheAsideDirectoryIsOutsideWhatSelfUninstallDeletes() {
+      let state = InstallerProductIdentity.helperWorkingDirectory
+      let aside = state + ".aside"
+      XCTAssertFalse(aside.hasPrefix(state + "/"))
+      XCTAssertEqual(URL(fileURLWithPath: aside).deletingLastPathComponent().path, "/var/db")
     }
 
     func testRunningExecutablePathsIncludesThisProcess() {
