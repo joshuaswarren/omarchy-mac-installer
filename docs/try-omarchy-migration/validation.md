@@ -1,5 +1,17 @@
 # Migration exploration validation
 
+## Approved replacement candidate, 2026-09-30 UTC
+
+Source candidate: `ac66d5cffd066c5bf7b148503a3ff6ae521104d2`, tree `1bc82c0547fd9415b5a3ec07cb35163cc41f356b`. One authoritative `./test/all` run on that committed candidate passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 43 staging, and 97 bundle/fixture/restore/tree/replacement tests, plus shell/packaging fixtures: **305 Python tests passed; one optional sgdisk case skipped**. This validation entry is a documentation-only follow-up.
+
+The [approved replacement extension](../../Development/migration_bundle_probe/REPLACEMENT.md) adds 23 cases. They cover explicit path approval and job binding, default conflict preservation, both bundle versions, matching-file retention, independently copied private backups despite original hardlinks, original/parent changes, backup/preparation/intent/completion failures, synchronization failures on either side of replacement, backup corruption/missing/link/permission changes, preservation of later edits/deletions/replacements, and actual SIGKILL immediately after the destination rename. Retry reconciles only the recorded new inode plus intact backup; uncertain original/missing/changed destinations remain conflicts.
+
+Focused cases and one 97-case migration closure passed with ResourceWarning treated as an error. Python compilation and the focused 37 engine checks passed. Two independent read-only reviews identified lost backup references in conflict reports and unjournaled backup accumulation after ordinary preparation failure; both were corrected and tested. Final review reported no remaining blocker within the disposable, quiescent-destination scope. Modified Markdown links and whitespace checks passed.
+
+Runner: Linux aarch64 `7.1.12-2-11.5-sep-ARCH`, Python 3.14.7, Bash 5.3.20, Git 2.55.0. age/QEMU hashes match the dependencies below. Tests remained unprivileged; private QEMU Unix sockets used a sandbox allowance. No Swift, helper, packaging input, engine lock, trust, host support, VM workflow, native disk, production signing, or physical installation changed or ran. Existing native qualification requirements remain in force.
+
+Replacement requires destination leaves and directories to remain quiescent because rename does not compare the original inode atomically. Backups are private plaintext with original metadata recorded; production encrypted placement, capacity/lifetime/cleanup, rollback UI, stable capture, credential-aware collection, Try transformations, directory metadata, and native boot/encryption integration remain unfinished. Abrupt death before intent can leave unreferenced private artifacts. Tickets 04–05 remain in progress.
+
 ## Directory and link candidate, 2026-09-28 UTC
 
 Source candidate: [`b7bd6d68d462b2c901890783f0f483b0fb598ba8`](https://github.com/omacom/omarchy-mac-installer/commit/b7bd6d68d462b2c901890783f0f483b0fb598ba8), tree `6161b609a93edbea06b82ebe5895d98f947d3bdd`. This validation update is a documentation-only follow-up. One authoritative `./test/all` run on that committed candidate passed Python compilation, shell syntax, 37 engine tests, 104 overlay tests, 24 release/script tests, 43 staging tests, 74 bundle/fixture/restore/tree tests, and the shell/packaging fixtures. Total: **282 Python tests passed; one optional sgdisk case skipped**.
