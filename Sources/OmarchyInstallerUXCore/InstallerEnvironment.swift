@@ -8,6 +8,9 @@
   public struct HostDisplay: Equatable, Sendable {
     /// The header line: chip and free space, e.g. "Apple M1 Pro · 464 GB free".
     public let chipAndSpace: String
+    /// The header's chip and free space alone, without what Omarchy could
+    /// take, so the page can name the size the owner chose instead.
+    public let chipAndFreeSpace: String
     public let supported: Bool
     /// Why this Mac cannot install right now, when `supported` is false.
     public let blockingReason: String?
@@ -26,6 +29,7 @@
 
     public init(
       chipAndSpace: String,
+      chipAndFreeSpace: String? = nil,
       supported: Bool,
       blockingReason: String? = nil,
       existingInstalls: [ExistingInstallDisplay] = [],
@@ -33,11 +37,19 @@
       unsupportedModel: UnsupportedModelDisplay? = nil
     ) {
       self.chipAndSpace = chipAndSpace
+      self.chipAndFreeSpace = chipAndFreeSpace ?? chipAndSpace
       self.supported = supported
       self.blockingReason = blockingReason
       self.existingInstalls = existingInstalls
       self.spaceShortfall = spaceShortfall
       self.unsupportedModel = unsupportedModel
+    }
+
+    /// The header line. Before the owner chooses a size it says the most
+    /// Omarchy could take; afterwards it names the size they chose.
+    public func header(chosenOmarchyBytes: UInt64?) -> String {
+      guard let chosenOmarchyBytes else { return chipAndSpace }
+      return "\(chipAndFreeSpace) · \(PlainLanguage.bytes(chosenOmarchyBytes)) for Omarchy"
     }
   }
 

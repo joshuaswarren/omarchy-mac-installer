@@ -6,6 +6,26 @@
   @testable import OmarchyInstallerUXCore
 
   final class PlainLanguageTests: XCTestCase {
+    func testHeaderNamesTheChosenSizeOnceThereIsOne() {
+      let host = HostDisplay(
+        chipAndSpace: "Apple M2 Max · 375 GB free · up to 314 GB for Omarchy",
+        chipAndFreeSpace: "Apple M2 Max · 375 GB free",
+        supported: true)
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: nil),
+        "Apple M2 Max · 375 GB free · up to 314 GB for Omarchy")
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: 285_000_000_000),
+        "Apple M2 Max · 375 GB free · \(PlainLanguage.bytes(285_000_000_000)) for Omarchy")
+    }
+
+    func testHeaderWithoutSeparateFreeSpaceStillNamesTheChosenSize() {
+      let host = HostDisplay(chipAndSpace: "Simulated Mac · 464 GB free", supported: true)
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: 100_000_000_000),
+        "Simulated Mac · 464 GB free · \(PlainLanguage.bytes(100_000_000_000)) for Omarchy")
+    }
+
     func testChannelBadgesNameEveryChannel() {
       XCTAssertEqual(PlainLanguage.badge(for: .stable), "Stable")
       XCTAssertEqual(PlainLanguage.badge(for: .rc), "Release candidate")
