@@ -256,7 +256,7 @@ struct OnePageInstallerView: View {
         Text("Private M3 test: Linux will be installed without disk encryption.")
           .font(OmarchyTheme.body).foregroundStyle(OmarchyTheme.caution)
       }
-      if !helper.isEnabled {
+      if !helper.isCurrent {
         helperNote
       }
 

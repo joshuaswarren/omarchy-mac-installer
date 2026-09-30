@@ -7,6 +7,25 @@
   @testable import OmarchyAppleInstallerTrustCore
 
   final class ClosedEngineHelperServerTests: XCTestCase {
+    func testEndpointReportsItsHelperVersionAndEmptyWhenItHasNone() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      for (endpoint, expected) in [
+        (ClosedEngineXPCServiceEndpoint(server: server, version: "28"), "28"),
+        (ClosedEngineXPCServiceEndpoint(server: server), ""),
+      ] {
+        let reported = await withCheckedContinuation { continuation in
+          endpoint.helperVersion { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(reported, expected)
+      }
+    }
+
     func testValidPackageExecutesAndImportedCopyIsRemoved() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }

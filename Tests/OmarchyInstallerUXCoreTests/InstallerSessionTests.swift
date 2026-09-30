@@ -595,7 +595,7 @@
 
     func testHelperMustBeReachableBeforeInstallationCanStart() async {
       let environment = MockInstallerEnvironment()
-      environment.helper = HelperDisplay(status: .notInstalled)
+      environment.helper = HelperDisplay(status: .missing)
       let session = InstallerSession(environment: environment)
       await session.inspect()
       await session.continueToPlan()
@@ -609,7 +609,7 @@
 
       // The installer package installs the system daemon; refreshing picks it
       // up. There is no registration or Login Items approval step.
-      environment.helper = HelperDisplay(status: .enabled)
+      environment.helper = HelperDisplay(status: .current)
       session.refreshHelperStatus()
       XCTAssertTrue(session.canStartInstallation)
     }
@@ -1112,7 +1112,7 @@
   final class MockInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
     var host = MockInstallerEnvironment.supportedHost
     var plan = MockInstallerEnvironment.samplePlan
-    var helper = HelperDisplay(status: .enabled)
+    var helper = HelperDisplay(status: .current)
     var installationBlocked = false
     var engineSupported = true
     var requestShutdownCount = 0

@@ -370,13 +370,21 @@
     NSObject, ClosedEngineXPCService
   {
     private let server: ClosedEngineHelperServer
+    private let version: String
 
-    public init(server: ClosedEngineHelperServer) {
+    /// - Parameter version: the helper's build version, or empty when it
+    ///   carries none.
+    public init(server: ClosedEngineHelperServer, version: String = "") {
       self.server = server
+      self.version = version
     }
 
     public func ping(reply: @escaping @Sendable (Bool) -> Void) {
       reply(true)
+    }
+
+    public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
+      reply(version)
     }
 
     public func removal(
@@ -509,9 +517,12 @@
     private let clientCodeSigningRequirement: String
     private let endpoint: ClosedEngineXPCServiceEndpoint
 
+    /// - Parameter helperVersion: the build version the helper reports; by
+    ///   default the `CFBundleVersion` of its embedded Info.plist, or empty.
     public init(
       clientCodeSigningRequirement: String,
-      server: ClosedEngineHelperServer
+      server: ClosedEngineHelperServer,
+      helperVersion: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
     ) throws {
       guard
         EngineCodeSigningRequirement.isValid(
@@ -521,7 +532,7 @@
         throw ClosedEngineHelperError.invalidClientRequirement
       }
       self.clientCodeSigningRequirement = clientCodeSigningRequirement
-      endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      endpoint = ClosedEngineXPCServiceEndpoint(server: server, version: helperVersion)
     }
 
     public func listener(

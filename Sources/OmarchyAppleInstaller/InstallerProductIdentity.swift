@@ -8,10 +8,10 @@ public enum InstallerProductIdentity {
   public static let helperIdentifier = InstallerBuildConfiguration.helperIdentifier
   public static let helperMachServiceName = helperIdentifier
   public static let helperDaemonPlistName = helperIdentifier + ".plist"
-  /// Where the installer package installs the helper's system LaunchDaemon.
+  /// Where the helper's system LaunchDaemon job file lives.
   public static let systemLaunchDaemonDirectory = "/Library/LaunchDaemons"
-  /// The absolute path of the pre-installed system LaunchDaemon plist. Its
-  /// presence is the app's synchronous reachability signal for the helper.
+  /// The absolute path of the helper's system LaunchDaemon plist. Its
+  /// presence is the app's synchronous registration signal for the helper.
   public static let systemLaunchDaemonPath =
     systemLaunchDaemonDirectory + "/" + helperDaemonPlistName
   public static let helperWorkingDirectory =

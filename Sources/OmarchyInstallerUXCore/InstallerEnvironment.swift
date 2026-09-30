@@ -153,12 +153,12 @@
   }
 
   public struct HelperDisplay: Equatable, Sendable {
-    public let status: InstallerHelperServiceStatus
+    public let status: InstallerHelperStatus
 
-    /// The pre-installed system daemon is reachable, so installation may run.
-    public var isEnabled: Bool { status == .enabled }
+    /// The privileged helper is in place, so installation may run.
+    public var isCurrent: Bool { status == .current }
 
-    public init(status: InstallerHelperServiceStatus) {
+    public init(status: InstallerHelperStatus) {
       self.status = status
     }
   }

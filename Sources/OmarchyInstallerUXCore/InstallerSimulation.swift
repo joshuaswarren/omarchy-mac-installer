@@ -99,7 +99,7 @@
     public var engineSupported: Bool { scenario != .unsupported && scenario != .engineUnavailable }
     public var hasApprovedPlan: Bool { lock.withLock { approved } }
     public var helperStatus: HelperDisplay {
-      HelperDisplay(status: scenario == .missingHelper ? .notInstalled : .enabled)
+      HelperDisplay(status: scenario == .missingHelper ? .missing : .current)
     }
     public func refreshHelperStatus() -> HelperDisplay { helperStatus }
     public func cancel() { lock.withLock { cancelled = true } }

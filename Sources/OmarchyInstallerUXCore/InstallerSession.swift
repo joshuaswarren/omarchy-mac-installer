@@ -155,7 +155,7 @@
         && !hasExecutionStarted
         && environment.engineSupported
         && environment.hasApprovedPlan
-        && helper.isEnabled
+        && helper.isCurrent
         && prefetchState == .verified
     }
 
@@ -166,7 +166,7 @@
         && !isExecuting
         && environment.engineSupported
         && environment.hasApprovedPlan
-        && environment.helperStatus.isEnabled
+        && environment.helperStatus.isCurrent
     }
 
     // MARK: Inspection

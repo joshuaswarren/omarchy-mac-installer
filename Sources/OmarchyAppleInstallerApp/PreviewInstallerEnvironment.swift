@@ -32,7 +32,7 @@
     }
 
     var helperStatus: HelperDisplay {
-      HelperDisplay(status: .enabled)
+      HelperDisplay(status: .current)
     }
 
     func refreshHelperStatus() -> HelperDisplay { helperStatus }

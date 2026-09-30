@@ -9,6 +9,11 @@
     /// seconds instead of leaving a request queued forever.
     func ping(reply: @escaping @Sendable (Bool) -> Void)
 
+    /// The helper's build version, or an empty string when it carries none.
+    /// Helpers installed by the installer package predate this call and never
+    /// answer it.
+    func helperVersion(reply: @escaping @Sendable (String) -> Void)
+
     func removal(
       ticket: String, confirmation: String, machineOwner: String, password: Data,
       reply: @escaping @Sendable (Data?, NSError?) -> Void
@@ -130,6 +135,39 @@
       guard answered else {
         throw EngineXPCSubmissionError.helperUnresponsive
       }
+    }
+
+    /// The build version the running helper reports, or nil when it reports
+    /// none, does not answer in time, or cannot be reached. An older helper
+    /// that lacks the call simply never replies, so the timeout is short.
+    public func helperVersion(timeout: Duration = .seconds(3)) async -> String? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let version: String = await withCheckedContinuation { continuation in
+        let gate = EngineXPCVersionGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: "") }
+        connection.invalidationHandler = { gate.resume(returning: "") }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: "")
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: "")
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.helperVersion { reported in
+          gate.resume(returning: reported)
+          connectionHandle.invalidate()
+        }
+      }
+      return version.isEmpty ? nil : version
     }
 
     public func removal(
@@ -523,6 +561,23 @@
       let candidate = continuation
       continuation = nil
       return candidate
+    }
+  }
+
+  private final class EngineXPCVersionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String, Never>?
+
+    init(continuation: CheckedContinuation<String, Never>) {
+      self.continuation = continuation
+    }
+
+    func resume(returning value: String) {
+      lock.lock()
+      let candidate = continuation
+      continuation = nil
+      lock.unlock()
+      candidate?.resume(returning: value)
     }
   }
 

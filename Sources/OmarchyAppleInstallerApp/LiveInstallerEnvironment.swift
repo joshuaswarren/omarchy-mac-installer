@@ -12,8 +12,18 @@ import OmarchyInstallerUXCore
 /// model, and no credential is ever stored here.
 final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
   private let lock = NSLock()
-  private let helperService =
-    InstallerHelperServiceManager.preinstalledSystemDaemon()
+  private let helperProvisioner = InstallerHelperProvisioner(
+    probe: SystemInstallerHelperProbe {
+      let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
+      return try AuthenticatedEngineXPCSubmitter(
+        machServiceName: configuration.helperMachServiceName,
+        helperCodeSigningRequirement: configuration.helperCodeSigningRequirement
+      )
+    },
+    blesser: UnavailableInstallerHelperBlesser(),
+    credentialValidator: OpenDirectoryMachineOwnerCredentialValidator(),
+    bundledHelperVersion: nil
+  )
 
   private var hostInspection: AppleSiliconHostInspection?
   private var engineInspection: ValidatedEngineTranscript?
@@ -60,7 +70,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   }
 
   var helperStatus: HelperDisplay {
-    HelperDisplay(status: helperService.status)
+    HelperDisplay(status: helperProvisioner.registrationStatus)
   }
 
   // MARK: Inspection
