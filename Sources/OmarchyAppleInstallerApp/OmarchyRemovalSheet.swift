@@ -461,7 +461,15 @@ struct OmarchyRemovalSheet: View {
       if reply.requiresReview { onRequiresReview() }
       message = reply.message
     } catch {
-      connectionLost()
+      switch RemovalConnectionLoss(
+        helperStillRegistered: InstallerHelperSetup.display.status != .missing)
+      {
+      case .completed:
+        completed = true
+        message = PlainLanguage.removalCompletedWithoutReply(freeSpace: ticket.kind == .freeSpace)
+      case .unknown:
+        connectionLost()
+      }
     }
   }
 

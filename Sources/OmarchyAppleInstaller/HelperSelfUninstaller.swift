@@ -61,7 +61,9 @@
       removeFiles()
       let uninstaller = self
       Task.detached {
-        try? await Task.sleep(for: uninstaller.delay)
+        // The suspending clock stops while the Mac sleeps, so the delay still
+        // gives the reply time to reach the app after it wakes.
+        try? await Task.sleep(for: uninstaller.delay, clock: .suspending)
         uninstaller.unloadAndExit()
       }
     }

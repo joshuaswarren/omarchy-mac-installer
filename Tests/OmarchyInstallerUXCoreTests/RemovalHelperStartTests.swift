@@ -35,6 +35,18 @@
           "busy"))
     }
 
+    func testALostReplyCountsAsRemovedOnlyOnceTheHelperHasRetired() {
+      // The helper deletes its job file only after a completed removal.
+      XCTAssertEqual(RemovalConnectionLoss(helperStillRegistered: false), .completed)
+      XCTAssertEqual(RemovalConnectionLoss(helperStillRegistered: true), .unknown)
+      XCTAssertTrue(
+        PlainLanguage.removalCompletedWithoutReply(freeSpace: false).hasPrefix(
+          "Omarchy and its data have been removed."))
+      XCTAssertTrue(
+        PlainLanguage.removalCompletedWithoutReply(freeSpace: true).hasPrefix(
+          "The free space is now part of macOS."))
+    }
+
     func testACurrentHelperScansRightAway() {
       for canInstall in [true, false] {
         XCTAssertEqual(

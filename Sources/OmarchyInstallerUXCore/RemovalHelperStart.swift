@@ -47,7 +47,32 @@
     }
   }
 
+  /// What a lost connection after a submitted removal means. The helper
+  /// deletes its own job file only once a removal has completed, just before
+  /// it replies and exits; if the Mac sleeps then, it can exit before the
+  /// reply arrives. So a job file that is gone proves the removal completed,
+  /// while one still there leaves it unknown.
+  public enum RemovalConnectionLoss: Equatable, Sendable {
+    case completed
+    case unknown
+
+    public init(helperStillRegistered: Bool) {
+      self = helperStillRegistered ? .unknown : .completed
+    }
+  }
+
   extension PlainLanguage {
+    /// Shown when the reply was lost but the helper's retirement proves the
+    /// removal completed.
+    public static func removalCompletedWithoutReply(freeSpace: Bool) -> String {
+      let result =
+        freeSpace
+        ? "The free space is now part of macOS."
+        : "Omarchy and its data have been removed. The freed space is now part of macOS."
+      return result
+        + " The removal service finished and removed itself before this window heard back, as can happen if the Mac sleeps."
+    }
+
     public static let removalCredentialsFirst =
       "To look for Omarchy on this Mac, enter your macOS administrator account. It sets up the removal service and approves the removal you’ll review next. macOS will show a notice that \(windowTitle) added a background item."
     public static let removalContinue = "Continue"
