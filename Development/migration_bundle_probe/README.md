@@ -8,6 +8,8 @@ The [additive restoration experiment](RESTORE.md) authenticates into private scr
 
 The [v2 tree extension](TREE.md) additionally preserves explicit/empty directories and selected relative symlinks, keeps unsupported links inert, and roundtrips a real synthetic Git repository with modified and untracked work. New directory metadata is explicitly deferred; no home scanner or production capture support is implied.
 
+The [approved replacement extension](REPLACEMENT.md) backs up selected differing regular files in a private job before replacing them, conservatively reconciles interruptions, and preserves later edits/deletions. Replacement requires a quiescent destination and explicit caller approval; it is not yet a product workflow.
+
 ## What the experiment covers
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
@@ -36,7 +38,7 @@ Tests create fake source files and encrypted output in a private temporary direc
 
 ## Deliberate limits
 
-`decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows additive restoration through `Restorer`. The v2 manifest represents directories and symbolic links as authenticated metadata; TAR links, hardlinks, PAX extensions, and device entries remain rejected. Directory metadata finalization, broader link support, extended metadata, replacement backups, full account mapping, and real-home qualification remain production work.
+`decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows restoration through `Restorer`. The v2 manifest represents directories and symbolic links as authenticated metadata; TAR links, hardlinks, PAX extensions, and device entries remain rejected. Directory metadata finalization, broader link support, extended metadata, production replacement/backup integration, full account mapping, and real-home qualification remain production work.
 
 Source capture is not yet stable: the probe stats/hashes inputs and later reopens them. It must not be used to claim a consistent capture of live files. The fixture holdouts act on an explicit synthetic file mapping; they do not establish credential protection before real home discovery/traversal or cover all credential-path aliases.
 

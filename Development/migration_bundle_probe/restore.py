@@ -1,7 +1,7 @@
 """Synthetic, additive restoration experiment; never a real-home CLI.
 
 Authenticate once into private scratch, then plan/apply against a caller-owned
-disposable destination. Existing differing files are conflicts, never replaced.
+disposable destination. Explicit regular-file replacement retains private backups.
 """
 
 import contextlib
@@ -20,6 +20,7 @@ from . import probe
 
 JOURNAL_SCHEMA = "omarchy-migration-restore-probe/1"
 TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/2"
+REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/3"
 JOURNAL_LIMIT = 4 * 1024 * 1024
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -34,6 +35,7 @@ class Action:
     path: str
     status: str
     reason: str
+    backup: str | None = None
 
 
 class _VerifiedBundle:
@@ -166,7 +168,7 @@ class Restorer:
     the archive except validated relative file names.
     """
 
-    def __init__(self, bundle, target, job):
+    def __init__(self, bundle, target, job, *, replace=()):
         bundle._check()
         if os.geteuid() == 0:
             raise probe.Rejected("run this experiment as an unprivileged owner")
@@ -179,6 +181,13 @@ class Restorer:
         self._created_parents = {}
         self._tree = bundle._manifest["schema"] == probe.TREE_SCHEMA
         self._entries = {entry["path"]: entry for entry in bundle._manifest["entries"]}
+        if (not isinstance(replace, (tuple, list, set, frozenset))
+                or any(type(path) is not str for path in replace)
+                or len(set(replace)) != len(replace)
+                or any(path not in self._entries or probe.entry_kind(self._entries[path]) != "file"
+                       for path in replace)):
+            raise probe.Rejected("replacement approval must name selected regular files")
+        self._replace = frozenset(replace)
         try:
             # Caller paths are trusted, but the final component must not be a
             # symlink. Resolve parents only for containment checks.
@@ -198,12 +207,15 @@ class Restorer:
             except BlockingIOError as error:
                 raise probe.Rejected("restore job is already active") from error
             self._binding = {
-                "schema": TREE_JOURNAL_SCHEMA if self._tree else JOURNAL_SCHEMA,
+                "schema": (REPLACEMENT_JOURNAL_SCHEMA if self._replace else
+                           TREE_JOURNAL_SCHEMA if self._tree else JOURNAL_SCHEMA),
                 "manifest_sha256": bundle._digest,
                 "export_id": bundle._manifest["export_id"],
                 "target": _identity(self._target_fd),
                 "job": _identity(self._job_fd),
             }
+            if self._replace:
+                self._binding["replacement_paths"] = sorted(self._replace)
             self._journal = self._load()
         except BaseException:
             self._stack.close()
@@ -258,8 +270,14 @@ class Restorer:
             raise probe.Rejected("restore journal entries")
         for identity, entry in entries.items():
             kind = probe.entry_kind(allowed[identity])
-            states = ("pending", "applied", "retained") if self._tree else ("pending", "applied")
-            if (not isinstance(entry, dict) or set(entry) != {"state", "file", "temporary"}
+            states = ("pending", "applied", "retained") if self._tree or self._replace else ("pending", "applied")
+            keys = {"state", "file", "temporary"}
+            if isinstance(entry, dict) and "backup" in entry:
+                keys.add("backup")
+                if (kind != "file" or allowed[identity]["path"] not in self._replace
+                        or entry.get("state") == "retained"):
+                    raise probe.Rejected("unapproved replacement journal entry")
+            if (not isinstance(entry, dict) or set(entry) != keys
                     or entry["state"] not in states):
                 raise probe.Rejected("restore journal entry")
             temporary = entry["temporary"]
@@ -292,7 +310,47 @@ class Restorer:
                 raise probe.Rejected("restore journal digest")
             if kind == "symlink" and expected["target"] != allowed[identity]["target"]:
                 raise probe.Rejected("restore journal symlink target")
+            if "backup" in entry:
+                backup = entry["backup"]
+                if not isinstance(backup, dict) or set(backup) != {"name", "file", "original"}:
+                    raise probe.Rejected("restore backup record")
+                try:
+                    name = backup["name"]
+                    if (not isinstance(name, str) or str(uuid.UUID(name)) != name
+                            or name == temporary):
+                        raise ValueError()
+                except ValueError as error:
+                    raise probe.Rejected("restore backup identity") from error
+                for fingerprint in (backup["file"], backup["original"]):
+                    if (not isinstance(fingerprint, dict) or set(fingerprint) != fingerprint_keys
+                            or any(type(fingerprint[key]) is not int or fingerprint[key] < 0
+                                   for key in fingerprint_keys - {"sha256"})
+                            or not isinstance(fingerprint["sha256"], str)
+                            or len(fingerprint["sha256"]) != 64
+                            or any(c not in "0123456789abcdef" for c in fingerprint["sha256"])):
+                        raise probe.Rejected("restore backup fingerprint")
+                copied, original = backup["file"], backup["original"]
+                if (copied["mode"] != 0o600 or copied["uid"] != os.geteuid()
+                        or original["uid"] != os.geteuid() or not original["mode"] & 0o400
+                        or any(copied[key] != original[key] for key in ("bytes", "sha256", "mtime_ns"))
+                        or copied["device"] != expected["device"]
+                        or len({(fp["device"], fp["inode"]) for fp in (copied, original, expected)}) != 3):
+                    raise probe.Rejected("restore backup binding")
         return journal
+
+    def _backup_valid(self, saved):
+        if "backup" not in saved:
+            return True
+        try:
+            fd = os.open(saved["backup"]["name"], FILE_FLAGS, dir_fd=self._job_fd)
+            try:
+                if os.fstat(fd).st_nlink != 1:
+                    return False
+                return _fingerprint(fd) == saved["backup"]["file"]
+            finally:
+                os.close(fd)
+        except (OSError, probe.Rejected):
+            return False
 
     def _save(self):
         temporary = f".journal-{uuid.uuid4()}"
@@ -368,6 +426,10 @@ class Restorer:
         except (OSError, probe.Rejected):
             return {"blocked": True}
 
+    def _action(self, entry, status, reason):
+        saved = self._journal["entries"].get(entry["object"], {})
+        return Action(entry["path"], status, reason, saved.get("backup", {}).get("name"))
+
     def plan(self):
         self._check()
         actions, observations = [], []
@@ -381,7 +443,7 @@ class Restorer:
             elif kind == "file" and not entry["mode"] & 0o400:
                 status, reason = "conflict", "unreadable source mode is unsupported by this probe"
             elif saved:
-                if observed == saved["file"] and _matches(entry, observed):
+                if observed == saved["file"] and _matches(entry, observed) and self._backup_valid(saved):
                     status, reason = "restored", "prior publication matches journal"
                 else:
                     # Missing after intent is ambiguous: a user may have
@@ -391,9 +453,11 @@ class Restorer:
                 status, reason = "create", "new file"
             elif _matches(entry, observed):
                 status, reason = "present", "matching file already exists"
+            elif entry["path"] in self._replace and observed is not None and "blocked" not in observed:
+                status, reason = "replace", "approved regular file; private original backup required"
             else:
                 status, reason = "conflict", "existing file or unsafe path preserved"
-            actions.append(Action(entry["path"], status, reason))
+            actions.append(self._action(entry, status, reason))
             observations.append((observed, parents))
         if self._tree:
             by_path = {action.path: action for action in actions}
@@ -404,11 +468,51 @@ class Restorer:
                     target, traversed = probe.link_target(entry, self._entries)
                     dependencies.extend((target, *traversed))
                 if action.status != "inert" and any(by_path[path].status == "conflict" for path in dependencies):
-                    action = Action(action.path, "conflict", "directory or link dependency is unavailable")
+                    action = self._action(entry, "conflict", "directory or link dependency is unavailable")
                     actions[index] = by_path[action.path] = action
         self._plan = tuple(actions)
         self._observations = observations
         return self._plan
+
+    def _backup(self, entry, observed):
+        """Copy instead of hardlinking, so other original links cannot alter it."""
+        name = str(uuid.uuid4())
+        output_fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self._job_fd)
+        try:
+            with os.fdopen(output_fd, "w+b") as output:
+                with self._parent(entry["path"]) as parent:
+                    if parent is None:
+                        raise probe.Rejected("replacement parent disappeared")
+                    source_fd = os.open(entry["path"].split("/")[-1], FILE_FLAGS, dir_fd=parent)
+                    with os.fdopen(source_fd, "rb") as source:
+                        before = os.fstat(source_fd)
+                        if not stat.S_ISREG(before.st_mode) or _metadata(before) != {
+                            key: observed[key] for key in _metadata(before)
+                        }:
+                            raise probe.Rejected("original changed before backup")
+                        checksum, count = hashlib.sha256(), 0
+                        while piece := source.read(probe.CHUNK):
+                            count += len(piece)
+                            if count > observed["bytes"]:
+                                raise probe.Rejected("original grew during backup")
+                            checksum.update(piece)
+                            output.write(piece)
+                        after = os.fstat(source_fd)
+                        if (count != observed["bytes"] or checksum.hexdigest() != observed["sha256"]
+                                or _metadata(before) != _metadata(after)
+                                or before.st_ctime_ns != after.st_ctime_ns):
+                            raise probe.Rejected("original changed during backup")
+                output.flush()
+                os.fchmod(output_fd, 0o600)
+                os.utime(output_fd, ns=(observed["mtime_ns"], observed["mtime_ns"]))
+                os.fsync(output_fd)
+                output.seek(0)
+                fingerprint = _fingerprint(output_fd)
+            os.fsync(self._job_fd)
+            return {"name": name, "file": fingerprint, "original": observed}
+        except BaseException:
+            os.unlink(name, dir_fd=self._job_fd)
+            raise
 
     def _prepare(self, entry):
         temporary = str(uuid.uuid4())
@@ -545,7 +649,7 @@ class Restorer:
                 report[index] = action
                 continue
             if self._tree and any(path not in self._ready for path in _ancestors(entry["path"])):
-                report[index] = Action(entry["path"], "conflict", "directory dependency is unavailable")
+                report[index] = self._action(entry, "conflict", "directory dependency is unavailable")
                 continue
             parents = []
             observed = self._observe(entry["path"], parents, kind)
@@ -555,7 +659,7 @@ class Restorer:
                 for path, identity in parents[len(planned_parents):]
             )
             if observed != previous_file or not parents_match:
-                report[index] = Action(entry["path"], "conflict", "destination changed after planning")
+                report[index] = self._action(entry, "conflict", "destination changed after planning")
                 continue
             if action.status == "conflict":
                 report[index] = action
@@ -566,10 +670,10 @@ class Restorer:
                     self._ready[entry["path"]] = fingerprint
                 continue
             if kind == "symlink" and not self._link_ready(entry):
-                report[index] = Action(entry["path"], "conflict", "link target or traversal directory is unavailable")
+                report[index] = self._action(entry, "conflict", "link target or traversal directory is unavailable")
                 continue
             if action.status == "present":
-                if self._tree:
+                if self._tree or self._replace:
                     # Retain a witness even for matching pre-existing entries;
                     # their later deletion must not become permission to copy.
                     self._journal["entries"][entry["object"]] = {
@@ -581,26 +685,56 @@ class Restorer:
                 continue
             previous = self._journal["entries"].get(entry["object"])
             if action.status == "restored":
+                if not self._backup_valid(previous):
+                    report[index] = self._action(entry, "conflict", "original backup changed or disappeared")
+                    continue
                 # Re-establish directory durability if the earlier process
                 # stopped between link publication and its directory fsync.
                 with self._parent(entry["path"]) as parent:
                     os.fsync(parent)
+                if "backup" in previous:
+                    os.fsync(self._job_fd)
                 if previous["state"] != "retained":
                     previous["state"] = "applied"
                 self._save()
                 self._cleanup(previous)
                 self._ready[entry["path"]] = observed
-                report[index] = action
+                report[index] = Action(action.path, action.status, action.reason,
+                                       previous.get("backup", {}).get("name"))
                 continue
-            saved = self._prepare(entry)
+            backup = self._backup(entry, observed) if action.status == "replace" else None
+            try:
+                saved = self._prepare(entry)
+            except BaseException:
+                if backup is not None:
+                    # No replacement intent exists yet. Remove only this
+                    # invocation's known inode, avoiding repeated full copies.
+                    self._cleanup({"temporary": backup["name"], "file": backup["file"]})
+                raise
+            if backup is not None:
+                saved["backup"] = backup
             self._journal["entries"][entry["object"]] = saved
             self._save()  # Durable witness must precede target publication.
+            if backup is not None:
+                backup_valid = self._backup_valid(saved)
+                current_parents = []
+                current = self._observe(entry["path"], current_parents, kind)
+                if current != observed or current_parents != parents or not backup_valid:
+                    report[index] = self._action(entry, "conflict", "replacement inputs changed")
+                    continue
             with self._parent(entry["path"], create=not self._tree) as parent:
                 if parent is None:
                     raise probe.Rejected("destination parent disappeared")
                 try:
-                    os.link(saved["temporary"], entry["path"].split("/")[-1],
-                            src_dir_fd=self._job_fd, dst_dir_fd=parent, follow_symlinks=False)
+                    if backup is not None:
+                        # The caller keeps leaves as well as directories
+                        # quiescent: replace() is not an inode compare-and-swap.
+                        os.replace(saved["temporary"], entry["path"].split("/")[-1],
+                                   src_dir_fd=self._job_fd, dst_dir_fd=parent)
+                        os.fsync(self._job_fd)
+                    else:
+                        os.link(saved["temporary"], entry["path"].split("/")[-1],
+                                src_dir_fd=self._job_fd, dst_dir_fd=parent, follow_symlinks=False)
                 except FileExistsError:
                     report[index] = Action(entry["path"], "conflict", "destination appeared during publication")
                     continue
@@ -609,5 +743,7 @@ class Restorer:
             self._save()
             self._cleanup(saved)
             self._ready[entry["path"]] = saved["file"]
-            report[index] = Action(entry["path"], "restored", "new entry published")
+            report[index] = Action(entry["path"], "replaced" if backup else "restored",
+                                   "original retained in private backup" if backup else "new entry published",
+                                   backup["name"] if backup else None)
         return tuple(report)
