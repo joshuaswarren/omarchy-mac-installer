@@ -11,7 +11,7 @@
 #
 #   channels/<channel>/catalog.signed.json
 #   channels/<channel>/channel.json
-#   installer/<channel>/<INSTALLER_FILE_STEM>.pkg
+#   installer/<channel>/<INSTALLER_FILE_STEM>.zip
 #   installer/<channel>/installer.json
 #
 # The catalog and its signature travel as one envelope so a channel update is a
@@ -34,8 +34,10 @@ STREAM_BASE="$PUBLIC_BASE/$STREAM_PATH"
 CHANNELS="stable rc edge"
 TRUST_ROOT="${OMARCHY_TRUST_ROOT:-$script_directory/../Release/trust-root.ed25519.pub}"
 SIGNING_TOOL="${OMARCHY_CATALOG_SIGNING_TOOL:-xcrun swift $script_directory/catalog-signing.swift}"
-PKG_FILE_NAME="$INSTALLER_FILE_STEM.pkg"
-PKG_DOWNLOAD_NAME="$INSTALLER_APP_NAME.pkg"
+# The download is the notarized app in a zip; the installer package is no
+# longer published.
+ZIP_FILE_NAME="$INSTALLER_FILE_STEM.zip"
+ZIP_DOWNLOAD_NAME="$INSTALLER_APP_NAME.zip"
 NO_CACHE="no-cache, max-age=0, must-revalidate"
 
 scratch_root=""
@@ -55,7 +57,7 @@ Usage:
   publish-channels envelope --catalog FILE --signature FILE --output FILE
   publish-channels empty-catalog --output FILE [--sequence N]
   publish-channels os-promote --tag TAG --to stable|rc|edge [--minimum-sequence N] [--no-prune]
-  publish-channels app-publish --pkg FILE --version X.Y.Z [--to stable|rc|edge]
+  publish-channels app-publish --zip FILE --version X.Y.Z [--to stable|rc|edge]
   publish-channels channel-status [--channel stable|rc|edge|all]
   publish-channels prune [--confirm]
 
@@ -92,7 +94,7 @@ mutable_key_allowed() {
   for channel in $CHANNELS; do
     case $1 in
       "channels/$channel/catalog.signed.json" | "channels/$channel/channel.json") return 0 ;;
-      "installer/$channel/$PKG_FILE_NAME" | "installer/$channel/installer.json") return 0 ;;
+      "installer/$channel/$ZIP_FILE_NAME" | "installer/$channel/installer.json") return 0 ;;
     esac
   done
   return 1
@@ -397,35 +399,46 @@ PY
 }
 
 app_publish() {
-  local pkg="" version="" channel="stable"
+  local zip="" version="" channel="stable"
   while (( $# > 0 )); do
     case $1 in
-      --pkg) pkg=${2:-}; shift 2 ;;
+      --zip) zip=${2:-}; shift 2 ;;
+      --pkg) die "the installer package is no longer published; publish the app zip with --zip (Packaging/make-download-zip.sh)" ;;
       --version) version=${2:-}; shift 2 ;;
       --to) channel=${2:-}; shift 2 ;;
       *) channels_usage ;;
     esac
   done
-  [[ -n $pkg && -n $version ]] || channels_usage
-  require_file "$pkg"
+  [[ -n $zip && -n $version ]] || channels_usage
+  require_file "$zip"
+  [[ $zip == *.zip ]] || die "the download must be a .zip: $zip"
   validate_installer_version "$version"
   validate_channel "$channel"
   command -v aws >/dev/null || die "missing command: aws"
 
-  # A package that is not notarized and stapled would fail on the far side of
-  # a download, so it never reaches the bucket.
-  pkgutil --check-signature "$pkg" >/dev/null 2>&1 ||
-    die "pkg is not signed: $pkg"
-  xcrun stapler validate "$pkg" >/dev/null 2>&1 ||
-    die "pkg has no stapled notarization ticket: $pkg"
-
-  local work digest immutable_key
+  local work digest immutable_key entries
   work=$(make_scratch)
-  digest=$(file_digest "$pkg")
-  printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.pkg" >"$work/pkg.sha256"
-  immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.pkg"
 
-  python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$pkg")" \
+  # The zip must hold exactly the app, and the app must be signed and carry a
+  # stapled notarization ticket, or it would fail on the far side of a
+  # download; otherwise nothing reaches the bucket.
+  entries=$(python3 -c '
+import sys, zipfile
+print("\n".join(sorted({name.split("/")[0] for name in zipfile.ZipFile(sys.argv[1]).namelist()})))
+' "$zip" 2>/dev/null) || die "not a readable zip: $zip"
+  [[ $entries == "$INSTALLER_APP_NAME.app" ]] ||
+    die "the zip must contain only $INSTALLER_APP_NAME.app: $zip"
+  ditto -x -k "$zip" "$work/unpacked" || die "the zip could not be unpacked: $zip"
+  codesign --verify --deep --strict "$work/unpacked/$INSTALLER_APP_NAME.app" >/dev/null 2>&1 ||
+    die "the app in the zip is not validly signed: $zip"
+  xcrun stapler validate "$work/unpacked/$INSTALLER_APP_NAME.app" >/dev/null 2>&1 ||
+    die "the app in the zip has no stapled notarization ticket: $zip"
+
+  digest=$(file_digest "$zip")
+  printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.zip" >"$work/zip.sha256"
+  immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.zip"
+
+  python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$zip")" \
     "$STREAM_BASE/$immutable_key" <<'PY'
 import datetime
 import json
@@ -449,14 +462,14 @@ PY
 
   r2_credentials
   confirm_publication "installer-v$version" "r2:$R2_BUCKET/$(bucket_key "installer/$channel")" \
-    "$PKG_FILE_NAME installer.json"
+    "$ZIP_FILE_NAME installer.json"
 
-  put_immutable "$pkg" "$immutable_key" --content-type application/octet-stream
-  put_immutable "$work/pkg.sha256" "$immutable_key.sha256" --content-type text/plain
-  put_mutable "$pkg" "installer/$channel/$PKG_FILE_NAME" application/octet-stream \
-    --content-disposition "attachment; filename=\"$PKG_DOWNLOAD_NAME\""
+  put_immutable "$zip" "$immutable_key" --content-type application/zip
+  put_immutable "$work/zip.sha256" "$immutable_key.sha256" --content-type text/plain
+  put_mutable "$zip" "installer/$channel/$ZIP_FILE_NAME" application/zip \
+    --content-disposition "attachment; filename=\"$ZIP_DOWNLOAD_NAME\""
   put_mutable "$work/installer.json" "installer/$channel/installer.json" application/json
-  verify_back "installer/$channel/$PKG_FILE_NAME" "$digest"
+  verify_back "installer/$channel/$ZIP_FILE_NAME" "$digest"
   verify_back "installer/$channel/installer.json" "$(file_digest "$work/installer.json")"
 
   echo "installer_version=$version"

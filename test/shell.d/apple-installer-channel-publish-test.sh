@@ -110,10 +110,19 @@ fi
 exit 0
 SHIM
 
-cat >"$BIN_DIR/pkgutil" <<'SHIM'
+cat >"$BIN_DIR/codesign" <<'SHIM'
 #!/bin/bash
-printf 'pkgutil %s\n' "$*" >>"$CALLS"
+printf 'codesign %s\n' "$*" >>"$CALLS"
+[[ -f $CODESIGN_FAILS ]] && exit 1
 exit 0
+SHIM
+
+# ditto -x -k ZIP DEST, portably.
+cat >"$BIN_DIR/ditto" <<'SHIM'
+#!/bin/bash
+printf 'ditto %s\n' "$*" >>"$CALLS"
+[[ $1 == -x && $2 == -k ]] || exit 64
+python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$3" "$4"
 SHIM
 
 cat >"$BIN_DIR/xcrun" <<'SHIM'
@@ -146,6 +155,7 @@ chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 export BUCKET_DIR CALLS
 export STAPLE_FAILS="$WORK/staple-fails"
+export CODESIGN_FAILS="$WORK/codesign-fails"
 export BUCKET_LOCKED="$WORK/bucket-locked"
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
 export OMARCHY_R2_BUCKET=test-bucket
@@ -397,41 +407,79 @@ print(json.loads(base64.b64decode(d["catalog"]))["sequence"])
   fail "promoting rc leaves stable alone" "stable is now $stable_sequence"
 pass "promoting rc does not disturb stable"
 
-# --- the installer package publishes to an immutable key and the channel ----
-PKG="$WORK/Installer.pkg"
-head -c 4096 /dev/zero >"$PKG"
+# --- the app zip publishes to an immutable key and the channel -------------
+# make_app_zip OUT [FILLER BYTES] [EXTRA TOP-LEVEL ENTRY]
+make_app_zip() {
+  python3 - "$1" "$INSTALLER_APP_NAME.app" "${2:-4096}" "${3:-}" <<'PY'
+import sys, zipfile
+out, app, filler, extra = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+with zipfile.ZipFile(out, "w") as archive:
+    archive.writestr(f"{app}/Contents/Info.plist", "<plist/>")
+    archive.writestr(f"{app}/Contents/MacOS/app", b"\0" * filler)
+    if extra:
+        archive.writestr(extra, "x")
+PY
+}
+ZIP="$WORK/Installer.zip"
+make_app_zip "$ZIP"
 OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
-  --pkg "$PKG" --version 2.0.0 >"$WORK/app.log" 2>&1 ||
+  --zip "$ZIP" --version 2.0.0 >"$WORK/app.log" 2>&1 ||
   fail "app-publish succeeds" "$(cat "$WORK/app.log")"
-[[ -f $STREAM_DIR/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.pkg ]] ||
-  fail "the immutable package is published"
-[[ -f $STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.pkg ]] ||
-  fail "the stable package is published"
+[[ -f $STREAM_DIR/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.zip ]] ||
+  fail "the immutable zip is published"
+[[ -f $STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip ]] ||
+  fail "the stable zip is published"
 [[ -f $STREAM_DIR/installer/stable/installer.json ]] ||
   fail "the installer pointer is published"
-pass "the installer publishes to both an immutable key and the channel"
+grep -q "\"source\": \".*/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.zip\"" \
+  "$STREAM_DIR/installer/stable/installer.json" ||
+  fail "the pointer names the immutable zip" "$(cat "$STREAM_DIR/installer/stable/installer.json")"
+grep -q "^xcrun stapler validate .*/unpacked/$INSTALLER_APP_NAME.app" "$CALLS" ||
+  fail "the app inside the zip is checked for a stapled ticket" "$(grep stapler "$CALLS")"
+pass "the installer zip publishes to both an immutable key and the channel"
 
-grep -qF -- "--content-disposition attachment; filename=\"$INSTALLER_APP_NAME.pkg\"" "$CALLS" ||
+grep -qF -- "--content-disposition attachment; filename=\"$INSTALLER_APP_NAME.zip\"" "$CALLS" ||
   fail "the download keeps its name" "$(grep 'content-disposition' "$CALLS")"
 pass "the stable download is served under its readable name"
 
-# --- an unstapled package never reaches the bucket --------------------------
+# --- the installer package is no longer published ---------------------------
 : >"$CALLS"
-touch "$STAPLE_FAILS"
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.1 "$PUBLISHER" app-publish \
-  --pkg "$PKG" --version 2.0.1 >"$WORK/unstapled.log" 2>&1; then
-  fail "an unstapled package is refused"
+  --pkg "$ZIP" --version 2.0.1 >"$WORK/pkg.log" 2>&1; then
+  fail "publishing a package is refused"
 fi
+grep -q -- "--zip" "$WORK/pkg.log" || fail "the refusal points at --zip" "$(cat "$WORK/pkg.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a refused package uploads nothing"
+pass "the installer package can no longer be published"
+
+# --- a zip holding more than the app, or an unsigned or unstapled app, never
+# --- reaches the bucket -----------------------------------------------------
+make_app_zip "$WORK/Extra.zip" 4096 "README.txt"
+for case in extra unsigned unstapled; do
+  : >"$CALLS"
+  zip=$ZIP
+  [[ $case == extra ]] && zip=$WORK/Extra.zip
+  [[ $case == unsigned ]] && touch "$CODESIGN_FAILS"
+  [[ $case == unstapled ]] && touch "$STAPLE_FAILS"
+  if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.1 "$PUBLISHER" app-publish \
+    --zip "$zip" --version 2.0.1 >"$WORK/$case.log" 2>&1; then
+    fail "a $case zip is refused"
+  fi
+  grep -q "^aws s3 cp" "$CALLS" && fail "a $case zip uploads nothing"
+  rm -f "$CODESIGN_FAILS" "$STAPLE_FAILS"
+done
+grep -q "only $INSTALLER_APP_NAME.app" "$WORK/extra.log" ||
+  fail "the refusal names the app" "$(cat "$WORK/extra.log")"
+grep -q "not validly signed" "$WORK/unsigned.log" ||
+  fail "the refusal names the signature" "$(cat "$WORK/unsigned.log")"
 grep -q "stapled notarization" "$WORK/unstapled.log" ||
   fail "the refusal names notarization" "$(cat "$WORK/unstapled.log")"
-grep -q "^aws s3 cp" "$CALLS" && fail "an unstapled package uploads nothing"
-rm -f "$STAPLE_FAILS"
-pass "an unstapled package is refused before anything is uploaded"
+pass "only a zip of the signed, stapled app is uploaded"
 
 # --- republishing the same immutable version with different bytes is refused -
-head -c 8192 /dev/zero >"$WORK/Different.pkg"
+make_app_zip "$WORK/Different.zip" 8192
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
-  --pkg "$WORK/Different.pkg" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
+  --zip "$WORK/Different.zip" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
   fail "rewriting an immutable version is refused"
 fi
 grep -q "publish a new version" "$WORK/clobber.log" ||
@@ -614,10 +662,10 @@ for bucket_key in "${written[@]}"; do
   case $key in
     channels/stable/catalog.signed.json | channels/rc/catalog.signed.json | channels/edge/catalog.signed.json) ;;
     channels/stable/channel.json | channels/rc/channel.json | channels/edge/channel.json) ;;
-    installer/stable/"$INSTALLER_FILE_STEM.pkg" | installer/rc/"$INSTALLER_FILE_STEM.pkg") ;;
-    installer/edge/"$INSTALLER_FILE_STEM.pkg") ;;
+    installer/stable/"$INSTALLER_FILE_STEM.zip" | installer/rc/"$INSTALLER_FILE_STEM.zip") ;;
+    installer/edge/"$INSTALLER_FILE_STEM.zip") ;;
     installer/stable/installer.json | installer/rc/installer.json | installer/edge/installer.json) ;;
-    installer/*/"$INSTALLER_FILE_STEM"-*.pkg | installer/*/*.pkg.sha256) ;;
+    installer/*/"$INSTALLER_FILE_STEM"-*.zip | installer/*/*.zip.sha256) ;;
     *) fail "an unexpected key was written" "$key" ;;
   esac
 done
