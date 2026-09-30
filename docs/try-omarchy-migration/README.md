@@ -16,6 +16,7 @@ The [M4 HVF experiment](m4-hvf-experiment.md) additionally demonstrates syntheti
 | [Additive restore experiment](../../Development/migration_bundle_probe/RESTORE.md) | Authentication before destination writes, regular-file restoration, preservation of conflicts, and journaled retry after interruption. |
 | [Directories and links](../../Development/migration_bundle_probe/TREE.md) | Explicit/empty directories, verified relative links, inert unsupported links, and a real synthetic Git workspace roundtrip. |
 | [Approved replacements](../../Development/migration_bundle_probe/REPLACEMENT.md) | Explicit regular-file approvals, independent private backups, and conservative recovery after replacement interruption. |
+| [Disposable collection](../../Development/migration_bundle_probe/COLLECTION.md) | Early synthetic credential holdouts, descriptor traversal, alias checks, private snapshots, and export isolation from later source edits. |
 | [Staging components](../../Development/migration_staging/README.md) | GPT identity/bounds, a regular-fixture-only QEMU range broker, capacity arithmetic, and resumable ciphertext publication with 44 tests. |
 
 ## Run and interpret the checks

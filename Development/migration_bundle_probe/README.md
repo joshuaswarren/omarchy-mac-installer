@@ -12,6 +12,8 @@ The [approved replacement extension](REPLACEMENT.md) backs up selected differing
 
 ## What the experiment covers
 
+The [credential-aware collection extension](COLLECTION.md) captures caller-created disposable fixture trees into a private snapshot, applies trusted store holdouts before traversal, and supplies copied objects to the existing v2 exporter. This is separate from real-home and application-adapter support.
+
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
 - Streaming content-digest, mode, and timestamp validation for numbered regular-file objects.
 - Fixture credential holdouts before serialization and explicit inclusion. Fake SSH, Brave, 1Password, and Codex examples are not qualified application adapters.
@@ -40,7 +42,7 @@ Tests create fake source files and encrypted output in a private temporary direc
 
 `decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows restoration through `Restorer`. The v2 manifest represents directories and symbolic links as authenticated metadata; TAR links, hardlinks, PAX extensions, and device entries remain rejected. Directory metadata finalization, broader link support, extended metadata, production replacement/backup integration, full account mapping, and real-home qualification remain production work.
 
-Source capture is not yet stable: the probe stats/hashes inputs and later reopens them. It must not be used to claim a consistent capture of live files. The fixture holdouts act on an explicit synthetic file mapping; they do not establish credential protection before real home discovery/traversal or cover all credential-path aliases.
+Direct probe mappings still stat/hash inputs and later reopen them. The disposable collector isolates copied bytes and detects source changes under a quiescent-fixture contract; it does not establish consistent capture of live applications. Its configurable fake-store holdouts exercise early pruning and aliases, but production recognized paths, actual layouts and application support remain unqualified.
 
 The header admission policy deliberately accepts only the pinned passphrase profile with scrypt logN 18. It is not a general age decoder. The maintained age implementation performs cryptographic authentication. The PTY/subprocess adapter, its 60-second deadline, and `preexec_fn` are experimental and are not a supported multithreaded GUI integration API. Production process/memory bounds and long-running export progress remain unfinished.
 
