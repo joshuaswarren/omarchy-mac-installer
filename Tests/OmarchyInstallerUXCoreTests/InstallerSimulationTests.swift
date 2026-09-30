@@ -138,8 +138,11 @@
           if scenario == .unsupported {
             XCTAssertTrue(failure.isBlockedModel)
             XCTAssertTrue(
-              failure.plainDetail.contains("MacBook Pro 14-inch (M3, 2023) · Mac15,3 · apple,j504"))
-            XCTAssertTrue(try XCTUnwrap(failure.remedy).contains("(22 models)"))
+              failure.plainDetail.contains(
+                "MacBook Pro 14-inch (M4 Pro, 2024) · Mac16,8 · apple,j614s"))
+            let remedy = try XCTUnwrap(failure.remedy)
+            XCTAssertTrue(remedy.contains("(34 models)"), remedy)
+            XCTAssertTrue(remedy.contains("M3: iMac, MacBook Air, MacBook Pro"), remedy)
           }
           XCTAssertFalse(session.canStartInstallation)
           continue

@@ -8,7 +8,8 @@ repository.
 
 Every per-release value comes from an inputs file (`--inputs`), so cutting a
 release never edits this script. `scripts/release-inputs.template.json` holds
-the current values.
+the current values. The inputs must list exactly the Macs in
+`scripts/supported-models.json`: every M1, M2 and M3 Mac, none refused.
 
 The catalog pins whole-file digests. When the payload was split for release
 delivery, the sibling `<payload>.partNN` files are emitted as an additional
@@ -30,7 +31,11 @@ import datetime
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import supported_models  # noqa: E402
 
 SCHEMA_VERSION = 4
 
@@ -224,6 +229,10 @@ def load_inputs(path: Path) -> dict:
             identifier
         ):
             raise SystemExit(f"invalid device identifier: {identifier}")
+    # Every catalog enables every M1, M2 and M3 Mac (scripts/supported-models.json).
+    coverage = supported_models.coverage_errors(identifiers)
+    if coverage:
+        raise SystemExit("inputs device_identifiers: " + "; ".join(coverage))
 
     installer = document["installer"]
     if not isinstance(installer, dict):

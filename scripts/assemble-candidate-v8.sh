@@ -354,6 +354,8 @@ main() {
   step "Staging the catalog scaffolding"
   verified_copy "$signing_tool" "$out/catalog/catalog-signing.swift" "catalog-signing.swift"
   verified_copy "$generator" "$out/catalog/make-unsigned-catalog.py" "make-unsigned-catalog.py"
+  verified_copy "${generator%/*}/supported_models.py" "$out/catalog/supported_models.py" "supported_models.py"
+  verified_copy "${generator%/*}/supported-models.json" "$out/catalog/supported-models.json" "supported-models.json"
   verified_copy "$reference_release" "$out/catalog/v7-reference/release.json" "v7 release.json"
   verified_copy "$reference_trust_root" \
     "$out/catalog/v7-reference/trust-root.ed25519.pub" "v7 trust root"
