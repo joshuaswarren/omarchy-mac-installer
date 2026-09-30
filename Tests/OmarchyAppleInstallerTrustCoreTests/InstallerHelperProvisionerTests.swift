@@ -135,6 +135,49 @@
       XCTAssertEqual(outcome, .failed("The helper was installed but an older build still answers."))
     }
 
+    // MARK: Housekeeping
+
+    func testHousekeepingRunsOnceAfterAnInstall() async {
+      let probe = FakeProbe(registered: true, version: nil, installsVersion: "28")
+      let housekeeping = FakeHousekeeping()
+      let outcome = await provisioner(
+        probe, blesser: FakeBlesser(silent: .blessed, installing: probe), housekeeping: housekeeping
+      ).ensureCurrent(owner)
+
+      XCTAssertEqual(outcome, .installedSilently)
+      await housekeeping.waitForCall()
+      XCTAssertEqual(housekeeping.calls, 1)
+    }
+
+    func testHousekeepingDoesNotRunWhenNothingWasInstalled() async throws {
+      let housekeeping = FakeHousekeeping()
+      let current = await provisioner(
+        FakeProbe(registered: true, version: "28"), housekeeping: housekeeping
+      ).ensureCurrent(owner)
+      let failed = await provisioner(
+        FakeProbe(registered: false), blesser: FakeBlesser(silent: .failed("x")),
+        housekeeping: housekeeping
+      ).ensureCurrent(owner)
+
+      XCTAssertEqual(current, .alreadyCurrent)
+      XCTAssertEqual(failed, .failed("x"))
+      try await Task.sleep(for: .milliseconds(100))
+      XCTAssertEqual(housekeeping.calls, 0)
+    }
+
+    func testSlowHousekeepingNeverHoldsUpSetup() async {
+      let probe = FakeProbe(registered: false, installsVersion: "28")
+      let housekeeping = FakeHousekeeping(hangs: true)
+      let started = Date()
+      let outcome = await provisioner(
+        probe, blesser: FakeBlesser(silent: .blessed, installing: probe), housekeeping: housekeeping
+      ).ensureCurrent(owner)
+
+      XCTAssertEqual(outcome, .installedSilently)
+      XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+      housekeeping.release()
+    }
+
     // MARK: Bundled version
 
     func testBundledVersionComesFromTheHelpersEmbeddedInfoPlist() throws {
@@ -226,13 +269,15 @@
       _ probe: FakeProbe,
       blesser: any InstallerHelperBlessing = FakeBlesser(),
       validator: FakeValidator = FakeValidator(accepts: true),
-      bundled: String? = "28"
+      bundled: String? = "28",
+      housekeeping: any InstallerHelperHousekeeping = NoInstallerHelperHousekeeping()
     ) -> InstallerHelperProvisioner {
       InstallerHelperProvisioner(
         probe: probe,
         blesser: blesser,
         credentialValidator: validator,
-        bundledHelperVersion: bundled
+        bundledHelperVersion: bundled,
+        housekeeping: housekeeping
       )
     }
   }
@@ -317,6 +362,50 @@
       lock.withLock { recorded.append(.dialog) }
       if dialog == .blessed { installing?.installBundledHelper() }
       return dialog
+    }
+  }
+
+  private final class FakeHousekeeping: InstallerHelperHousekeeping, @unchecked Sendable {
+    private let lock = NSLock()
+    private let hangs: Bool
+    private var count = 0
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(hangs: Bool = false) {
+      self.hangs = hangs
+    }
+
+    var calls: Int { lock.withLock { count } }
+
+    func afterInstall() async {
+      let waiting = lock.withLock {
+        count += 1
+        let waiting = waiters
+        waiters = []
+        return waiting
+      }
+      for waiter in waiting {
+        waiter.resume()
+      }
+      while hangs && !lock.withLock({ released }) {
+        try? await Task.sleep(for: .milliseconds(10))
+      }
+    }
+
+    func release() {
+      lock.withLock { released = true }
+    }
+
+    func waitForCall() async {
+      await withCheckedContinuation { continuation in
+        let done = lock.withLock {
+          if count > 0 { return true }
+          waiters.append(continuation)
+          return false
+        }
+        if done { continuation.resume() }
+      }
     }
   }
 

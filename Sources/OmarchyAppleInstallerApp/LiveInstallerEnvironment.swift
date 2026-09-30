@@ -20,17 +20,20 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
   private static func makeHelperProvisioner(canInstall: Bool) -> InstallerHelperProvisioner {
     InstallerHelperProvisioner(
-      probe: SystemInstallerHelperProbe {
-        let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
-        return try AuthenticatedEngineXPCSubmitter(
-          machServiceName: configuration.helperMachServiceName,
-          helperCodeSigningRequirement: configuration.helperCodeSigningRequirement
-        )
-      },
+      probe: SystemInstallerHelperProbe(submitter: helperSubmitter),
       blesser: canInstall
         ? SMJobBlessInstallerHelperBlesser() : UnavailableInstallerHelperBlesser(),
       credentialValidator: OpenDirectoryAdministratorCredentialValidator(),
-      bundledHelperVersion: InstallerHelperProvisioner.bundledHelperVersion()
+      bundledHelperVersion: InstallerHelperProvisioner.bundledHelperVersion(),
+      housekeeping: SystemInstallerHelperHousekeeping(submitter: helperSubmitter)
+    )
+  }
+
+  @Sendable private static func helperSubmitter() throws -> AuthenticatedEngineXPCSubmitter {
+    let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
+    return try AuthenticatedEngineXPCSubmitter(
+      machServiceName: configuration.helperMachServiceName,
+      helperCodeSigningRequirement: configuration.helperCodeSigningRequirement
     )
   }
 

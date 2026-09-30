@@ -371,12 +371,17 @@
   {
     private let server: ClosedEngineHelperServer
     private let version: String
+    private let retirement: PackageInstalledAppRetirement
 
     /// - Parameter version: the helper's build version, or empty when it
     ///   carries none.
-    public init(server: ClosedEngineHelperServer, version: String = "") {
+    public init(
+      server: ClosedEngineHelperServer, version: String = "",
+      retirement: PackageInstalledAppRetirement = PackageInstalledAppRetirement()
+    ) {
       self.server = server
       self.version = version
+      self.retirement = retirement
     }
 
     public func ping(reply: @escaping @Sendable (Bool) -> Void) {
@@ -385,6 +390,13 @@
 
     public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
       reply(version)
+    }
+
+    public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {
+      let retirement = retirement
+      Task.detached {
+        reply(PackageInstalledAppRetirement.summary(retirement.run()))
+      }
     }
 
     public func removal(

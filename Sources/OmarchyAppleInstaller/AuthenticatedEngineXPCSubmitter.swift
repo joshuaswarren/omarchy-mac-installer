@@ -14,6 +14,11 @@
     /// answer it.
     func helperVersion(reply: @escaping @Sendable (String) -> Void)
 
+    /// Removes the installer app the installer package left in
+    /// /Applications, when that is safe; replies with a summary for logs.
+    /// See `PackageInstalledAppRetirement`.
+    func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void)
+
     func removal(
       ticket: String, confirmation: String, machineOwner: String, password: Data,
       reply: @escaping @Sendable (Data?, NSError?) -> Void
@@ -137,6 +142,38 @@
       }
     }
 
+    /// Asks the helper to remove the installer app the package left behind.
+    /// Returns the helper's summary, or nil when it does not answer in time.
+    public func retirePackageInstalledApps(timeout: Duration = .seconds(10)) async -> String? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let summary: String = await withCheckedContinuation { continuation in
+        let gate = EngineXPCStringGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: "") }
+        connection.invalidationHandler = { gate.resume(returning: "") }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: "")
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: "")
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.retirePackageInstalledApps { reported in
+          gate.resume(returning: reported)
+          connectionHandle.invalidate()
+        }
+      }
+      return summary.isEmpty ? nil : summary
+    }
+
     /// The build version the running helper reports, or nil when it reports
     /// none, does not answer in time, or cannot be reached. An older helper
     /// that lacks the call simply never replies, so the timeout is short.
@@ -149,7 +186,7 @@
       }
       defer { timer.cancel() }
       let version: String = await withCheckedContinuation { continuation in
-        let gate = EngineXPCVersionGate(continuation: continuation)
+        let gate = EngineXPCStringGate(continuation: continuation)
         connection.interruptionHandler = { gate.resume(returning: "") }
         connection.invalidationHandler = { gate.resume(returning: "") }
         connection.activate()
@@ -564,7 +601,7 @@
     }
   }
 
-  private final class EngineXPCVersionGate: @unchecked Sendable {
+  private final class EngineXPCStringGate: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<String, Never>?
 

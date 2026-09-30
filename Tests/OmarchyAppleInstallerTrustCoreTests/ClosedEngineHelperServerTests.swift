@@ -26,6 +26,35 @@
       }
     }
 
+    func testEndpointRetiresPackageInstalledAppsAndSummarizes() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let applications = fixture.root.appendingPathComponent("Applications", isDirectory: true)
+      let contents = applications.appendingPathComponent("Current.app/Contents", isDirectory: true)
+      try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+      try PropertyListSerialization.data(
+        fromPropertyList: ["CFBundleIdentifier": "com.example.installer"], format: .xml, options: 0
+      ).write(to: contents.appendingPathComponent("Info.plist"))
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      let endpoint = ClosedEngineXPCServiceEndpoint(
+        server: server,
+        retirement: PackageInstalledAppRetirement(
+          applicationsDirectory: applications, appNames: ["Current", "Legacy"],
+          bundleIdentifier: "com.example.installer", packageOwner: getuid(),
+          runningExecutablePaths: { [] }))
+
+      let summary = await withCheckedContinuation { continuation in
+        endpoint.retirePackageInstalledApps { continuation.resume(returning: $0) }
+      }
+
+      XCTAssertEqual(summary, "Current.app: removed; Legacy.app: absent")
+      XCTAssertFalse(FileManager.default.fileExists(atPath: contents.path))
+    }
+
     func testValidPackageExecutesAndImportedCopyIsRemoved() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }

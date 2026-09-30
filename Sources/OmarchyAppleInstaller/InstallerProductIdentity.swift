@@ -4,6 +4,9 @@ import Foundation
 /// OmarchyInstallerIdentityPlugin.
 public enum InstallerProductIdentity {
   public static let appName = InstallerBuildConfiguration.appName
+  /// The name the app had before the rename; package-installed copies may
+  /// still carry it.
+  public static let legacyAppName = InstallerBuildConfiguration.legacyAppName
   public static let appIdentifier = InstallerBuildConfiguration.appIdentifier
   public static let helperIdentifier = InstallerBuildConfiguration.helperIdentifier
   public static let helperMachServiceName = helperIdentifier

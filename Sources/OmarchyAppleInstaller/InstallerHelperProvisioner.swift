@@ -1,5 +1,6 @@
 #if os(macOS)
   import Foundation
+  import OSLog
 
   /// Where the privileged helper stands, as the app sees it.
   public enum InstallerHelperStatus: Equatable, Sendable {
@@ -71,6 +72,18 @@
     func blessWithDialog() async -> InstallerHelperBlessResult
   }
 
+  /// Follow-up work once the app has installed its own helper, such as
+  /// removing the app the installer package left in /Applications. It runs
+  /// in the background and can never hold up or fail the setup.
+  public protocol InstallerHelperHousekeeping: Sendable {
+    func afterInstall() async
+  }
+
+  public struct NoInstallerHelperHousekeeping: InstallerHelperHousekeeping {
+    public init() {}
+    public func afterInstall() async {}
+  }
+
   /// The blesser for builds that still rely on the installer package to put
   /// the helper in place.
   public struct UnavailableInstallerHelperBlesser: InstallerHelperBlessing {
@@ -95,20 +108,24 @@
     private let blesser: any InstallerHelperBlessing
     private let credentialValidator: any MachineOwnerCredentialValidating
     private let bundledHelperVersion: String?
+    private let housekeeping: any InstallerHelperHousekeeping
 
     /// - Parameter bundledHelperVersion: the build of the helper this app
     ///   carries. When nil the app cannot tell builds apart, and any helper
     ///   that answers counts as current.
+    /// - Parameter housekeeping: started, not awaited, after each install.
     public init(
       probe: any InstallerHelperProbing,
       blesser: any InstallerHelperBlessing,
       credentialValidator: any MachineOwnerCredentialValidating,
-      bundledHelperVersion: String?
+      bundledHelperVersion: String?,
+      housekeeping: any InstallerHelperHousekeeping = NoInstallerHelperHousekeeping()
     ) {
       self.probe = probe
       self.blesser = blesser
       self.credentialValidator = credentialValidator
       self.bundledHelperVersion = bundledHelperVersion
+      self.housekeeping = housekeeping
     }
 
     /// The build of the helper an app bundle carries: the `CFBundleVersion`
@@ -203,12 +220,35 @@
     ) async -> InstallerHelperProvisioningOutcome {
       switch await probeStatus() {
       case .current:
+        let housekeeping = housekeeping
+        Task.detached { await housekeeping.afterInstall() }
         return outcome
       case .outdated:
         return .failed("The helper was installed but an older build still answers.")
       case .missing, .disabled:
         return .failed("The helper was installed but does not answer.")
       }
+    }
+  }
+
+  /// The shipping housekeeping: asks the freshly installed helper to remove
+  /// the app the installer package left behind, and logs what it did.
+  public struct SystemInstallerHelperHousekeeping: InstallerHelperHousekeeping {
+    private static let logger = Logger(subsystem: "com.omarchy.installer", category: "helper")
+    private let submitter: @Sendable () throws -> AuthenticatedEngineXPCSubmitter
+
+    public init(
+      submitter: @escaping @Sendable () throws -> AuthenticatedEngineXPCSubmitter
+    ) {
+      self.submitter = submitter
+    }
+
+    public func afterInstall() async {
+      guard let submitter = try? submitter() else {
+        return
+      }
+      let summary = await submitter.retirePackageInstalledApps() ?? "no answer"
+      Self.logger.info("package-installed app retirement: \(summary, privacy: .public)")
     }
   }
 
