@@ -387,6 +387,10 @@ struct OmarchyRemovalSheet: View {
         InstallerHelperSetup.canInstall
         ? PlainLanguage.removalServiceNotResponding : PlainLanguage.removalServiceMissing
     }
+    // Nothing to confirm, so nothing for the typed password to approve.
+    if ticket == nil {
+      password = ""
+    }
   }
 
   /// Sets the helper up with the typed account, then scans as usual.

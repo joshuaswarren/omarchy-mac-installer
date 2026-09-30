@@ -75,6 +75,8 @@ Packaging/make-download-zip.sh "/absolute/path/Omarchy Installer.app" /absolute/
 
 It refuses an app without a stapled ticket and checks that the zip holds only the app.
 
+After a completed removal the helper uninstalls itself. A build that can install its own helper sets it up again at the next authorization. A build that cannot (ad hoc builds, and anything relying on the installer package) needs the installer package run again before its next install or removal.
+
 Notarization is deliberately separate from the assembler. The script rejects
 ad-hoc and development-signed bundles, submits a temporary ZIP, staples the
 accepted ticket to the app, and validates it with Gatekeeper. It requires the

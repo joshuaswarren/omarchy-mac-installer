@@ -51,6 +51,23 @@
       }
     }
 
+    func testAHelperOutsidePrivilegedHelperToolsLeavesThePackageAppAlone() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      // The test runner is not in PrivilegedHelperTools, so the default holds.
+      XCTAssertFalse(ClosedEngineXPCServiceEndpoint.runsFromPrivilegedHelperTools())
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      let summary = await withCheckedContinuation { continuation in
+        endpoint.retirePackageInstalledApps { continuation.resume(returning: $0) }
+      }
+      XCTAssertEqual(summary, "not installed by SMJobBless; nothing changed")
+    }
+
     func testEndpointRetiresPackageInstalledAppsAndSummarizes() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -71,7 +88,8 @@
           applicationsDirectory: applications, privateDirectory: fixture.destination,
           appNames: ["Current", "Legacy"],
           bundleIdentifier: "com.example.installer", packageOwner: getuid(),
-          runningExecutablePaths: { [] }))
+          runningExecutablePaths: { [] }),
+        mayRetirePackageApps: true)
 
       let summary = await withCheckedContinuation { continuation in
         endpoint.retirePackageInstalledApps { continuation.resume(returning: $0) }

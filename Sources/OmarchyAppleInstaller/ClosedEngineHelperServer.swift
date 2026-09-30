@@ -404,16 +404,28 @@
     private let server: ClosedEngineHelperServer
     private let version: String
     private let retirement: PackageInstalledAppRetirement
+    private let mayRetirePackageApps: Bool
 
     /// - Parameter version: the helper's build version, or empty when it
     ///   carries none.
+    /// - Parameter mayRetirePackageApps: only a helper SMJobBless installed,
+    ///   running from PrivilegedHelperTools, removes the package's app. An
+    ///   ad hoc build's helper runs from inside that app and accepts any
+    ///   client with the app's identifier, so it leaves it alone.
     public init(
       server: ClosedEngineHelperServer, version: String = "",
-      retirement: PackageInstalledAppRetirement = PackageInstalledAppRetirement()
+      retirement: PackageInstalledAppRetirement = PackageInstalledAppRetirement(),
+      mayRetirePackageApps: Bool = ClosedEngineXPCServiceEndpoint.runsFromPrivilegedHelperTools()
     ) {
       self.server = server
       self.version = version
       self.retirement = retirement
+      self.mayRetirePackageApps = mayRetirePackageApps
+    }
+
+    public static func runsFromPrivilegedHelperTools() -> Bool {
+      let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+      return executable.path.hasPrefix("/Library/PrivilegedHelperTools/")
     }
 
     /// A retiring helper answers no, so the app treats it as gone and sets up
@@ -431,6 +443,9 @@
     public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {
       let server = server
       let retirement = retirement
+      guard mayRetirePackageApps else {
+        return reply("not installed by SMJobBless; nothing changed")
+      }
       Task.detached {
         guard !server.isRetiring else {
           return reply("helper is retiring; nothing changed")
