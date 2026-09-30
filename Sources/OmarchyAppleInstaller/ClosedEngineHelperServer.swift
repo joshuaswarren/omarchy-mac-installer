@@ -27,6 +27,10 @@
     case installConfPlanIncomplete
     case installConfTargetMismatch
     case installConfReplay
+    /// A removal completed and the helper is uninstalling itself; it takes
+    /// no more work. The app sets up a fresh helper for the next action.
+    /// Last, so the bridged error codes of the earlier cases never change.
+    case retiring
   }
 
   public actor ClosedEngineHelperServer {
@@ -41,6 +45,8 @@
     private let espDisks: any InstallConfESPDiskOperating
     private let selfUninstaller: any HelperSelfUninstalling
     private var isExecuting = false
+    /// Set once a removal completes: the helper is uninstalling itself.
+    public private(set) var isRetiring = false
     private var completedInstallPlan: CompletedEngineInstallPlan?
     private var installConfConsumed = false
     private var removalPlan:
@@ -84,6 +90,7 @@
     public func removal(
       ticketID: UUID?, confirmation: String, authorization: MachineOwnerAuthorization?
     ) async throws -> OmarchyRemovalReply {
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
       guard !isExecuting else { throw ClosedEngineHelperError.busy }
       try requireNoInterruptedRemoval()
       isExecuting = true
@@ -111,11 +118,10 @@
       // One use only, including failures. A fresh review must obtain a new plan.
       removalPlan = nil
       let validator = credentialValidator
-      let selfUninstaller = self.selfUninstaller
       let workingDirectory = self.workingDirectory
       let journalURL = workingDirectory.appendingPathComponent(
         "removal-\(approved.ticket.id.uuidString).json")
-      return await Task.detached {
+      let reply = await Task.detached {
         var phase = "checking"
         do {
           do { try validator.validate(authorization) } catch {
@@ -151,9 +157,6 @@
             message +=
               " The installer couldn’t clear its record of the earlier installation, so installing again at the same size may not work."
           }
-          // Nothing of Omarchy is left, so the helper goes too, once this
-          // reply has reached the app.
-          selfUninstaller.uninstallAfterRemoval()
           return OmarchyRemovalReply(completed: true, message: message)
         } catch {
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."
@@ -175,6 +178,13 @@
           return OmarchyRemovalReply(requiresReview: phase != "checking", message: message)
         }
       }.value
+      if reply.completed {
+        // Nothing of Omarchy is left, so the helper goes too. It takes no more
+        // work from here on, before this reply even leaves.
+        isRetiring = true
+        selfUninstaller.uninstallAfterRemoval()
+      }
+      return reply
     }
 
     private func requireNoInterruptedRemoval() throws {
@@ -205,6 +215,7 @@
       operation: EngineHandoffOperation = .install,
       progress: (any EngineJournalProgressSink)? = nil
     ) async throws -> Data {
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
       guard !isExecuting else {
         throw ClosedEngineHelperError.busy
       }
@@ -312,6 +323,7 @@
       lengthBytes: UInt64,
       authorization: MachineOwnerAuthorization
     ) async throws {
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
       guard !isExecuting else { throw ClosedEngineHelperError.busy }
       do {
         try credentialValidator.validate(authorization)
@@ -393,17 +405,26 @@
       self.retirement = retirement
     }
 
+    /// A retiring helper answers no, so the app treats it as gone and sets up
+    /// a fresh one rather than sending it work.
     public func ping(reply: @escaping @Sendable (Bool) -> Void) {
-      reply(true)
+      let server = server
+      Task { reply(!(await server.isRetiring)) }
     }
 
     public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
-      reply(version)
+      let server = server
+      let version = version
+      Task { reply(await server.isRetiring ? "" : version) }
     }
 
     public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {
+      let server = server
       let retirement = retirement
       Task.detached {
+        guard !(await server.isRetiring) else {
+          return reply("helper is retiring; nothing changed")
+        }
         reply(PackageInstalledAppRetirement.summary(retirement.run()))
       }
     }

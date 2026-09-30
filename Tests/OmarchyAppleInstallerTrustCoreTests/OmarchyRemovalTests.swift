@@ -845,6 +845,56 @@
       }
     }
 
+    func testACompletedRemovalRetiresTheHelperBeforeItTakesMoreWork() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let service = ClosedEngineHelperServer(
+        workingDirectory: root, executor: UnusedRemovalHandoffExecutor(),
+        credentialValidator: RemovalCredentials(reject: false), removalDisks: FakeRemovalDisk(),
+        removalAdminValidator: { _ in }, selfUninstaller: RecordingSelfUninstaller())
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: service, version: "28")
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(inspection.ticket)
+      let before = await withCheckedContinuation { c in endpoint.ping { c.resume(returning: $0) } }
+      XCTAssertTrue(before)
+
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertTrue(result.completed, result.message)
+
+      let retiring = await service.isRetiring
+      XCTAssertTrue(retiring)
+      do {
+        _ = try await service.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("a retiring helper must refuse new work")
+      } catch let error as ClosedEngineHelperError {
+        XCTAssertEqual(error, .retiring)
+      }
+      let ping = await withCheckedContinuation { c in endpoint.ping { c.resume(returning: $0) } }
+      let version = await withCheckedContinuation { c in
+        endpoint.helperVersion { c.resume(returning: $0) }
+      }
+      XCTAssertFalse(ping, "a retiring helper reads as gone, so the app sets up a fresh one")
+      XCTAssertEqual(version, "")
+    }
+
+    func testHelperErrorCodesKeepTheirValuesAcrossVersions() {
+      // XPC carries these as NSError codes between app and helper builds. Swift
+      // numbers cases with a value first, then the rest in order; new cases
+      // go last so none of these ever changes.
+      let codes: [(ClosedEngineHelperError, Int)] = [
+        (.unsupportedDevice("x"), 0), (.busy, 1), (.invalidOperation, 2),
+        (.invalidMachineOwnerCredentials, 3), (.invalidClientRequirement, 4),
+        (.transcriptDeviceMismatch, 5), (.transcriptIncomplete, 6), (.transcriptPlanMismatch, 7),
+        (.installConfPlanIncomplete, 8), (.installConfTargetMismatch, 9),
+        (.installConfReplay, 10), (.retiring, 11),
+      ]
+      for (error, code) in codes {
+        XCTAssertEqual((error as NSError).code, code, "\(error)")
+      }
+    }
+
     func testFailedRemovalKeepsInstallJournals() async throws {
       let root = try temporaryDirectory()
       defer { try? FileManager.default.removeItem(at: root) }

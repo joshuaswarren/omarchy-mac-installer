@@ -46,13 +46,25 @@
       let recorder = Recorder()
 
       uninstaller(paths, recorder, delay: .milliseconds(50)).uninstallAfterRemoval()
-      XCTAssertTrue(FileManager.default.fileExists(atPath: paths.jobFile.path))
+      XCTAssertEqual(recorder.events, [], "unloading waits")
 
       for _ in 0..<200 where recorder.events.isEmpty {
         try await Task.sleep(for: .milliseconds(10))
       }
       XCTAssertEqual(recorder.events, ["unload:probe.helper", "exit"])
       XCTAssertFalse(FileManager.default.fileExists(atPath: paths.state.path))
+    }
+
+    func testFilesGoAtOnceSoNoStaleHelperIsSeenWhileUnloadWaits() throws {
+      let paths = try makeInstalledHelper()
+      let recorder = Recorder()
+
+      uninstaller(paths, recorder, delay: .seconds(30)).uninstallAfterRemoval()
+
+      XCTAssertFalse(FileManager.default.fileExists(atPath: paths.jobFile.path))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: paths.binary.path))
+      XCTAssertFalse(FileManager.default.fileExists(atPath: paths.state.path))
+      XCTAssertEqual(recorder.events, [], "unloading waits for the reply to reach the app")
     }
 
     // MARK: Fixtures

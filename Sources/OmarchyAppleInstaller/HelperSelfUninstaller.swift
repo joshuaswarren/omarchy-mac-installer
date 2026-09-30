@@ -53,17 +53,30 @@
       self.exitProcess = exitProcess
     }
 
+    /// Deletes the files at once, so the app sees no helper from this moment
+    /// and a later install blesses a fresh one (which replaces this job and
+    /// ends this process), then unloads and exits after the delay that lets
+    /// the removal reply reach the app.
     public func uninstallAfterRemoval() {
+      removeFiles()
       let uninstaller = self
       Task.detached {
         try? await Task.sleep(for: uninstaller.delay)
-        uninstaller.uninstallNow()
+        uninstaller.unloadAndExit()
       }
     }
 
-    /// Deletes the files first, so the job cannot come back at the next boot
-    /// even if unloading is cut short, then unloads the job and exits.
     func uninstallNow() {
+      removeFiles()
+      unloadAndExit()
+    }
+
+    private func unloadAndExit() {
+      unload(label)
+      exitProcess()
+    }
+
+    private func removeFiles() {
       for item in [jobFile, binary, workingDirectory] {
         do {
           if FileManager.default.fileExists(atPath: item.path) {
@@ -75,8 +88,6 @@
           )
         }
       }
-      unload(label)
-      exitProcess()
     }
 
     /// Asks launchd to unload the helper's own job. launchd then stops this
