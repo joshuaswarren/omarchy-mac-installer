@@ -16,9 +16,9 @@ Moving to another identity or host is an edit to `identity.conf` followed by `sc
 The generated `Omarchy Installer.app` contains:
 
 - the SwiftUI application in `Contents/MacOS`;
-- the root helper in `Contents/Resources`;
-- its `SMAppService` launch-daemon property list in
-  `Contents/Library/LaunchDaemons`;
+- the root helper in `Contents/Library/LaunchServices`, named by its label, with its Info.plist (carrying the build number it reports) and, for builds with a real signing identity, its `SMJobBless` launchd job linked into `__TEXT` sections;
+- the helper's declaration for `SMJobBless` (`SMPrivilegedExecutables`) in the app's Info.plist, for builds with a real signing identity;
+- the launch-daemon property list the fallback installer package derives its system daemon from, in `Contents/Library/LaunchDaemons`, pointing at the same helper;
 - the immutable release descriptor and Ed25519 trust root in
   `Contents/Resources/Release`; and
 - the pinned Asahi validation engine in `Contents/Resources/Engine/artifacts`.
@@ -66,6 +66,14 @@ preconfigured keychain profile:
 OMARCHY_NOTARY_PROFILE="omarchy-notary" \
 Packaging/notarize-app.sh "/absolute/path/Omarchy Installer.app"
 ```
+
+The app installs its own helper with `SMJobBless` the first time the person authorizes an install, using the password they typed; ad hoc builds leave the declaration out and still need the installer package. After notarization, package the download:
+
+```sh
+Packaging/make-download-zip.sh "/absolute/path/Omarchy Installer.app" /absolute/path/Omarchy-Installer.zip
+```
+
+It refuses an app without a stapled ticket and checks that the zip holds only the app.
 
 Notarization is deliberately separate from the assembler. The script rejects
 ad-hoc and development-signed bundles, submits a temporary ZIP, staples the

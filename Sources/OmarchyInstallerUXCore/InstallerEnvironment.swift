@@ -154,13 +154,38 @@
 
   public struct HelperDisplay: Equatable, Sendable {
     public let status: InstallerHelperStatus
+    /// This build can install the helper itself when the person authorizes.
+    /// Builds without it rely on the installer package having done so.
+    public let canInstall: Bool
 
-    /// The privileged helper is in place, so installation may run.
+    /// The privileged helper is in place.
     public var isCurrent: Bool { status == .current }
 
-    public init(status: InstallerHelperStatus) {
+    /// Installation may be authorized: the helper is in place, or it will be
+    /// installed with the credentials the person types.
+    public var isReady: Bool { isCurrent || canInstall }
+
+    /// Authorizing will install the helper, so macOS will show a background
+    /// item notice.
+    public var willInstall: Bool { canInstall && !isCurrent }
+
+    public init(status: InstallerHelperStatus, canInstall: Bool = false) {
       self.status = status
+      self.canInstall = canInstall
     }
+  }
+
+  /// Why the helper could not be made ready for the action the person
+  /// authorized. Nothing touched the disk.
+  public enum InstallerHelperSetupError: Error, Equatable, Sendable {
+    /// The person cancelled macOS's administrator dialog, or macOS refused.
+    case cancelled
+    /// The helper is switched off in Login Items.
+    case switchedOff
+    /// This build cannot install the helper, and none is in place.
+    case unavailable
+    /// The message is for diagnostics only.
+    case failed(String)
   }
 
   /// One artifact row on the preparing screen, fed by
@@ -385,6 +410,9 @@
 
   public enum CredentialSheetError: String, Equatable, Sendable {
     case credentialsRejected
+    case helperSetupCancelled
+    case helperSwitchedOff
+    case helperSetupFailed
   }
 
   public struct CredentialSheetContext: Equatable, Sendable {
@@ -395,22 +423,35 @@
     /// stays up (fields locked) so a rejection appears in place instead of the
     /// sheet closing, the screen flipping, and the sheet coming back.
     public let isVerifying: Bool
+    /// Authorizing will install the helper, so the sheet says macOS will show
+    /// a background item notice.
+    public let mentionsBackgroundItem: Bool
 
     public init(
       kind: InstallOperationKind,
       bindingDigest: String,
       error: CredentialSheetError? = nil,
-      isVerifying: Bool = false
+      isVerifying: Bool = false,
+      mentionsBackgroundItem: Bool = false
     ) {
       self.kind = kind
       self.bindingDigest = bindingDigest
       self.error = error
       self.isVerifying = isVerifying
+      self.mentionsBackgroundItem = mentionsBackgroundItem
     }
 
     public func verifying() -> CredentialSheetContext {
       CredentialSheetContext(
-        kind: kind, bindingDigest: bindingDigest, error: nil, isVerifying: true)
+        kind: kind, bindingDigest: bindingDigest, error: nil, isVerifying: true,
+        mentionsBackgroundItem: mentionsBackgroundItem)
+    }
+
+    /// The same sheet, reopened with an error.
+    public func failed(_ error: CredentialSheetError) -> CredentialSheetContext {
+      CredentialSheetContext(
+        kind: kind, bindingDigest: bindingDigest, error: error, isVerifying: false,
+        mentionsBackgroundItem: mentionsBackgroundItem)
     }
   }
 
@@ -442,9 +483,15 @@
     ) async throws -> PlanPreparationDisplay
     func approve() throws
     func discardApproval()
-    /// Re-reads whether the pre-installed system daemon is present. There is no
-    /// registration or approval step — the package installs the helper.
+    /// Re-reads whether the helper is registered and whether this build can
+    /// install it.
     func refreshHelperStatus() -> HelperDisplay
+    /// Makes the privileged helper ready for the action just authorized,
+    /// installing or replacing it with these credentials when needed. Called
+    /// before `execute`; it keeps no credential. Throws
+    /// `EngineXPCSubmissionError.machineOwnerCredentialsRejected` when the
+    /// credentials are wrong, and `InstallerHelperSetupError` otherwise.
+    func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws
     func execute(
       operation: InstallOperationKind,
       authorization: MachineOwnerAuthorization,

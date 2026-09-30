@@ -37,6 +37,8 @@
 
     func refreshHelperStatus() -> HelperDisplay { helperStatus }
 
+    func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {}
+
     func inspect() async throws -> HostDisplay {
       try? await Task.sleep(for: .milliseconds(700))
       let transcript = try loadValidatedTranscript()

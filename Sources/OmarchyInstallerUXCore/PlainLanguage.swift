@@ -110,6 +110,15 @@
     public static let authorizeRetryAction = "Authorize"
     public static let authorizeRejected =
       "The user name or password was incorrect."
+    /// Shown on the sheet when authorizing will install the helper.
+    public static let authorizeBackgroundItemNotice =
+      "macOS will show a notice that \(windowTitle) added a background item. That’s the installation service; it’s removed along with Omarchy."
+    public static let authorizeHelperCancelled =
+      "The installation service wasn’t set up, so nothing was changed. Try again, and approve the macOS password prompt if it appears."
+    public static let authorizeHelperSwitchedOff =
+      "The installation service is switched off. In System Settings, open General → Login Items & Extensions, switch it on under Allow in the Background, then try again."
+    public static let authorizeHelperFailed =
+      "The installation service couldn’t be set up, so nothing was changed. Try again."
 
     // MARK: Confirmation dialogs (preserved verbatim)
 
@@ -480,8 +489,8 @@
 
     public static let retry = "Try again"
 
-    /// Shown when the pre-installed system daemon is missing. The remedy is to
-    /// run the installer package again — never to open Login Items.
+    /// Shown only by builds that cannot install the helper themselves, when
+    /// the installer package has not put it in place.
     public static let helperNotInstalled =
       "The installation service is missing. Run the downloaded \(installerPackage) again, then reopen this app."
 
@@ -546,7 +555,7 @@
             plainDetail:
               "The app couldn’t get a response from the installation service. Installation has not started.",
             technicalDetail: technical,
-            remedy: "Run the downloaded \(installerPackage) again, then reopen this app."
+            remedy: "Quit \(windowTitle), open it again, and try once more."
           )
         case .connectionFailed:
           return FailureDisplay(
@@ -691,7 +700,7 @@
               "This release requires installer \(minimum) or later. You’re using \(current).",
             technicalDetail: technical,
             remedy:
-              "Download and open the latest \(installerPackage), then reopen this app.",
+              "Download the latest \(windowTitle) and open it.",
             actionURL: downloadURL,
             actionTitle: downloadInstaller
           )

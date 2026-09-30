@@ -10,7 +10,7 @@ app=$1
 package=$2
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-helper="$app/Contents/Resources/omarchy-apple-installer-helper"
+helper="$app/Contents/Library/LaunchServices/$INSTALLER_HELPER_IDENTIFIER"
 app_requirement=$(private_code_requirement "$app" "$INSTALLER_APP_IDENTIFIER")
 helper_requirement=$(private_code_requirement "$helper" "$INSTALLER_HELPER_IDENTIFIER")
 /usr/bin/codesign --verify --deep --strict -R="$app_requirement" "$app"
@@ -37,7 +37,7 @@ assert files(installed) == files(original)
 plist = plistlib.loads(daemon.read_bytes())
 assert plist == {'Label': helper_id, 'Program': '/Library/PrivilegedHelperTools/' + helper_id, 'MachServices': {helper_id: True}, 'UserName': 'root', 'EnvironmentVariables': {'OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT': os.environ['PRIVATE_TEST_APP_REQUIREMENT']}}
 helper = expanded / 'Payload/Library/PrivilegedHelperTools' / helper_id
-assert helper.read_bytes() == (original / 'Contents/Resources/omarchy-apple-installer-helper').read_bytes()
+assert helper.read_bytes() == (original / 'Contents/Library/LaunchServices' / helper_id).read_bytes()
 assert helper.stat().st_mode & 0o777 == 0o755
 assert helper.parent.stat().st_mode & 0o777 == 0o755
 info = ET.parse(expanded / 'PackageInfo').getroot()

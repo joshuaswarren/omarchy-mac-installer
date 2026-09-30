@@ -90,4 +90,40 @@
       }
     }
   }
+
+  /// Checks the typed credentials in the app before they are used to install
+  /// the helper: the password must be right and the account an
+  /// administrator, since macOS only lets administrators install it. A
+  /// rejection here shows the sheet's usual message instead of macOS's
+  /// dialog.
+  public struct OpenDirectoryAdministratorCredentialValidator:
+    MachineOwnerCredentialValidating
+  {
+    public init() {}
+
+    public func validate(
+      _ authorization: MachineOwnerAuthorization
+    ) throws {
+      try OpenDirectoryMachineOwnerCredentialValidator().validate(authorization)
+      do {
+        let node = try ODNode(
+          session: ODSession.default(),
+          type: ODNodeType(kODNodeTypeLocalNodes)
+        )
+        let user = try node.record(
+          withRecordType: kODRecordTypeUsers,
+          name: authorization.username,
+          attributes: nil
+        )
+        let admin = try node.record(
+          withRecordType: kODRecordTypeGroups,
+          name: "admin",
+          attributes: nil
+        )
+        try admin.isMemberRecord(user)
+      } catch {
+        throw MachineOwnerCredentialValidationError.rejected
+      }
+    }
+  }
 #endif

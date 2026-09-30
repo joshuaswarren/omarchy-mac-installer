@@ -52,6 +52,13 @@ struct CredentialSheet: View {
       .padding(12)
       .background(OmarchyTheme.card, in: RoundedRectangle(cornerRadius: 4))
 
+      if context.mentionsBackgroundItem && !isSimulation {
+        Text(PlainLanguage.authorizeBackgroundItemNotice)
+          .font(OmarchyTheme.detail)
+          .foregroundStyle(OmarchyTheme.secondaryText)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
       field(label: PlainLanguage.authorizeUsernameLabel, reason: input.usernameReason) {
         TextField("", text: isSimulation ? .constant("simulation") : $input.username)
           .textFieldStyle(.roundedBorder)
@@ -73,15 +80,15 @@ struct CredentialSheet: View {
           .disabled(isSimulation)
       }
 
-      if context.isVerifying || context.error == .credentialsRejected {
+      if context.isVerifying || context.error != nil {
         HStack(alignment: .top, spacing: 8) {
           if context.isVerifying {
             ProgressView().controlSize(.small)
             Text(
               showsLongWait ? PlainLanguage.authorizeStillWorking : PlainLanguage.authorizeChecking)
-          } else if context.error == .credentialsRejected {
+          } else if let message = errorMessage {
             Image(systemName: "exclamationmark.triangle")
-            Text(PlainLanguage.authorizeRejected).foregroundStyle(OmarchyTheme.danger)
+            Text(message).foregroundStyle(OmarchyTheme.danger)
           }
         }
         .font(OmarchyTheme.detail)
@@ -141,6 +148,16 @@ struct CredentialSheet: View {
 
   private var isRetry: Bool {
     context.kind == .retryRecoveryAuthorization
+  }
+
+  private var errorMessage: String? {
+    switch context.error {
+    case .credentialsRejected: PlainLanguage.authorizeRejected
+    case .helperSetupCancelled: PlainLanguage.authorizeHelperCancelled
+    case .helperSwitchedOff: PlainLanguage.authorizeHelperSwitchedOff
+    case .helperSetupFailed: PlainLanguage.authorizeHelperFailed
+    case nil: nil
+    }
   }
 
   private func field<Content: View>(

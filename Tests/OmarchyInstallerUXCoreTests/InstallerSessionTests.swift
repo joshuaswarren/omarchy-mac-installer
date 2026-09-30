@@ -614,6 +614,121 @@
       XCTAssertTrue(session.canStartInstallation)
     }
 
+    func testAMissingHelperTheBuildCanInstallDoesNotBlockInstallation() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      let session = try await approvedSession(environment)
+
+      XCTAssertTrue(session.canStartInstallation)
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testACurrentHelperNeedsNoBackgroundItemNotice() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      let session = try await approvedSession(environment)
+
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, false)
+      await session.submit(try authorization())
+      // Setup still runs: it confirms the helper answers and is current.
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testATypoDuringHelperSetupShowsTheUsualRejection() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      environment.ensureHelperError = EngineXPCSubmissionError.machineOwnerCredentialsRejected
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.submit(try authorization())
+
+      XCTAssertEqual(session.credentialSheet.context?.error, .credentialsRejected)
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+      XCTAssertEqual(environment.executeCount, 0)
+      XCTAssertTrue(session.canStartInstallation)
+    }
+
+    func testHelperSetupFailuresReopenTheSheetWithoutRunning() async throws {
+      let cases: [(InstallerHelperSetupError, CredentialSheetError)] = [
+        (.cancelled, .helperSetupCancelled),
+        (.switchedOff, .helperSwitchedOff),
+        (.failed("launchd"), .helperSetupFailed),
+        (.unavailable, .helperSetupFailed),
+      ]
+      for (setupError, sheetError) in cases {
+        let environment = MockInstallerEnvironment()
+        environment.helper = HelperDisplay(status: .missing, canInstall: true)
+        environment.ensureHelperError = setupError
+        let session = try await approvedSession(environment)
+        session.presentInstallCredentials()
+
+        await session.submit(try authorization())
+
+        XCTAssertEqual(session.credentialSheet.context?.error, sheetError, "\(setupError)")
+        XCTAssertEqual(environment.executeCount, 0, "\(setupError)")
+        // Nothing ran, so the person can simply try again.
+        XCTAssertTrue(session.canStartInstallation, "\(setupError)")
+        await session.submit(try authorization())
+        XCTAssertEqual(environment.executeCount, 1, "\(setupError)")
+      }
+    }
+
+    func testRecoveryRetrySetsUpTheHelperOnceForItsOwnPassword() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+        .success(MockInstallerEnvironment.recoveryCompletion),
+      ]
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      session.presentRecoveryRetryCredentials()
+      await session.submit(try authorization())
+
+      XCTAssertEqual(
+        environment.calls, ["ensureHelper:owner", "execute", "ensureHelper:owner", "execute"])
+    }
+
+    func testAnUnsupportedMacNeverReachesHelperSetup() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      let session = try await approvedSession(environment)
+      environment.installationBlocked = true
+
+      XCTAssertFalse(session.canStartInstallation)
+      session.presentInstallCredentials()
+      XCTAssertNil(session.credentialSheet.context)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, [])
+    }
+
+    func testABuildThatCannotInstallTheHelperStillNeedsItInPlace() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: false)
+      let session = try await approvedSession(environment)
+
+      XCTAssertFalse(session.canStartInstallation)
+      XCTAssertFalse(environment.helper.isReady)
+    }
+
+    private func approvedSession(
+      _ environment: MockInstallerEnvironment
+    ) async throws -> InstallerSession {
+      let session = InstallerSession(environment: environment)
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      session.setAcknowledged(true)
+      session.approve()
+      return session
+    }
+
     func testJournalChunksDriveTheInstallingDisplay() async throws {
       let environment = MockInstallerEnvironment()
       environment.journalChunks = try JournalFixture.lines()
@@ -1133,6 +1248,9 @@
     private(set) var approveCount = 0
     private(set) var discardCount = 0
     private(set) var executeCount = 0
+    /// Each helper setup, as the order of calls relative to execute.
+    private(set) var calls = [String]()
+    var ensureHelperError: (any Error)?
     private(set) var prepareCount = 0
     private(set) var lastOperation: InstallOperationKind?
     private(set) var lastEncryptLinuxDisk: Bool?
@@ -1212,6 +1330,14 @@
 
     func refreshHelperStatus() -> HelperDisplay { helper }
 
+    func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {
+      calls.append("ensureHelper:\(authorization.username)")
+      if let ensureHelperError {
+        self.ensureHelperError = nil
+        throw ensureHelperError
+      }
+    }
+
     func requestShutdown() -> Bool {
       requestShutdownCount += 1
       return shutdownAccepted
@@ -1253,6 +1379,7 @@
       journal: @escaping @Sendable (Data) -> Void
     ) async throws -> CompletionDisplay {
       executeCount += 1
+      calls.append("execute")
       lastEncryptLinuxDisk = encryptLinuxDisk
       savedJournal = journal
       await executeGate?.wait()

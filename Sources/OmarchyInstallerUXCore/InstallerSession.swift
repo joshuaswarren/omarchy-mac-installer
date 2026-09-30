@@ -155,7 +155,7 @@
         && !hasExecutionStarted
         && environment.engineSupported
         && environment.hasApprovedPlan
-        && helper.isCurrent
+        && helper.isReady
         && prefetchState == .verified
     }
 
@@ -166,7 +166,7 @@
         && !isExecuting
         && environment.engineSupported
         && environment.hasApprovedPlan
-        && environment.helperStatus.isCurrent
+        && environment.helperStatus.isReady
     }
 
     // MARK: Inspection
@@ -438,7 +438,8 @@
         sheet: .presented(
           CredentialSheetContext(
             kind: .install,
-            bindingDigest: plan.bindingDigest
+            bindingDigest: plan.bindingDigest,
+            mentionsBackgroundItem: helper.willInstall
           )
         )
       )
@@ -455,7 +456,8 @@
       retrySheet = .presented(
         CredentialSheetContext(
           kind: .retryRecoveryAuthorization,
-          bindingDigest: ""
+          bindingDigest: "",
+          mentionsBackgroundItem: environment.helperStatus.willInstall
         )
       )
     }
@@ -522,6 +524,9 @@
       defer { isExecuting = false }
 
       do {
+        // Helper setup comes first: it checks the credentials in the app and
+        // installs or replaces the helper, before anything is submitted.
+        try await environment.ensureHelper(authorization)
         if prefetchState != .verified {
           try await environment.waitUntilPayloadVerified()
           prefetchState = .verified
@@ -577,11 +582,7 @@
         if context.kind == .install {
           hasExecutionStarted = false
         }
-        let rejected = CredentialSheetContext(
-          kind: context.kind,
-          bindingDigest: context.bindingDigest,
-          error: .credentialsRejected
-        )
+        let rejected = context.failed(.credentialsRejected)
         if context.kind == .install, let plan {
           phase = .awaitingInstall(
             plan,
@@ -596,6 +597,28 @@
               retryRecoveryAvailable: recoveryRetryAvailable
             )
           )
+        }
+        return
+      }
+
+      if let setup = error as? InstallerHelperSetupError {
+        // Helper setup runs before anything is submitted, so no execution
+        // began. Like rejected credentials, this releases the latch and
+        // reopens the sheet so the person can try again.
+        if context.kind == .install {
+          hasExecutionStarted = false
+        }
+        let sheetError: CredentialSheetError =
+          switch setup {
+          case .cancelled: .helperSetupCancelled
+          case .switchedOff: .helperSwitchedOff
+          case .unavailable, .failed: .helperSetupFailed
+          }
+        let reopened = context.failed(sheetError)
+        if context.kind == .install, let plan {
+          phase = .awaitingInstall(plan, helper: helper, sheet: .presented(reopened))
+        } else {
+          retrySheet = .presented(reopened)
         }
         return
       }
