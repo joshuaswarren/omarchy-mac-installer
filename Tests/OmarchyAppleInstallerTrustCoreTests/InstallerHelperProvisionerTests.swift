@@ -118,6 +118,74 @@
       XCTAssertEqual(blesser.calls, [.silent("owner")])
     }
 
+    func testHelperReportingAnotherBuildIsReplaced() async {
+      let probe = FakeProbe(registered: true, version: "27", installsVersion: "28")
+      let blesser = FakeBlesser(silent: .blessed, installing: probe)
+      let outcome = await provisioner(probe, blesser: blesser, bundled: "28").ensureCurrent(owner)
+      XCTAssertEqual(outcome, .installedSilently)
+      XCTAssertEqual(blesser.calls, [.silent("owner")])
+      let status = await provisioner(probe, bundled: "28").probeStatus()
+      XCTAssertEqual(status, .current)
+    }
+
+    func testReplacementThatLeavesTheOldBuildAnsweringFails() async {
+      let probe = FakeProbe(registered: true, version: nil, installsVersion: "27")
+      let blesser = FakeBlesser(silent: .blessed, installing: probe)
+      let outcome = await provisioner(probe, blesser: blesser, bundled: "28").ensureCurrent(owner)
+      XCTAssertEqual(outcome, .failed("The helper was installed but an older build still answers."))
+    }
+
+    // MARK: Bundled version
+
+    func testBundledVersionComesFromTheHelpersEmbeddedInfoPlist() throws {
+      // A macOS tool that carries a linked Info.plist stands in for the helper.
+      let donor = URL(fileURLWithPath: "/usr/bin/automator")
+      guard
+        let expected = (CFBundleCopyInfoDictionaryForURL(donor as CFURL) as? [String: Any])?[
+          "CFBundleVersion"] as? String
+      else {
+        throw XCTSkip("no system tool with an embedded Info.plist")
+      }
+      let app = try makeAppBundle()
+      defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+      try FileManager.default.copyItem(at: donor, to: helperURL(in: app))
+
+      XCTAssertEqual(
+        InstallerHelperProvisioner.bundledHelperVersion(in: try XCTUnwrap(Bundle(url: app))),
+        expected)
+    }
+
+    func testBundledVersionIsNilWithoutAHelperOrItsVersion() throws {
+      let app = try makeAppBundle()
+      defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+      let bundle = try XCTUnwrap(Bundle(url: app))
+      XCTAssertNil(InstallerHelperProvisioner.bundledHelperVersion(in: bundle))
+
+      let script = helperURL(in: app)
+      try Data("#!/bin/sh\n".utf8).write(to: script)
+      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+      XCTAssertNil(InstallerHelperProvisioner.bundledHelperVersion(in: bundle))
+    }
+
+    private func makeAppBundle() throws -> URL {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+      let app = root.appendingPathComponent("Probe.app", isDirectory: true)
+      let services = app.appendingPathComponent(
+        "Contents/Library/LaunchServices", isDirectory: true)
+      try FileManager.default.createDirectory(at: services, withIntermediateDirectories: true)
+      let info = try PropertyListSerialization.data(
+        fromPropertyList: ["CFBundleIdentifier": "probe.app", "CFBundlePackageType": "APPL"],
+        format: .xml, options: 0)
+      try info.write(to: app.appendingPathComponent("Contents/Info.plist"))
+      return app
+    }
+
+    private func helperURL(in app: URL) -> URL {
+      app.appendingPathComponent("Contents/Library/LaunchServices", isDirectory: true)
+        .appendingPathComponent(InstallerProductIdentity.helperIdentifier, isDirectory: false)
+    }
+
     // MARK: Shipping pieces
 
     func testSystemProbeChecksTheCanonicalSystemLaunchDaemonPath() {

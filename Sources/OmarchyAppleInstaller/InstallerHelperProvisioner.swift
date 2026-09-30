@@ -111,6 +111,25 @@
       self.bundledHelperVersion = bundledHelperVersion
     }
 
+    /// The build of the helper an app bundle carries: the `CFBundleVersion`
+    /// of the Info.plist linked into the helper binary. Nil when the bundle
+    /// has no helper there or the helper carries no version.
+    public static func bundledHelperVersion(
+      in bundle: Bundle = .main,
+      label: String = InstallerProductIdentity.helperIdentifier
+    ) -> String? {
+      let helper = bundle.bundleURL
+        .appendingPathComponent("Contents/Library/LaunchServices", isDirectory: true)
+        .appendingPathComponent(label, isDirectory: false)
+      guard FileManager.default.isExecutableFile(atPath: helper.path),
+        let info = CFBundleCopyInfoDictionaryForURL(helper as CFURL) as? [String: Any],
+        let version = info["CFBundleVersion"] as? String, !version.isEmpty
+      else {
+        return nil
+      }
+      return version
+    }
+
     /// The synchronous status the screens show: missing, or current as far as
     /// the job file tells. `probeStatus()` refines current into outdated or
     /// disabled.
@@ -155,7 +174,7 @@
       }
       switch await blesser.blessSilently(with: authorization) {
       case .blessed:
-        return await confirmAnswering(.installedSilently)
+        return await confirmCurrent(.installedSilently)
       case .refused:
         break
       case .cancelled:
@@ -167,7 +186,7 @@
       }
       switch await blesser.blessWithDialog() {
       case .blessed:
-        return await confirmAnswering(.installedWithDialog)
+        return await confirmCurrent(.installedWithDialog)
       case .refused, .cancelled:
         return .cancelled
       case .unavailable:
@@ -177,10 +196,19 @@
       }
     }
 
-    private func confirmAnswering(
+    /// After installing, the bundled build must be the one answering: a
+    /// helper that is silent, or still reports another build, is a failure.
+    private func confirmCurrent(
       _ outcome: InstallerHelperProvisioningOutcome
     ) async -> InstallerHelperProvisioningOutcome {
-      await probe.answers() ? outcome : .failed("The helper was installed but does not answer.")
+      switch await probeStatus() {
+      case .current:
+        return outcome
+      case .outdated:
+        return .failed("The helper was installed but an older build still answers.")
+      case .missing, .disabled:
+        return .failed("The helper was installed but does not answer.")
+      }
     }
   }
 

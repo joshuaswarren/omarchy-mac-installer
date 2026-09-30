@@ -30,7 +30,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
       blesser: canInstall
         ? SMJobBlessInstallerHelperBlesser() : UnavailableInstallerHelperBlesser(),
       credentialValidator: OpenDirectoryAdministratorCredentialValidator(),
-      bundledHelperVersion: nil
+      bundledHelperVersion: InstallerHelperProvisioner.bundledHelperVersion()
     )
   }
 
