@@ -2,7 +2,7 @@
 # Package the notarized, stapled app as the download: a zip holding exactly
 # the app bundle. Safari unpacks it in Downloads and the app runs from there.
 #
-# Usage: make-download-zip.sh '/absolute/path/Omarchy Installer.app' /absolute/path/out.zip
+# Usage: make-download-zip.sh /absolute/path/<app name>.app /absolute/path/out.zip
 #
 # The app must already carry a stapled notarization ticket (see
 # notarize-app.sh). OMARCHY_DOWNLOAD_ZIP_UNSTAPLED=1 skips that check for
