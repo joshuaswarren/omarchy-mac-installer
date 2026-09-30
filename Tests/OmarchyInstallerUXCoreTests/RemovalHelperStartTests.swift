@@ -13,6 +13,18 @@
         RemovalHelperStart(helper: HelperDisplay(status: .disabled, canInstall: false)), .scan)
     }
 
+    func testABlockedModelNeverSetsUpTheHelper() {
+      for status in [InstallerHelperStatus.current, .outdated, .disabled, .missing] {
+        for canInstall in [true, false] {
+          XCTAssertEqual(
+            RemovalHelperStart(
+              helper: HelperDisplay(status: status, canInstall: canInstall), blockedModel: true),
+            .blockedModel, "\(status) canInstall=\(canInstall)")
+        }
+      }
+      XCTAssertTrue(PlainLanguage.removalBlockedModel.hasSuffix("No disk changes were made."))
+    }
+
     func testACurrentHelperScansRightAway() {
       for canInstall in [true, false] {
         XCTAssertEqual(

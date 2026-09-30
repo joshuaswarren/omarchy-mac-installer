@@ -348,7 +348,15 @@ struct OmarchyRemovalSheet: View {
       }
     #endif
     if !keepingAccount {
-      switch RemovalHelperStart(helper: await InstallerHelperSetup.probeDisplay()) {
+      // An unreadable model counts as blocked: nothing privileged is set up
+      // without knowing the Mac is one the installer allows.
+      let blocked = (try? AppleSiliconHostInspector().isBlockedModel()) ?? true
+      switch RemovalHelperStart(
+        helper: await InstallerHelperSetup.probeDisplay(), blockedModel: blocked)
+      {
+      case .blockedModel:
+        message = PlainLanguage.removalBlockedModel
+        return
       case .scan:
         break
       case .credentialsFirst:

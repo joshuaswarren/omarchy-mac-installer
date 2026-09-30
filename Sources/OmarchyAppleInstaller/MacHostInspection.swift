@@ -78,6 +78,13 @@
       self.operatingSystem = operatingSystem
     }
 
+    /// Just the model check, without the storage and power probes: whether
+    /// this Mac is one the installer refuses outright. Used before anything
+    /// privileged is set up, such as the removal sheet's helper.
+    public func isBlockedModel() throws -> Bool {
+      Self.explicitlyUnsupportedDevices.contains(try inspectIdentity().deviceIdentifier)
+    }
+
     public func inspect() throws -> AppleSiliconHostInspection {
       let identity = try inspectIdentity()
       let storage = try ReadOnlyStorageProbe(commands: commands).inspect()
