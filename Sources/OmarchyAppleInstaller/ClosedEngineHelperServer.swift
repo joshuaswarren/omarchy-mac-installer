@@ -39,6 +39,7 @@
     private let removalDisks: any RemovalDiskOperating
     private let removalAdminValidator: @Sendable (MachineOwnerAuthorization) throws -> Void
     private let espDisks: any InstallConfESPDiskOperating
+    private let selfUninstaller: any HelperSelfUninstalling
     private var isExecuting = false
     private var completedInstallPlan: CompletedEngineInstallPlan?
     private var installConfConsumed = false
@@ -49,7 +50,8 @@
       workingDirectory: URL,
       executor: any ImportedEngineHandoffExecuting,
       credentialValidator: any MachineOwnerCredentialValidating =
-        OpenDirectoryMachineOwnerCredentialValidator()
+        OpenDirectoryMachineOwnerCredentialValidator(),
+      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall()
     ) {
       self.workingDirectory = workingDirectory
       self.executor = executor
@@ -58,6 +60,7 @@
       removalDisks = MacRemovalDiskOperator()
       removalAdminValidator = requireRemovalAdministrator
       espDisks = DiskutilInstallConfESPOperator()
+      self.selfUninstaller = selfUninstaller
     }
 
     init(
@@ -65,7 +68,8 @@
       credentialValidator: any MachineOwnerCredentialValidating,
       removalDisks: any RemovalDiskOperating,
       removalAdminValidator: @escaping @Sendable (MachineOwnerAuthorization) throws -> Void,
-      espDisks: any InstallConfESPDiskOperating = DiskutilInstallConfESPOperator()
+      espDisks: any InstallConfESPDiskOperating = DiskutilInstallConfESPOperator(),
+      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall()
     ) {
       self.workingDirectory = workingDirectory
       self.executor = executor
@@ -74,6 +78,7 @@
       self.removalDisks = removalDisks
       self.removalAdminValidator = removalAdminValidator
       self.espDisks = espDisks
+      self.selfUninstaller = selfUninstaller
     }
 
     public func removal(
@@ -106,6 +111,7 @@
       // One use only, including failures. A fresh review must obtain a new plan.
       removalPlan = nil
       let validator = credentialValidator
+      let selfUninstaller = self.selfUninstaller
       let workingDirectory = self.workingDirectory
       let journalURL = workingDirectory.appendingPathComponent(
         "removal-\(approved.ticket.id.uuidString).json")
@@ -145,6 +151,9 @@
             message +=
               " The installer couldn’t clear its record of the earlier installation, so installing again at the same size may not work."
           }
+          // Nothing of Omarchy is left, so the helper goes too, once this
+          // reply has reached the app.
+          selfUninstaller.uninstallAfterRemoval()
           return OmarchyRemovalReply(completed: true, message: message)
         } catch {
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."

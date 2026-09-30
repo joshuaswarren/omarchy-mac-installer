@@ -824,6 +824,27 @@
       XCTAssertEqual(try Data(contentsOf: kept), finished)
     }
 
+    func testOnlyACompletedRemovalUninstallsTheHelper() async throws {
+      for (failAt, uninstalls) in [(Int?.none, 1), (3, 0)] {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uninstaller = RecordingSelfUninstaller()
+        let service = ClosedEngineHelperServer(
+          workingDirectory: root, executor: UnusedRemovalHandoffExecutor(),
+          credentialValidator: RemovalCredentials(reject: false),
+          removalDisks: failAt.map { FakeRemovalDisk(failAt: $0) } ?? FakeRemovalDisk(),
+          removalAdminValidator: { _ in }, selfUninstaller: uninstaller)
+        let inspection = try await service.removal(
+          ticketID: nil, confirmation: "", authorization: nil)
+        XCTAssertEqual(uninstaller.calls, 0, "inspecting never uninstalls")
+        let ticket = try XCTUnwrap(inspection.ticket)
+        let result = try await service.removal(
+          ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+        XCTAssertEqual(result.completed, uninstalls == 1, result.message)
+        XCTAssertEqual(uninstaller.calls, uninstalls, "failAt \(String(describing: failAt))")
+      }
+    }
+
     func testFailedRemovalKeepsInstallJournals() async throws {
       let root = try temporaryDirectory()
       defer { try? FileManager.default.removeItem(at: root) }
@@ -1156,5 +1177,12 @@
     func growContainer(_ macOS: RemovalPartition, disk: String) throws {
       try self.disk.growContainer(macOS, disk: disk)
     }
+  }
+
+  private final class RecordingSelfUninstaller: HelperSelfUninstalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    func uninstallAfterRemoval() { lock.withLock { count += 1 } }
   }
 #endif
