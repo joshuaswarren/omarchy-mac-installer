@@ -136,10 +136,24 @@ struct OmarchyRemovalSheet: View {
             .foregroundStyle(OmarchyTheme.secondaryText)
         }
       #endif
-      Text(message)
+      if reenablingHelper && needsAccountFirst && !busy {
+        // The same caution callout as the authorize sheet, so a switched-off
+        // helper is not mistaken for the ordinary first-time account step.
+        HStack(alignment: .top, spacing: 8) {
+          Image(systemName: "switch.2")
+          Text(message)
+        }
         .font(OmarchyTheme.body)
+        .foregroundStyle(OmarchyTheme.caution)
         .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("removal-message")
+      } else {
+        Text(message)
+          .font(OmarchyTheme.body)
+          .fixedSize(horizontal: false, vertical: true)
+          .accessibilityIdentifier("removal-message")
+      }
       if let ticket, !submitted {
         VStack(alignment: .leading, spacing: 10) {
           if let step = ticket.startupDisk {
