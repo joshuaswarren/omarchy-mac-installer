@@ -126,13 +126,16 @@
     /// System Settings → General → Login Items & Extensions.
     public static let loginItemsSettingsURL = URL(
       string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
+    public static let helperBeingReplacedHeadline = "The installation service is being updated"
+    public static let helperBeingReplacedDetail =
+      "Another copy of the installer is replacing the installation service, so this request didn't start and nothing was changed. Try again in a moment."
     public static let helperRetiringHeadline = "The installation service was just removed"
     public static let helperRetiringDetail =
       "Omarchy's removal finished and its installation service is removing itself. Nothing was changed. Try again in a moment; the app sets the service up again with your password."
     public static let authorizeNotAdministrator =
       "This account isn’t a macOS administrator, and setting up the installation service needs one. Use an administrator account."
     public static let authorizeHelperBusy =
-      "The installation service is busy with another request, so nothing was changed. Try again when it finishes."
+      "The installation service is busy with another request, so nothing was changed. Try again when it finishes. If it stays busy, an installation or removal may still be running, perhaps in another user’s session: let it finish, and don’t restart or shut down this Mac while it runs."
     public static let authorizeHelperFailed =
       "The installation service couldn’t be set up, so nothing was changed. Try again."
 
@@ -585,6 +588,14 @@
         case .engineFailed(let notice):
           return engineFailure(notice, technicalDetail: technical)
         case .helperRejected(let domain, let code):
+          let replaced = ClosedEngineHelperError.beingReplaced as NSError
+          if domain == replaced.domain, code == replaced.code {
+            return FailureDisplay(
+              headline: PlainLanguage.helperBeingReplacedHeadline,
+              plainDetail: PlainLanguage.helperBeingReplacedDetail,
+              technicalDetail: technical
+            )
+          }
           let retiring = ClosedEngineHelperError.retiring as NSError
           if domain == retiring.domain, code == retiring.code {
             return FailureDisplay(
@@ -624,6 +635,12 @@
 
       if let helper = error as? ClosedEngineHelperError {
         switch helper {
+        case .beingReplaced:
+          return FailureDisplay(
+            headline: PlainLanguage.helperBeingReplacedHeadline,
+            plainDetail: PlainLanguage.helperBeingReplacedDetail,
+            technicalDetail: technical
+          )
         case .retiring:
           return FailureDisplay(
             headline: PlainLanguage.helperRetiringHeadline,

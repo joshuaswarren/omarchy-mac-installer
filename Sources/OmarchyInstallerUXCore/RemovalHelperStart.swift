@@ -97,7 +97,7 @@
     public static let removalNotStarted =
       "The removal service didn’t answer, so removal didn’t start. No disk changes were made. Close this window and try again."
     public static let removalServiceBusy =
-      "The removal service is busy with another request. Close this window and try again when it finishes. No disk changes were made."
+      "The removal service is busy with another request. Close this window and try again when it finishes. If it stays busy, an installation or removal may still be running, perhaps in another user’s session: let it finish, and don’t restart or shut down this Mac while it runs. No disk changes were made."
     public static let removalBlockedModel =
       "Removal is not supported on this Mac model. No disk changes were made."
     public static let removalSwitchedOff =

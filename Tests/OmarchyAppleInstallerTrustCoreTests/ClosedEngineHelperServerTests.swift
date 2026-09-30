@@ -68,6 +68,61 @@
       XCTAssertEqual(summary, "not installed by SMJobBless; nothing changed")
     }
 
+    func testWorkAndReplacementNeverBothGoAhead() throws {
+      let work = HelperWorkState()
+      try work.beginJob()
+      XCTAssertFalse(work.beginReplacement(), "a running job is never cut short")
+      XCTAssertThrowsError(try work.beginJob()) {
+        XCTAssertEqual($0 as? ClosedEngineHelperError, .busy)
+      }
+      work.endJob()
+      XCTAssertTrue(work.beginReplacement())
+      XCTAssertThrowsError(try work.beginJob(), "no job starts once replacement is agreed") {
+        XCTAssertEqual($0 as? ClosedEngineHelperError, .beingReplaced)
+      }
+      work.cancelReplacement()
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testAReplacementThatNeverHappensLapses() throws {
+      let work = HelperWorkState(replacementLapse: 0)
+      XCTAssertTrue(work.beginReplacement())
+      Thread.sleep(forTimeInterval: 0.01)
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testTheEndpointAgreesToReplacementOnlyWhenIdle() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let work = HelperWorkState()
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator(),
+        removalDisks: UnusedRemovalDisks(), removalAdminValidator: { _ in },
+        work: work)
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      func prepare() async -> Bool {
+        await withCheckedContinuation { c in
+          endpoint.prepareForReplacement { c.resume(returning: $0) }
+        }
+      }
+      try work.beginJob()
+      let whileWorking = await prepare()
+      XCTAssertFalse(whileWorking)
+      work.endJob()
+      let whenIdle = await prepare()
+      XCTAssertTrue(whenIdle)
+      do {
+        _ = try await server.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("a helper being replaced takes no new work")
+      } catch let error as ClosedEngineHelperError {
+        XCTAssertEqual(error, .beingReplaced)
+      }
+      await withCheckedContinuation { c in endpoint.cancelReplacement { c.resume() } }
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
     func testEndpointRetiresPackageInstalledAppsAndSummarizes() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }

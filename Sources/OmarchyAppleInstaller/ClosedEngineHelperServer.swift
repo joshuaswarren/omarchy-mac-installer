@@ -31,6 +31,68 @@
     /// no more work. The app sets up a fresh helper for the next action.
     /// Last, so the bridged error codes of the earlier cases never change.
     case retiring
+    /// An app from another build is replacing this helper; it takes no new
+    /// work meanwhile, so replacing it can never cut a job short.
+    case beingReplaced
+  }
+
+  /// Whether the helper is idle, working on a job, or agreed to be replaced.
+  /// One lock decides it, so "may it be replaced?" and "may this job start?"
+  /// can never both say yes.
+  final class HelperWorkState: @unchecked Sendable {
+    private enum Phase {
+      case idle
+      case working
+      case replacing(since: Date)
+    }
+
+    private let lock = NSLock()
+    private var phase = Phase.idle
+    /// A replacement that never happened (a cancelled dialog, a crashed app)
+    /// stops blocking work after this long.
+    private let replacementLapse: TimeInterval
+
+    init(replacementLapse: TimeInterval = 120) {
+      self.replacementLapse = replacementLapse
+    }
+
+    func beginJob() throws {
+      try lock.withLock {
+        switch phase {
+        case .idle:
+          phase = .working
+        case .working:
+          throw ClosedEngineHelperError.busy
+        case .replacing(let since):
+          guard Date().timeIntervalSince(since) > replacementLapse else {
+            throw ClosedEngineHelperError.beingReplaced
+          }
+          phase = .working
+        }
+      }
+    }
+
+    func endJob() {
+      lock.withLock {
+        if case .working = phase { phase = .idle }
+      }
+    }
+
+    /// True when no job runs; from then on no job starts until the
+    /// replacement is cancelled or lapses.
+    func beginReplacement() -> Bool {
+      lock.withLock {
+        if case .working = phase { return false }
+        phase = .replacing(since: Date())
+        return true
+      }
+    }
+
+    func cancelReplacement() {
+      lock.withLock {
+        if case .replacing = phase { phase = .idle }
+      }
+    }
   }
 
   /// A flag set once and read from any thread.
@@ -52,7 +114,8 @@
     private let removalAdminValidator: @Sendable (MachineOwnerAuthorization) throws -> Void
     private let espDisks: any InstallConfESPDiskOperating
     private let selfUninstaller: any HelperSelfUninstalling
-    private var isExecuting = false
+    /// Jobs and replacement share this state; see `HelperWorkState`.
+    nonisolated let work: HelperWorkState
     /// Set once a removal completes: the helper is uninstalling itself. Kept
     /// outside the actor so ping and the version check can read it at once,
     /// even while the actor is busy verifying a payload for a long job.
@@ -73,6 +136,7 @@
       self.workingDirectory = workingDirectory
       self.executor = executor
       self.credentialValidator = credentialValidator
+      work = HelperWorkState()
       importer = EngineHandoffPackageImporter()
       removalDisks = MacRemovalDiskOperator()
       removalAdminValidator = requireRemovalAdministrator
@@ -86,11 +150,13 @@
       removalDisks: any RemovalDiskOperating,
       removalAdminValidator: @escaping @Sendable (MachineOwnerAuthorization) throws -> Void,
       espDisks: any InstallConfESPDiskOperating = DiskutilInstallConfESPOperator(),
-      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall()
+      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall(),
+      work: HelperWorkState = HelperWorkState()
     ) {
       self.workingDirectory = workingDirectory
       self.executor = executor
       self.credentialValidator = credentialValidator
+      self.work = work
       importer = EngineHandoffPackageImporter()
       self.removalDisks = removalDisks
       self.removalAdminValidator = removalAdminValidator
@@ -102,10 +168,9 @@
       ticketID: UUID?, confirmation: String, authorization: MachineOwnerAuthorization?
     ) async throws -> OmarchyRemovalReply {
       guard !isRetiring else { throw ClosedEngineHelperError.retiring }
-      guard !isExecuting else { throw ClosedEngineHelperError.busy }
+      try work.beginJob()
+      defer { work.endJob() }
       try requireNoInterruptedRemoval()
-      isExecuting = true
-      defer { isExecuting = false }
       let disks = removalDisks
       let validateAdministrator = removalAdminValidator
       if ticketID == nil {
@@ -227,12 +292,9 @@
       progress: (any EngineJournalProgressSink)? = nil
     ) async throws -> Data {
       guard !isRetiring else { throw ClosedEngineHelperError.retiring }
-      guard !isExecuting else {
-        throw ClosedEngineHelperError.busy
-      }
+      try work.beginJob()
+      defer { work.endJob() }
       try requireNoInterruptedRemoval()
-      isExecuting = true
-      defer { isExecuting = false }
 
       do {
         try InstallerPerformance.measure("credential_validation") {
@@ -335,7 +397,8 @@
       authorization: MachineOwnerAuthorization
     ) async throws {
       guard !isRetiring else { throw ClosedEngineHelperError.retiring }
-      guard !isExecuting else { throw ClosedEngineHelperError.busy }
+      try work.beginJob()
+      defer { work.endJob() }
       do {
         try credentialValidator.validate(authorization)
       } catch {
@@ -353,8 +416,6 @@
       else {
         throw ClosedEngineHelperError.installConfTargetMismatch
       }
-      isExecuting = true
-      defer { isExecuting = false }
       let conf = try InstallConf.parse(document)
       let disks = espDisks
       let workingDirectory = self.workingDirectory
@@ -438,6 +499,17 @@
 
     public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
       reply(server.isRetiring ? "" : version)
+    }
+
+    /// Answers at once: yes if no job runs, and from then on no job starts,
+    /// so the caller can replace this helper without cutting a job short.
+    public func prepareForReplacement(reply: @escaping @Sendable (Bool) -> Void) {
+      reply(server.work.beginReplacement())
+    }
+
+    public func cancelReplacement(reply: @escaping @Sendable () -> Void) {
+      server.work.cancelReplacement()
+      reply()
     }
 
     public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {

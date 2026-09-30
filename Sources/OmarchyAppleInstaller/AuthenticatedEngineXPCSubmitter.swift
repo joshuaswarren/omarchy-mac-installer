@@ -19,6 +19,13 @@
     /// See `PackageInstalledAppRetirement`.
     func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void)
 
+    /// Yes if no job runs; the helper then refuses new jobs until it is
+    /// replaced, the replacement is cancelled, or it lapses. Helpers older
+    /// than this call never answer it.
+    func prepareForReplacement(reply: @escaping @Sendable (Bool) -> Void)
+
+    func cancelReplacement(reply: @escaping @Sendable () -> Void)
+
     func removal(
       ticket: String, confirmation: String, machineOwner: String, password: Data,
       reply: @escaping @Sendable (Data?, NSError?) -> Void
@@ -188,6 +195,66 @@
         return .answered
       }
       return timedOut.isSet ? .noAnswer : .refused
+    }
+
+    /// Nil when the helper doesn't answer in time, as helpers older than the
+    /// call never do.
+    public func prepareForReplacement(timeout: Duration = .seconds(3)) async -> Bool? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      return await withCheckedContinuation { continuation in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.prepareForReplacement { granted in
+          gate.resume(returning: granted)
+          connectionHandle.invalidate()
+        }
+      }
+    }
+
+    public func cancelReplacement(timeout: Duration = .seconds(3)) async {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.cancelReplacement {
+          gate.resume(returning: true)
+          connectionHandle.invalidate()
+        }
+      }
     }
 
     /// Asks the helper to remove the installer app the package left behind.

@@ -888,7 +888,7 @@
         (.invalidMachineOwnerCredentials, 3), (.invalidClientRequirement, 4),
         (.transcriptDeviceMismatch, 5), (.transcriptIncomplete, 6), (.transcriptPlanMismatch, 7),
         (.installConfPlanIncomplete, 8), (.installConfTargetMismatch, 9),
-        (.installConfReplay, 10), (.retiring, 11),
+        (.installConfReplay, 10), (.retiring, 11), (.beingReplaced, 12),
       ]
       for (error, code) in codes {
         XCTAssertEqual((error as NSError).code, code, "\(error)")

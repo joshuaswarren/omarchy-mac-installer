@@ -22,6 +22,12 @@
   }
 
   /// What `InstallerHelperProvisioner.ensureCurrent` did.
+  extension InstallerHelperProvisioningOutcome {
+    var installed: Bool {
+      self == .installedSilently || self == .installedWithDialog
+    }
+  }
+
   public enum InstallerHelperProvisioningOutcome: Equatable, Sendable {
     /// The helper was already current; nothing was installed.
     case alreadyCurrent
@@ -57,6 +63,12 @@
     var isRegistered: Bool { get }
     /// How the helper answered a ping: yes, refused quickly, or not in time.
     func ping() async -> AuthenticatedEngineXPCSubmitter.PingResult
+    /// True if the installed helper agrees to be replaced (no job runs, and
+    /// it starts none meanwhile), false if it is working, nil if it can't
+    /// be asked.
+    func prepareForReplacement() async -> Bool?
+    /// Lets a helper that agreed to be replaced take work again.
+    func cancelReplacement() async
     /// Whether launchd has the helper's job loaded. Switching the helper off in
     /// Login Items unloads the job but leaves its file, while a helper from
     /// another build stays loaded and refuses this app.
@@ -213,7 +225,8 @@
       } catch {
         return .credentialsRejected
       }
-      switch await probeStatus() {
+      let status = await probeStatus()
+      switch status {
       case .current:
         return .alreadyCurrent
       case .disabled where !reenablingSwitchedOff:
@@ -228,6 +241,30 @@
       guard administrators.isAdministrator(authorization.username) else {
         return .notAdministrator
       }
+      // An installed helper is asked first: it agrees only when no job runs,
+      // and then starts none, so replacing it (which ends its engine too)
+      // never cuts a disk operation short. Older helpers can't be asked.
+      var agreedToBeReplaced = false
+      if status == .outdated {
+        switch await probe.prepareForReplacement() {
+        case false?:
+          return .busy
+        case true?:
+          agreedToBeReplaced = true
+        case nil:
+          break
+        }
+      }
+      let outcome = await bless(authorization)
+      if agreedToBeReplaced, !outcome.installed {
+        await probe.cancelReplacement()
+      }
+      return outcome
+    }
+
+    private func bless(
+      _ authorization: MachineOwnerAuthorization
+    ) async -> InstallerHelperProvisioningOutcome {
       switch await blesser.blessSilently(with: authorization) {
       case .blessed:
         return await confirmCurrent(.installedSilently)
@@ -343,6 +380,17 @@
         return nil
       }
       return await submitter.helperVersion()
+    }
+
+    public func prepareForReplacement() async -> Bool? {
+      guard let submitter = try? submitter() else {
+        return nil
+      }
+      return await submitter.prepareForReplacement()
+    }
+
+    public func cancelReplacement() async {
+      await (try? submitter())?.cancelReplacement()
     }
   }
 #endif

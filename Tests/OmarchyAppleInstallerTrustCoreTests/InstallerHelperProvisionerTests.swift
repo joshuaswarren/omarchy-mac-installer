@@ -136,6 +136,44 @@
       XCTAssertEqual(blesser.calls, [])
     }
 
+    func testAWorkingHelperOfAnotherBuildIsNotReplaced() async {
+      // Second review: it answers instantly while its engine works; replacing
+      // it would end the engine mid-operation.
+      let blesser = FakeBlesser(silent: .blessed)
+      let outcome = await provisioner(
+        FakeProbe(registered: true, version: "27", replacement: false), blesser: blesser
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .busy)
+      XCTAssertEqual(blesser.calls, [])
+    }
+
+    func testAHelperThatAgreedIsReplacedAndNotReleased() async {
+      let probe = FakeProbe(
+        registered: true, version: "27", installsVersion: "28", replacement: true)
+      let outcome = await provisioner(
+        probe, blesser: FakeBlesser(silent: .blessed, installing: probe)
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .installedSilently)
+      XCTAssertEqual(probe.cancels, 0)
+    }
+
+    func testAHelperThatAgreedIsReleasedWhenTheReplacementDoesNotHappen() async {
+      let probe = FakeProbe(registered: true, version: "27", replacement: true)
+      let outcome = await provisioner(
+        probe, blesser: FakeBlesser(silent: .refused, dialog: .cancelled)
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .cancelled)
+      XCTAssertEqual(probe.cancels, 1, "it takes work again")
+    }
+
+    func testAnOlderHelperThatCannotBeAskedIsStillReplaced() async {
+      let probe = FakeProbe(registered: true, version: nil, installsVersion: "28", replacement: nil)
+      let outcome = await provisioner(
+        probe, blesser: FakeBlesser(silent: .blessed, installing: probe)
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .installedSilently)
+    }
+
     func testSwitchedOffHelperIsTurnedBackOnWhenThePersonChoseTo() async {
       let probe = FakeProbe(registered: true, answering: false, installsVersion: "28")
       let blesser = FakeBlesser(silent: .blessed, installing: probe)
@@ -353,6 +391,8 @@
     private var answering: Bool
     private let loaded: Bool
     private let slow: Bool
+    private let replacement: Bool?
+    private var cancelled = 0
     private var version: String?
     private let installsVersion: String?
     private var pingCount = 0
@@ -365,8 +405,9 @@
     ///   busy verifying a payload; otherwise a silent helper refuses at once.
     init(
       registered: Bool, answering: Bool = true, loaded: Bool = false, slow: Bool = false,
-      version: String? = nil, installsVersion: String? = nil
+      version: String? = nil, installsVersion: String? = nil, replacement: Bool? = nil
     ) {
+      self.replacement = replacement
       self.registered = registered
       self.loaded = loaded || slow
       self.slow = slow
@@ -385,6 +426,14 @@
         if answering { return .answered }
         return slow ? .noAnswer : .refused
       }
+    }
+
+    var cancels: Int { lock.withLock { cancelled } }
+
+    func prepareForReplacement() async -> Bool? { replacement }
+
+    func cancelReplacement() async {
+      lock.withLock { cancelled += 1 }
     }
 
     func isLoaded() async -> Bool {
