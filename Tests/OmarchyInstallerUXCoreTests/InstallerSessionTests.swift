@@ -695,6 +695,81 @@
         environment.calls, ["ensureHelper:owner", "execute", "ensureHelper:owner", "execute"])
     }
 
+    func testASwitchedOffHelperIsOfferedBackBeforeThePasswordIsTyped() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: true)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner:reenable", "execute"])
+    }
+
+    func testAnAnsweringHelperLeavesTheSheetAlone() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testABuildThatCannotInstallTheHelperDoesNotOfferToTurnItOn() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: false)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+    }
+
+    func testSwitchedOffFoundAtSubmitReopensTheSheetOfferingToTurnItOn() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.ensureHelperError = InstallerHelperSetupError.switchedOff
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.submit(try authorization())
+
+      XCTAssertEqual(session.credentialSheet.context?.error, .helperSwitchedOff)
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+      await session.submit(try authorization())
+      XCTAssertEqual(
+        environment.calls, ["ensureHelper:owner", "ensureHelper:owner:reenable", "execute"])
+    }
+
+    func testTheRecoveryRetrySheetIsOfferedTheSameChoice() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+        .success(MockInstallerEnvironment.recoveryCompletion),
+      ]
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: true)
+      session.presentRecoveryRetryCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.kind, .retryRecoveryAuthorization)
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+    }
+
     func testAnUnsupportedMacNeverReachesHelperSetup() async throws {
       let environment = MockInstallerEnvironment()
       environment.helper = HelperDisplay(status: .missing, canInstall: true)
@@ -1330,8 +1405,16 @@
 
     func refreshHelperStatus() -> HelperDisplay { helper }
 
-    func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {
-      calls.append("ensureHelper:\(authorization.username)")
+    /// What the helper itself reports; nil reports the registration status.
+    var probedHelper: HelperDisplay?
+
+    func probeHelperStatus() async -> HelperDisplay { probedHelper ?? helper }
+
+    func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws {
+      calls.append(
+        "ensureHelper:\(authorization.username)" + (reenablingSwitchedOff ? ":reenable" : ""))
       if let ensureHelperError {
         self.ensureHelperError = nil
         throw ensureHelperError

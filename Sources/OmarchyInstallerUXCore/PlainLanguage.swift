@@ -116,7 +116,16 @@
     public static let authorizeHelperCancelled =
       "The installation service wasn’t set up, so nothing was changed. Try again, and approve the macOS password prompt if it appears."
     public static let authorizeHelperSwitchedOff =
-      "The installation service is switched off. In System Settings, open General → Login Items & Extensions, switch it on under Allow in the Background, then try again."
+      "The installation service is switched off in Login Items. Turn it back on here with your password, or switch it on in Login Items and try again."
+    /// Shown on the sheet when the person switched the helper off.
+    public static let authorizeHelperSwitchedOffNotice =
+      "You switched the installation service off in Login Items, and \(windowTitle) needs it to change your disk. Authorizing turns it back on with the password you enter here; it’s removed along with Omarchy. You can switch it on in Login Items yourself instead."
+    public static let authorizeTurnOnAndInstall = "Turn On & Install"
+    public static let authorizeTurnOnAndRetry = "Turn On & Authorize"
+    public static let openLoginItems = "Open Login Items"
+    /// System Settings → General → Login Items & Extensions.
+    public static let loginItemsSettingsURL = URL(
+      string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
     public static let authorizeHelperFailed =
       "The installation service couldn’t be set up, so nothing was changed. Try again."
 

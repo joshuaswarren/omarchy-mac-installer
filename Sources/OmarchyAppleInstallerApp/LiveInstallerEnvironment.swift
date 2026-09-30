@@ -380,8 +380,15 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     helperStatus
   }
 
-  func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {
-    try await InstallerHelperSetup.ensure(authorization)
+  func probeHelperStatus() async -> HelperDisplay {
+    await InstallerHelperSetup.probeDisplay()
+  }
+
+  func ensureHelper(
+    _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+  ) async throws {
+    try await InstallerHelperSetup.ensure(
+      authorization, reenablingSwitchedOff: reenablingSwitchedOff)
   }
 
   // MARK: Shutdown

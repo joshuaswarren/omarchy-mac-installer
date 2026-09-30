@@ -104,7 +104,8 @@ struct OnePageInstallerView: View {
           onCancel: { session.dismissCredentials() },
           onSubmit: { authorization in
             Task { await session.submit(authorization) }
-          }
+          },
+          onCheckHelper: { await session.checkWhetherHelperIsSwitchedOff() }
         )
       }
     }

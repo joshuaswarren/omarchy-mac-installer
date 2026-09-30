@@ -169,6 +169,10 @@
     /// item notice.
     public var willInstall: Bool { canInstall && !isCurrent }
 
+    /// The person switched the helper off in Login Items, and this build can
+    /// turn it back on if they choose to.
+    public var canTurnBackOn: Bool { canInstall && status == .disabled }
+
     public init(status: InstallerHelperStatus, canInstall: Bool = false) {
       self.status = status
       self.canInstall = canInstall
@@ -426,32 +430,46 @@
     /// Authorizing will install the helper, so the sheet says macOS will show
     /// a background item notice.
     public let mentionsBackgroundItem: Bool
+    /// The helper is switched off in Login Items. The sheet says so, and
+    /// authorizing from it turns the helper back on with the typed password;
+    /// the person can open Login Items instead.
+    public let helperSwitchedOff: Bool
 
     public init(
       kind: InstallOperationKind,
       bindingDigest: String,
       error: CredentialSheetError? = nil,
       isVerifying: Bool = false,
-      mentionsBackgroundItem: Bool = false
+      mentionsBackgroundItem: Bool = false,
+      helperSwitchedOff: Bool = false
     ) {
       self.kind = kind
       self.bindingDigest = bindingDigest
       self.error = error
       self.isVerifying = isVerifying
       self.mentionsBackgroundItem = mentionsBackgroundItem
+      self.helperSwitchedOff = helperSwitchedOff
     }
 
     public func verifying() -> CredentialSheetContext {
       CredentialSheetContext(
         kind: kind, bindingDigest: bindingDigest, error: nil, isVerifying: true,
-        mentionsBackgroundItem: mentionsBackgroundItem)
+        mentionsBackgroundItem: mentionsBackgroundItem, helperSwitchedOff: helperSwitchedOff)
     }
 
     /// The same sheet, reopened with an error.
     public func failed(_ error: CredentialSheetError) -> CredentialSheetContext {
       CredentialSheetContext(
         kind: kind, bindingDigest: bindingDigest, error: error, isVerifying: false,
-        mentionsBackgroundItem: mentionsBackgroundItem)
+        mentionsBackgroundItem: mentionsBackgroundItem,
+        helperSwitchedOff: helperSwitchedOff || error == .helperSwitchedOff)
+    }
+
+    /// The same sheet, now knowing the helper is switched off.
+    public func withHelperSwitchedOff() -> CredentialSheetContext {
+      CredentialSheetContext(
+        kind: kind, bindingDigest: bindingDigest, error: error, isVerifying: isVerifying,
+        mentionsBackgroundItem: true, helperSwitchedOff: true)
     }
   }
 
@@ -486,12 +504,19 @@
     /// Re-reads whether the helper is registered and whether this build can
     /// install it.
     func refreshHelperStatus() -> HelperDisplay
+    /// Asks the helper itself, so a helper switched off in Login Items shows
+    /// as `.disabled`. Quick: a switched-off helper is not registered, so the
+    /// connection fails at once.
+    func probeHelperStatus() async -> HelperDisplay
     /// Makes the privileged helper ready for the action just authorized,
-    /// installing or replacing it with these credentials when needed. Called
-    /// before `execute`; it keeps no credential. Throws
+    /// installing or replacing it with these credentials when needed, and
+    /// turning a switched-off helper back on only when the person chose to.
+    /// Called before `execute`; it keeps no credential. Throws
     /// `EngineXPCSubmissionError.machineOwnerCredentialsRejected` when the
     /// credentials are wrong, and `InstallerHelperSetupError` otherwise.
-    func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws
+    func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws
     func execute(
       operation: InstallOperationKind,
       authorization: MachineOwnerAuthorization,

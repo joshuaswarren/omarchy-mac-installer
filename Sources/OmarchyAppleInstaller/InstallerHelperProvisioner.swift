@@ -173,8 +173,13 @@
     /// The typed credentials are checked locally first, so a typo never leads
     /// to a system dialog; macOS's dialog appears only when the credentials
     /// were right and macOS still refused to use them.
+    ///
+    /// - Parameter reenablingSwitchedOff: the person chose to turn a helper
+    ///   they switched off in Login Items back on. Without it a switched-off
+    ///   helper is left alone and reported as `.disabled`.
     public func ensureCurrent(
-      _ authorization: MachineOwnerAuthorization
+      _ authorization: MachineOwnerAuthorization,
+      reenablingSwitchedOff: Bool = false
     ) async -> InstallerHelperProvisioningOutcome {
       do {
         try credentialValidator.validate(authorization)
@@ -184,9 +189,9 @@
       switch await probeStatus() {
       case .current:
         return .alreadyCurrent
-      case .disabled:
+      case .disabled where !reenablingSwitchedOff:
         return .disabled
-      case .missing, .outdated:
+      case .missing, .outdated, .disabled:
         break
       }
       switch await blesser.blessSilently(with: authorization) {

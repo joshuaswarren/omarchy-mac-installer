@@ -94,6 +94,25 @@
       XCTAssertEqual(blesser.calls, [])
     }
 
+    func testSwitchedOffHelperIsTurnedBackOnWhenThePersonChoseTo() async {
+      let probe = FakeProbe(registered: true, answering: false, installsVersion: "28")
+      let blesser = FakeBlesser(silent: .blessed, installing: probe)
+      let outcome = await provisioner(probe, blesser: blesser)
+        .ensureCurrent(owner, reenablingSwitchedOff: true)
+      XCTAssertEqual(outcome, .installedSilently)
+      XCTAssertEqual(blesser.calls, [.silent("owner")])
+    }
+
+    func testChoosingToTurnItBackOnStillChecksThePasswordFirst() async {
+      let blesser = FakeBlesser(silent: .blessed)
+      let outcome = await provisioner(
+        FakeProbe(registered: true, answering: false), blesser: blesser,
+        validator: FakeValidator(accepts: false)
+      ).ensureCurrent(owner, reenablingSwitchedOff: true)
+      XCTAssertEqual(outcome, .credentialsRejected)
+      XCTAssertEqual(blesser.calls, [])
+    }
+
     func testInstalledHelperThatDoesNotAnswerFails() async {
       let blesser = FakeBlesser(silent: .blessed)
       let outcome = await provisioner(FakeProbe(registered: false), blesser: blesser)

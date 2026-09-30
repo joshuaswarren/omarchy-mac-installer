@@ -21,6 +21,8 @@ struct OmarchyRemovalSheet: View {
   /// No helper is installed yet: the account is asked for first, to set it
   /// up, and the same password then approves the removal.
   @State private var needsAccountFirst = false
+  /// The person switched the helper off; the account first turns it back on.
+  @State private var reenablingHelper = false
   @State private var contentHeight: CGFloat = 0
   @State private var footerHeight: CGFloat = 0
   @State private var measuredHeightCap: CGFloat?
@@ -223,7 +225,14 @@ struct OmarchyRemovalSheet: View {
         .focusEffectDisabled()
         .disabled(busy)
         if needsAccountFirst && ticket == nil && !isSimulation {
-          Button(PlainLanguage.removalContinue) { Task { await setUpHelperThenScan() } }
+          if reenablingHelper {
+            Button(PlainLanguage.openLoginItems) {
+              NSWorkspace.shared.open(PlainLanguage.loginItemsSettingsURL)
+            }
+            .omarchySecondaryButton()
+            .focusEffectDisabled()
+          }
+          Button(continueTitle) { Task { await setUpHelperThenScan() } }
             .omarchyPrimaryButton()
             .keyboardShortcut(.defaultAction)
             .disabled(busy || username.isEmpty || password.isEmpty)
@@ -243,6 +252,10 @@ struct OmarchyRemovalSheet: View {
     .padding(.horizontal, 26)
     .padding(.top, 18)
     .padding(.bottom, 26)
+  }
+
+  private var continueTitle: String {
+    reenablingHelper ? PlainLanguage.removalTurnOnAndContinue : PlainLanguage.removalContinue
   }
 
   private var progressText: String {
@@ -321,12 +334,17 @@ struct OmarchyRemovalSheet: View {
       }
     #endif
     if !keepingAccount {
-      switch RemovalHelperStart(helper: InstallerHelperSetup.display) {
+      switch RemovalHelperStart(helper: await InstallerHelperSetup.probeDisplay()) {
       case .scan:
         break
       case .credentialsFirst:
         needsAccountFirst = true
         message = PlainLanguage.removalCredentialsFirst
+        return
+      case .switchedOff:
+        needsAccountFirst = true
+        reenablingHelper = true
+        message = PlainLanguage.removalSwitchedOff
         return
       case .unavailable:
         message = PlainLanguage.removalServiceMissing
@@ -360,7 +378,8 @@ struct OmarchyRemovalSheet: View {
     busy = true
     message = "Setting up the removal service…"
     do {
-      try await InstallerHelperSetup.ensure(authorization)
+      try await InstallerHelperSetup.ensure(
+        authorization, reenablingSwitchedOff: reenablingHelper)
     } catch {
       busy = false
       password = ""
@@ -369,6 +388,7 @@ struct OmarchyRemovalSheet: View {
     }
     busy = false
     needsAccountFirst = false
+    reenablingHelper = false
     await prepare(keepingAccount: true)
   }
 

@@ -462,6 +462,27 @@
       )
     }
 
+    /// Run by the credential sheet as it appears: asks the helper itself and,
+    /// when the person switched it off in Login Items, tells the sheet so it
+    /// can offer to turn it back on before the password is typed.
+    public func checkWhetherHelperIsSwitchedOff() async {
+      guard let context = credentialSheet.context, !context.helperSwitchedOff else {
+        return
+      }
+      let helper = await environment.probeHelperStatus()
+      guard helper.canTurnBackOn, let current = credentialSheet.context, current == context,
+        !current.isVerifying
+      else {
+        return
+      }
+      let marked = current.withHelperSwitchedOff()
+      if case .awaitingInstall(let plan, let shown, .presented) = phase {
+        phase = .awaitingInstall(plan, helper: shown, sheet: .presented(marked))
+      } else if case .presented = retrySheet {
+        retrySheet = .presented(marked)
+      }
+    }
+
     public func dismissCredentials() {
       guard !isExecuting else { return }
       retrySheet = .hidden
@@ -526,7 +547,8 @@
       do {
         // Helper setup comes first: it checks the credentials in the app and
         // installs or replaces the helper, before anything is submitted.
-        try await environment.ensureHelper(authorization)
+        try await environment.ensureHelper(
+          authorization, reenablingSwitchedOff: context.helperSwitchedOff)
         if prefetchState != .verified {
           try await environment.waitUntilPayloadVerified()
           prefetchState = .verified

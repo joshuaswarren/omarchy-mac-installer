@@ -22,6 +22,11 @@ enum InstallerHelperSetup {
     HelperDisplay(status: provisioner.registrationStatus, canInstall: canInstall)
   }
 
+  /// Asks the helper itself, so a switched-off helper shows as `.disabled`.
+  static func probeDisplay() async -> HelperDisplay {
+    HelperDisplay(status: await provisioner.probeStatus(), canInstall: canInstall)
+  }
+
   /// A connection to the helper from the bundled release configuration.
   @Sendable static func submitter() throws -> AuthenticatedEngineXPCSubmitter {
     let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
@@ -34,8 +39,12 @@ enum InstallerHelperSetup {
   /// Makes the helper ready for the action just authorized. Throws
   /// `EngineXPCSubmissionError.machineOwnerCredentialsRejected` for wrong
   /// credentials and `InstallerHelperSetupError` for everything else.
-  static func ensure(_ authorization: MachineOwnerAuthorization) async throws {
-    switch await provisioner.ensureCurrent(authorization) {
+  static func ensure(
+    _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool = false
+  ) async throws {
+    switch await provisioner.ensureCurrent(
+      authorization, reenablingSwitchedOff: reenablingSwitchedOff)
+    {
     case .alreadyCurrent, .installedSilently, .installedWithDialog:
       return
     case .credentialsRejected:

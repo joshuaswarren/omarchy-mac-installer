@@ -102,7 +102,10 @@
       HelperDisplay(status: scenario == .missingHelper ? .missing : .current)
     }
     public func refreshHelperStatus() -> HelperDisplay { helperStatus }
-    public func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {}
+    public func probeHelperStatus() async -> HelperDisplay { helperStatus }
+    public func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws {}
     public func cancel() { lock.withLock { cancelled = true } }
 
     private func tick() async throws {

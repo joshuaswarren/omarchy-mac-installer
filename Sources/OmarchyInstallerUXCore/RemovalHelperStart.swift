@@ -13,14 +13,20 @@
     case credentialsFirst
     /// No helper, and this build cannot install one.
     case unavailable
+    /// The person switched the helper off in Login Items: ask for the
+    /// account first and offer to turn it back on with it.
+    case switchedOff
 
+    /// - Parameter helper: the status from asking the helper itself, so a
+    ///   switched-off helper shows as `.disabled`.
     public init(helper: HelperDisplay) {
-      if helper.status != .missing {
+      switch helper.status {
+      case .current, .outdated:
         self = .scan
-      } else if helper.canInstall {
-        self = .credentialsFirst
-      } else {
-        self = .unavailable
+      case .disabled:
+        self = helper.canInstall ? .switchedOff : .scan
+      case .missing:
+        self = helper.canInstall ? .credentialsFirst : .unavailable
       }
     }
   }
@@ -29,6 +35,9 @@
     public static let removalCredentialsFirst =
       "To look for Omarchy on this Mac, enter your macOS administrator account. It sets up the removal service and approves the removal you’ll review next. macOS will show a notice that \(windowTitle) added a background item."
     public static let removalContinue = "Continue"
+    public static let removalSwitchedOff =
+      "You switched the removal service off in Login Items, and it’s needed to look for Omarchy. Enter your macOS administrator account to turn it back on and continue, or switch it on in Login Items yourself and reopen this window."
+    public static let removalTurnOnAndContinue = "Turn On & Continue"
     /// Builds that cannot install the helper, when the package has not.
     public static let removalServiceMissing =
       "The removal service isn’t available. Run the downloaded \(installerPackage) again, then try again. No disk changes were made."
