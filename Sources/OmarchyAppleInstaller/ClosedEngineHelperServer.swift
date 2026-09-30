@@ -135,11 +135,17 @@
             phase = next
           }
           let name = approved.plan.installation?.name
-          return OmarchyRemovalReply(
-            completed: true,
-            message: name.map {
+          var message =
+            name.map {
               "“\($0)” and its data have been removed. The freed space is now part of macOS."
-            } ?? "The free space is now part of macOS.")
+            } ?? "The free space is now part of macOS."
+          do {
+            try retireExecutionJournals(in: workingDirectory, removal: approved.ticket.id)
+          } catch {
+            message +=
+              " The installer couldn’t clear its record of the earlier installation, so installing again at the same size may not work."
+          }
+          return OmarchyRemovalReply(completed: true, message: message)
         } catch {
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."
           let message: String
@@ -474,6 +480,27 @@
         }
       }
     }
+  }
+
+  /// Install journals are named by the plan's binding digest, and removal
+  /// returns the disk to the layout that plan was made from. Left in place,
+  /// a reinstall at the same size finds its earlier journal complete and
+  /// reports success without writing anything. They are kept for diagnosis
+  /// under `retired-execution-journals/<removal ticket>`.
+  func retireExecutionJournals(in workingDirectory: URL, removal: UUID) throws {
+    let journals = workingDirectory.appendingPathComponent(
+      "execution-journals", isDirectory: true)
+    guard FileManager.default.fileExists(atPath: journals.path) else { return }
+    let retired = workingDirectory.appendingPathComponent(
+      "retired-execution-journals", isDirectory: true)
+    if !FileManager.default.fileExists(atPath: retired.path) {
+      try FileManager.default.createDirectory(
+        at: retired, withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700])
+    }
+    try FileManager.default.moveItem(
+      at: journals,
+      to: retired.appendingPathComponent(removal.uuidString, isDirectory: true))
   }
 
   public final class AuthenticatedEngineXPCListenerDelegate:

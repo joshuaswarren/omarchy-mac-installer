@@ -801,6 +801,44 @@
       XCTAssertEqual(disk.operations.count, 5)
     }
 
+    func testSuccessfulRemovalRetiresInstallJournalsSoTheSamePlanRunsAgain() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let journals = root.appendingPathComponent("execution-journals", isDirectory: true)
+      try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
+      let finished = Data(#"{"completion":"awaiting_recovery"}"#.utf8)
+      try finished.write(to: journals.appendingPathComponent("abc.jsonl"))
+      let service = server(root: root, disk: FakeRemovalDisk())
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(inspection.ticket)
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertTrue(result.completed, result.message)
+      XCTAssertEqual(
+        result.message,
+        "“Omarchy” and its data have been removed. The freed space is now part of macOS.")
+      XCTAssertFalse(FileManager.default.fileExists(atPath: journals.path))
+      let kept = root.appendingPathComponent(
+        "retired-execution-journals/\(ticket.id.uuidString)/abc.jsonl")
+      XCTAssertEqual(try Data(contentsOf: kept), finished)
+    }
+
+    func testFailedRemovalKeepsInstallJournals() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let journals = root.appendingPathComponent("execution-journals", isDirectory: true)
+      try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
+      let service = server(root: root, disk: FakeRemovalDisk(failAt: 3))
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let result = try await service.removal(
+        ticketID: XCTUnwrap(inspection.ticket).id, confirmation: OmarchyRemovalTicket.confirmation,
+        authorization: authorization())
+      XCTAssertFalse(result.completed)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: journals.path))
+    }
+
     func testServerFreeSpaceNeedsItsOwnPhraseAndNeverClaimsRemoval() async throws {
       let root = try temporaryDirectory()
       defer { try? FileManager.default.removeItem(at: root) }
