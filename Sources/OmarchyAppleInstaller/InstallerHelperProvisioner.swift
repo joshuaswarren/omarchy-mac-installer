@@ -9,9 +9,10 @@
     /// The helper answers and is the build this app carries.
     case current
     /// The helper answers but reports a different build, or none at all, as
-    /// helpers installed by the installer package do.
+    /// helpers installed by the installer package do; or it is loaded but
+    /// refuses this app, as a helper from another build does.
     case outdated
-    /// The helper is registered but does not answer, for example because the
+    /// The helper is registered but launchd has not loaded it, because the
     /// person switched it off in Login Items.
     case disabled
   }
@@ -47,6 +48,10 @@
     var isRegistered: Bool { get }
     /// Whether the helper answers a ping in time.
     func answers() async -> Bool
+    /// Whether launchd has the helper's job loaded. Switching the helper off in
+    /// Login Items unloads the job but leaves its file, while a helper from
+    /// another build stays loaded and refuses this app.
+    func isLoaded() async -> Bool
     /// The build the running helper reports, or nil when it reports none.
     func reportedVersion() async -> String?
   }
@@ -161,7 +166,9 @@
         return .missing
       }
       guard await probe.answers() else {
-        return .disabled
+        // Loaded but silent means another build that refuses this app; it is
+        // replaced like any outdated helper, not reported as switched off.
+        return await probe.isLoaded() ? .outdated : .disabled
       }
       guard let bundledHelperVersion else {
         return .current
@@ -275,6 +282,26 @@
       FileManager.default.fileExists(
         atPath: InstallerProductIdentity.systemLaunchDaemonPath
       )
+    }
+
+    /// `launchctl print` needs no privileges for a system job and fails when
+    /// launchd has no such job loaded.
+    public func isLoaded() async -> Bool {
+      let label = InstallerProductIdentity.helperIdentifier
+      return await Task.detached {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["print", "system/\(label)"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+          try process.run()
+        } catch {
+          return false
+        }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+      }.value
     }
 
     public func answers() async -> Bool {

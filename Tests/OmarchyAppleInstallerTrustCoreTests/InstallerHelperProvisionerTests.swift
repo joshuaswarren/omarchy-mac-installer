@@ -19,6 +19,7 @@
       let cases: [(FakeProbe, String?, InstallerHelperStatus)] = [
         (FakeProbe(registered: false), "28", .missing),
         (FakeProbe(registered: true, answering: false), "28", .disabled),
+        (FakeProbe(registered: true, answering: false, loaded: true), "28", .outdated),
         (FakeProbe(registered: true, version: "28"), "28", .current),
         (FakeProbe(registered: true, version: "27"), "28", .outdated),
         (FakeProbe(registered: true, version: nil), "28", .outdated),
@@ -92,6 +93,17 @@
       ).ensureCurrent(owner)
       XCTAssertEqual(outcome, .disabled)
       XCTAssertEqual(blesser.calls, [])
+    }
+
+    func testALoadedHelperThatRefusesThisAppIsReplacedNotReportedAsSwitchedOff() async {
+      // Seen on the M3 Air: an earlier installer's helper stays loaded but only
+      // accepts its own app.
+      let probe = FakeProbe(
+        registered: true, answering: false, loaded: true, installsVersion: "28")
+      let blesser = FakeBlesser(silent: .blessed, installing: probe)
+      let outcome = await provisioner(probe, blesser: blesser).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .installedSilently)
+      XCTAssertEqual(blesser.calls, [.silent("owner")])
     }
 
     func testSwitchedOffHelperIsTurnedBackOnWhenThePersonChoseTo() async {
@@ -305,17 +317,21 @@
     private let lock = NSLock()
     private var registered: Bool
     private var answering: Bool
+    private let loaded: Bool
     private var version: String?
     private let installsVersion: String?
     private var pingCount = 0
 
     /// - Parameter installsVersion: what a successful bless leaves running;
     ///   nil leaves a helper that never answers.
+    /// - Parameter loaded: whether launchd has the job loaded while it does
+    ///   not answer; false models a helper switched off in Login Items.
     init(
-      registered: Bool, answering: Bool = true, version: String? = nil,
+      registered: Bool, answering: Bool = true, loaded: Bool = false, version: String? = nil,
       installsVersion: String? = nil
     ) {
       self.registered = registered
+      self.loaded = loaded
       self.answering = answering && registered
       self.version = version
       self.installsVersion = installsVersion
@@ -330,6 +346,10 @@
         pingCount += 1
         return answering
       }
+    }
+
+    func isLoaded() async -> Bool {
+      lock.withLock { answering || loaded }
     }
 
     func reportedVersion() async -> String? {

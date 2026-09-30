@@ -13,14 +13,20 @@
         RemovalHelperStart(helper: HelperDisplay(status: .disabled, canInstall: false)), .scan)
     }
 
-    func testARegisteredHelperScansRightAway() {
-      for status in [InstallerHelperStatus.current, .outdated] {
-        for canInstall in [true, false] {
-          XCTAssertEqual(
-            RemovalHelperStart(helper: HelperDisplay(status: status, canInstall: canInstall)),
-            .scan, "\(status) canInstall=\(canInstall)")
-        }
+    func testACurrentHelperScansRightAway() {
+      for canInstall in [true, false] {
+        XCTAssertEqual(
+          RemovalHelperStart(helper: HelperDisplay(status: .current, canInstall: canInstall)),
+          .scan)
       }
+    }
+
+    func testAnOutdatedHelperIsReplacedFirstWhenTheBuildCanInstallIt() {
+      XCTAssertEqual(
+        RemovalHelperStart(helper: HelperDisplay(status: .outdated, canInstall: true)),
+        .credentialsFirst)
+      XCTAssertEqual(
+        RemovalHelperStart(helper: HelperDisplay(status: .outdated, canInstall: false)), .scan)
     }
 
     func testAMissingHelperAsksForTheAccountFirstWhenTheBuildCanInstallIt() {

@@ -9,7 +9,8 @@
   public enum RemovalHelperStart: Equatable, Sendable {
     /// A helper is registered: scan right away, as before.
     case scan
-    /// No helper, but this build can install one: ask for the account first.
+    /// No helper, or one from another build, and this build can install its
+    /// own: ask for the account first.
     case credentialsFirst
     /// No helper, and this build cannot install one.
     case unavailable
@@ -21,8 +22,11 @@
     ///   switched-off helper shows as `.disabled`.
     public init(helper: HelperDisplay) {
       switch helper.status {
-      case .current, .outdated:
+      case .current:
         self = .scan
+      case .outdated:
+        // Replace it first: a helper from another build may refuse this app.
+        self = helper.canInstall ? .credentialsFirst : .scan
       case .disabled:
         self = helper.canInstall ? .switchedOff : .scan
       case .missing:
