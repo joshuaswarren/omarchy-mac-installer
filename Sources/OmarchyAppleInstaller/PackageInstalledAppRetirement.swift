@@ -22,13 +22,20 @@
     }
 
     private let applicationsDirectory: URL
+    private let privateDirectory: URL
     private let appNames: [String]
     private let bundleIdentifier: String
     private let packageOwner: uid_t
     private let runningExecutablePaths: @Sendable () -> [String]
 
+    /// - Parameter privateDirectory: where a candidate is moved before it is
+    ///   checked and deleted. It must be writable only by root and on the
+    ///   same volume as `applicationsDirectory`; the helper's own state
+    ///   directory is both.
     public init(
       applicationsDirectory: URL = URL(fileURLWithPath: "/Applications", isDirectory: true),
+      privateDirectory: URL = URL(
+        fileURLWithPath: InstallerProductIdentity.helperWorkingDirectory, isDirectory: true),
       appNames: [String] = [
         InstallerProductIdentity.appName, InstallerProductIdentity.legacyAppName,
       ],
@@ -38,6 +45,7 @@
         PackageInstalledAppRetirement.runningExecutablePaths
     ) {
       self.applicationsDirectory = applicationsDirectory
+      self.privateDirectory = privateDirectory
       self.appNames = appNames
       self.bundleIdentifier = bundleIdentifier
       self.packageOwner = packageOwner
@@ -60,6 +68,11 @@
       return results
     }
 
+    /// Moves the candidate out of `/Applications` first, then checks and
+    /// deletes only what it moved. `/Applications` is writable by the admin
+    /// group, so checking in place and then deleting by name would let an
+    /// admin process swap another root-owned app in between; the private
+    /// directory is out of that process's reach.
     private func retire(_ bundle: URL) -> Result {
       var status = stat()
       guard lstat(bundle.path, &status) == 0 else {
@@ -71,7 +84,39 @@
       guard status.st_mode & S_IFMT == S_IFDIR else {
         return .keptNotABundle
       }
-      let info = bundle.appendingPathComponent("Contents/Info.plist")
+      if isRunning(from: bundle) {
+        return .keptRunning
+      }
+      let moved = privateDirectory.appendingPathComponent(
+        ".retiring-\(UUID().uuidString).app", isDirectory: true)
+      // Atomic, never replacing anything, and never following a link.
+      guard renamex_np(bundle.path, moved.path, UInt32(RENAME_EXCL)) == 0 else {
+        return .keptRemovalFailed("could not move aside: \(String(cString: strerror(errno)))")
+      }
+      let verdict = check(moved, originallyAt: bundle)
+      guard verdict == nil else {
+        // Put it back as it was; if something has since taken its name, it
+        // stays aside rather than replacing that.
+        if renamex_np(moved.path, bundle.path, UInt32(RENAME_EXCL)) != 0 {
+          return .keptRemovalFailed("kept aside at \(moved.path): name taken")
+        }
+        return verdict!
+      }
+      do {
+        try FileManager.default.removeItem(at: moved)
+        return .removed
+      } catch {
+        return .keptRemovalFailed(String(describing: error))
+      }
+    }
+
+    /// Nil when the moved bundle is exactly what may be removed.
+    private func check(_ moved: URL, originallyAt bundle: URL) -> Result? {
+      var status = stat()
+      guard lstat(moved.path, &status) == 0, status.st_mode & S_IFMT == S_IFDIR else {
+        return .keptNotABundle
+      }
+      let info = moved.appendingPathComponent("Contents/Info.plist")
       guard let data = try? Data(contentsOf: info),
         let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
           as? [String: Any]
@@ -85,16 +130,17 @@
       guard status.st_uid == packageOwner else {
         return .keptNotInstalledByPackage
       }
-      let contents = bundle.appendingPathComponent("Contents", isDirectory: true).path + "/"
-      if runningExecutablePaths().contains(where: { $0.hasPrefix(contents) }) {
+      // A process started from it just before the move now runs from the
+      // moved path.
+      if isRunning(from: moved) || isRunning(from: bundle) {
         return .keptRunning
       }
-      do {
-        try FileManager.default.removeItem(at: bundle)
-        return .removed
-      } catch {
-        return .keptRemovalFailed(String(describing: error))
-      }
+      return nil
+    }
+
+    private func isRunning(from bundle: URL) -> Bool {
+      let contents = bundle.appendingPathComponent("Contents", isDirectory: true).path + "/"
+      return runningExecutablePaths().contains { $0.hasPrefix(contents) }
     }
 
     /// The executable path of every process this process can see.

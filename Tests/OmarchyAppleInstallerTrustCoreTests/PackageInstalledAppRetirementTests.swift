@@ -6,16 +6,22 @@
   @testable import OmarchyAppleInstallerTrustCore
 
   final class PackageInstalledAppRetirementTests: XCTestCase {
+    private var root: URL!
     private var applications: URL!
+    private var aside: URL!
 
     override func setUpWithError() throws {
-      applications = FileManager.default.temporaryDirectory
+      root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
-      try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+      applications = root.appendingPathComponent("Applications", isDirectory: true)
+      aside = root.appendingPathComponent("private", isDirectory: true)
+      for directory in [applications!, aside!] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      }
     }
 
     override func tearDownWithError() throws {
-      try? FileManager.default.removeItem(at: applications)
+      try? FileManager.default.removeItem(at: root)
     }
 
     func testRemovesIdlePackageInstalledCopiesUnderEitherName() throws {
@@ -91,6 +97,35 @@
       XCTAssertTrue(exists("Unrelated.app"))
     }
 
+    func testDeletesOnlyWhatItMovedEvenIfTheNameIsRetakenMeanwhile() throws {
+      try makeBundle("Current")
+      let race = Race { try? self.makeBundle("Current", identifier: "someone.else") }
+
+      let results = retirement(runningExecutablePaths: { race.paths() }).run()
+
+      XCTAssertEqual(results["Current.app"], .removed)
+      // The newcomer took the name after the move; it is not what was checked,
+      // so it is left alone.
+      XCTAssertTrue(exists("Current.app"))
+      XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: aside.path), [])
+    }
+
+    func testAKeptBundleStaysAsideRatherThanReplaceANewcomer() throws {
+      try makeBundle("Current")
+      let running = applications.appendingPathComponent("Current.app/Contents/MacOS/app").path
+      let race = Race(running: [running]) {
+        try? self.makeBundle("Current", identifier: "newcomer")
+      }
+
+      let results = retirement(runningExecutablePaths: { race.paths() }).run()
+
+      guard case .keptRemovalFailed(let reason) = results["Current.app"] else {
+        return XCTFail("expected it kept aside, got \(String(describing: results["Current.app"]))")
+      }
+      XCTAssertTrue(reason.contains("name taken"), reason)
+      XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: aside.path).count, 1)
+    }
+
     func testRunningExecutablePathsIncludesThisProcess() {
       let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
       let paths = PackageInstalledAppRetirement.runningExecutablePaths()
@@ -105,12 +140,41 @@
     private func retirement(
       packageOwner: uid_t = getuid(), running: [String] = []
     ) -> PackageInstalledAppRetirement {
+      retirement(packageOwner: packageOwner, runningExecutablePaths: { running })
+    }
+
+    private func retirement(
+      packageOwner: uid_t = getuid(), runningExecutablePaths: @escaping @Sendable () -> [String]
+    ) -> PackageInstalledAppRetirement {
       PackageInstalledAppRetirement(
         applicationsDirectory: applications,
+        privateDirectory: aside,
         appNames: ["Current", "Legacy"],
         bundleIdentifier: "com.example.installer",
         packageOwner: packageOwner,
-        runningExecutablePaths: { running })
+        runningExecutablePaths: runningExecutablePaths)
+    }
+
+    /// Runs `swap` once, the moment the retirement first looks for running
+    /// processes after moving the bundle aside, then reports `running`.
+    private final class Race: @unchecked Sendable {
+      private let lock = NSLock()
+      private var calls = 0
+      private let swap: () -> Void
+      private let running: [String]
+      init(running: [String] = [], swap: @escaping () -> Void) {
+        self.running = running
+        self.swap = swap
+      }
+      func paths() -> [String] {
+        let call = lock.withLock { () -> Int in
+          calls += 1
+          return calls
+        }
+        // Call 1 is the check before the move; call 2 the first after it.
+        if call == 2 { swap() }
+        return call >= 2 ? running : []
+      }
     }
 
     private func makeBundle(_ name: String, identifier: String = "com.example.installer") throws {
