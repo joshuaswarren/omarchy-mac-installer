@@ -204,9 +204,17 @@ OS_TAG="os-v4.0.2-mac.1.20260902"
 APP_VERSION="${OMARCHY_APP_VERSION:-2.1.0}"
 APP_BUILD="${OMARCHY_APP_BUILD_NUMBER:-28}"
 PAYLOAD="omarchy-2026.09.02-aarch64-apple-silicon-asahi-os-package.zip"
-# The engine every build pins (Packaging/build-app.sh).
-ENGINE="installer-v0.9.2-omarchy.17.tar.gz"
-ENGINE_SIZE=17838045
+# The engine is whatever every build pins in Packaging/build-app.sh, read from
+# there so a change to the pinned engine never has to be repeated here.
+ENGINE=$(sed -n 's/^engine_file_name="\(.*\)"$/\1/p' "$APP_DIR/Packaging/build-app.sh")
+[[ $ENGINE == installer-*.tar.gz ]] || {
+  echo "cutover-wizard: can't read the pinned engine from Packaging/build-app.sh" >&2
+  exit 1
+}
+ENGINE_SIZE=$(stat -f %z "$APP_DIR/Engine/artifacts/$ENGINE" 2>/dev/null) || {
+  echo "cutover-wizard: the pinned engine is missing: Engine/artifacts/$ENGINE" >&2
+  exit 1
+}
 METADATA="installer_data.json"
 PAYLOAD_SOURCE="${OMARCHY_OS_PAYLOAD:-$REPO_DIR/../omarchy-iso/release/$PAYLOAD}"
 SIGN_ID="$INSTALLER_APP_SIGNING_IDENTITY"
