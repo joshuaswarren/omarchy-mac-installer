@@ -12,31 +12,6 @@ import OmarchyInstallerUXCore
 /// model, and no credential is ever stored here.
 final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
   private let lock = NSLock()
-  /// Whether this build declares its helper for `SMJobBless`. Builds signed
-  /// ad hoc leave it out and rely on the installer package instead.
-  private let canInstallHelper = SMJobBlessInstallerHelperBlesser.isDeclared()
-  private let helperProvisioner = LiveInstallerEnvironment.makeHelperProvisioner(
-    canInstall: SMJobBlessInstallerHelperBlesser.isDeclared())
-
-  private static func makeHelperProvisioner(canInstall: Bool) -> InstallerHelperProvisioner {
-    InstallerHelperProvisioner(
-      probe: SystemInstallerHelperProbe(submitter: helperSubmitter),
-      blesser: canInstall
-        ? SMJobBlessInstallerHelperBlesser() : UnavailableInstallerHelperBlesser(),
-      credentialValidator: OpenDirectoryAdministratorCredentialValidator(),
-      bundledHelperVersion: InstallerHelperProvisioner.bundledHelperVersion(),
-      housekeeping: SystemInstallerHelperHousekeeping(submitter: helperSubmitter)
-    )
-  }
-
-  @Sendable private static func helperSubmitter() throws -> AuthenticatedEngineXPCSubmitter {
-    let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
-    return try AuthenticatedEngineXPCSubmitter(
-      machServiceName: configuration.helperMachServiceName,
-      helperCodeSigningRequirement: configuration.helperCodeSigningRequirement
-    )
-  }
-
   private var hostInspection: AppleSiliconHostInspection?
   private var engineInspection: ValidatedEngineTranscript?
   private var engineInspectionTranscript: Data?
@@ -82,7 +57,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   }
 
   var helperStatus: HelperDisplay {
-    HelperDisplay(status: helperProvisioner.registrationStatus, canInstall: canInstallHelper)
+    InstallerHelperSetup.display
   }
 
   // MARK: Inspection
@@ -406,20 +381,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   }
 
   func ensureHelper(_ authorization: MachineOwnerAuthorization) async throws {
-    switch await helperProvisioner.ensureCurrent(authorization) {
-    case .alreadyCurrent, .installedSilently, .installedWithDialog:
-      return
-    case .credentialsRejected:
-      throw EngineXPCSubmissionError.machineOwnerCredentialsRejected
-    case .cancelled:
-      throw InstallerHelperSetupError.cancelled
-    case .disabled:
-      throw InstallerHelperSetupError.switchedOff
-    case .unavailable:
-      throw InstallerHelperSetupError.unavailable
-    case .failed(let message):
-      throw InstallerHelperSetupError.failed(message)
-    }
+    try await InstallerHelperSetup.ensure(authorization)
   }
 
   // MARK: Shutdown

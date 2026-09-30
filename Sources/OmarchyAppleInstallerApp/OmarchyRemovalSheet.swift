@@ -18,6 +18,9 @@ struct OmarchyRemovalSheet: View {
   @State private var completed = false
   @State private var message = "Checking for an existing Omarchy installation…"
   @State private var client: AuthenticatedEngineXPCSubmitter?
+  /// No helper is installed yet: the account is asked for first, to set it
+  /// up, and the same password then approves the removal.
+  @State private var needsAccountFirst = false
   @State private var contentHeight: CGFloat = 0
   @State private var footerHeight: CGFloat = 0
   @State private var measuredHeightCap: CGFloat?
@@ -180,6 +183,9 @@ struct OmarchyRemovalSheet: View {
 
   private var footer: some View {
     VStack(alignment: .leading, spacing: 18) {
+      if needsAccountFirst && ticket == nil && !isSimulation {
+        accountFields
+      }
       if let ticket, !submitted {
         VStack(alignment: .leading, spacing: 7) {
           Text("Type this to confirm:")
@@ -195,24 +201,13 @@ struct OmarchyRemovalSheet: View {
         }
         .font(OmarchyTheme.body)
         if !isSimulation {
-          VStack(alignment: .leading, spacing: 7) {
-            Text("macOS administrator account").foregroundStyle(OmarchyTheme.secondaryText)
-            TextField("Account name", text: $username)
-              .textFieldStyle(.roundedBorder)
-              .textContentType(.username)
-              .autocorrectionDisabled()
-            SecureField("macOS password", text: $password)
-              .textFieldStyle(.roundedBorder)
-              .textContentType(.password)
-              .privacySensitive()
-          }
-          .font(OmarchyTheme.body)
+          accountFields
         }
       }
       if busy {
         HStack(spacing: 10) {
           ProgressView().controlSize(.small)
-          Text(submitted ? "Keep your Mac on until removal finishes." : "Reading the disk layout…")
+          Text(progressText)
             .font(OmarchyTheme.detail)
         }
         .foregroundStyle(OmarchyTheme.secondaryText)
@@ -227,6 +222,12 @@ struct OmarchyRemovalSheet: View {
         .keyboardShortcut(.cancelAction)
         .focusEffectDisabled()
         .disabled(busy)
+        if needsAccountFirst && ticket == nil && !isSimulation {
+          Button(PlainLanguage.removalContinue) { Task { await setUpHelperThenScan() } }
+            .omarchyPrimaryButton()
+            .keyboardShortcut(.defaultAction)
+            .disabled(busy || username.isEmpty || password.isEmpty)
+        }
         if let ticket, !submitted {
           Button(ticket.kind == .freeSpace ? "Return Space" : "Remove Omarchy", role: .destructive)
           { Task { await remove() } }
@@ -242,6 +243,26 @@ struct OmarchyRemovalSheet: View {
     .padding(.horizontal, 26)
     .padding(.top, 18)
     .padding(.bottom, 26)
+  }
+
+  private var progressText: String {
+    if submitted { return "Keep your Mac on until removal finishes." }
+    return needsAccountFirst ? "Setting up the removal service…" : "Reading the disk layout…"
+  }
+
+  private var accountFields: some View {
+    VStack(alignment: .leading, spacing: 7) {
+      Text("macOS administrator account").foregroundStyle(OmarchyTheme.secondaryText)
+      TextField("Account name", text: $username)
+        .textFieldStyle(.roundedBorder)
+        .textContentType(.username)
+        .autocorrectionDisabled()
+      SecureField("macOS password", text: $password)
+        .textFieldStyle(.roundedBorder)
+        .textContentType(.password)
+        .privacySensitive()
+    }
+    .font(OmarchyTheme.body)
   }
 
   private var heading: String {
@@ -276,13 +297,15 @@ struct OmarchyRemovalSheet: View {
     }.font(OmarchyTheme.body)
   }
 
-  @MainActor private func prepare() async {
+  /// - Parameter keepingAccount: true right after the helper was set up with
+  ///   the typed account, which then also approves the removal.
+  @MainActor private func prepare(keepingAccount: Bool = false) async {
     guard !busy else { return }
     busy = true
     defer { busy = false }
     ticket = nil
     phrase = ""
-    password = ""
+    if !keepingAccount { password = "" }
     submitted = false
     completed = false
     message = "Checking for an existing Omarchy installation…"
@@ -297,19 +320,56 @@ struct OmarchyRemovalSheet: View {
         return
       }
     #endif
+    if !keepingAccount {
+      switch RemovalHelperStart(helper: InstallerHelperSetup.display) {
+      case .scan:
+        break
+      case .credentialsFirst:
+        needsAccountFirst = true
+        message = PlainLanguage.removalCredentialsFirst
+        return
+      case .unavailable:
+        message = PlainLanguage.removalServiceMissing
+        return
+      }
+    }
     do {
-      let configuration = try InstallerReleaseConfigurationLocator().loadFromMainBundle()
-      let submitter = try AuthenticatedEngineXPCSubmitter(
-        machServiceName: configuration.helperMachServiceName,
-        helperCodeSigningRequirement: configuration.helperCodeSigningRequirement)
+      let submitter = try InstallerHelperSetup.submitter()
       client = submitter
       let reply = try await submitter.removal()
       ticket = reply.ticket
       message = reply.message
     } catch {
       message =
-        "The removal service isn’t available. Run the downloaded \(PlainLanguage.installerPackage) again, then try again. No disk changes were made."
+        InstallerHelperSetup.canInstall
+        ? PlainLanguage.removalServiceNotResponding : PlainLanguage.removalServiceMissing
     }
+  }
+
+  /// Sets the helper up with the typed account, then scans as usual.
+  @MainActor private func setUpHelperThenScan() async {
+    guard needsAccountFirst, !busy else { return }
+    let authorization: MachineOwnerAuthorization
+    do {
+      authorization = try MachineOwnerAuthorization(
+        username: username, password: Data(password.utf8))
+    } catch {
+      message = "Enter a valid macOS administrator account and password."
+      return
+    }
+    busy = true
+    message = "Setting up the removal service…"
+    do {
+      try await InstallerHelperSetup.ensure(authorization)
+    } catch {
+      busy = false
+      password = ""
+      message = PlainLanguage.removalHelperSetupMessage(for: error)
+      return
+    }
+    busy = false
+    needsAccountFirst = false
+    await prepare(keepingAccount: true)
   }
 
   @MainActor private func remove() async {
@@ -565,7 +625,7 @@ private struct RemovalSheetHeightCapReader: NSViewRepresentable {
       case .ambiguous:
         "Found disk0s4 (EFI partition, “EFI - ARCH”, 524.3 MB); disk0s5 (Linux partition, 29.8 GB) without the startup container every installation made with the Asahi installer has. This looks like a partly removed installation, which needs a manual review. Nothing was changed."
       case .helperUnavailable:
-        "The removal service isn’t available. Run the downloaded \(PlainLanguage.installerPackage) again, then try again. No disk changes were made."
+        PlainLanguage.removalServiceNotResponding
       case .credentials:
         "The macOS account or password was not accepted. No disk changes were made."
       case .changed:
