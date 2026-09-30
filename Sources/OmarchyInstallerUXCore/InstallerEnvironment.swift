@@ -139,13 +139,6 @@
   }
 
   extension PlanDisplay {
-    public var recommendedMacOSContainerBytes: UInt64? {
-      guard fixedMacOSBytes == nil, let free = macOSFreeBeforeAllocationBytes else { return nil }
-      let used = diskTotalBytes - min(diskTotalBytes, free)
-      let (total, overflow) = used.addingReportingOverflow(Self.recommendedMacOSFreeBytes)
-      return overflow ? nil : total
-    }
-
     /// Shared by the bar, its accessibility value, and the visible warning.
     public func macOSSpaceCaution(for allocation: UInt64) -> String? {
       guard fixedMacOSBytes == nil, let free = macOSFreeBeforeAllocationBytes else { return nil }

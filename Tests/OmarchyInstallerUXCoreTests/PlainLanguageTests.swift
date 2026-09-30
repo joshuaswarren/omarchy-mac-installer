@@ -11,7 +11,6 @@
         diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
         bindingDigest: "test", macOSFreeBeforeAllocationBytes: 80_000_000_000,
         recommendedOmarchyBytes: 77_000_000_000)
-      XCTAssertEqual(plan.recommendedMacOSContainerBytes, 203_000_000_000)
       XCTAssertEqual(
         plan.spaceCautions(for: 40_000_000_000),
         ["Omarchy will use its minimum size, 40 GB, leaving little room for updates and snapshots."]
@@ -36,7 +35,6 @@
         diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
         bindingDigest: "free", fixedMacOSBytes: 180_000_000_000,
         recommendedOmarchyBytes: 77_000_000_000)
-      XCTAssertNil(free.recommendedMacOSContainerBytes)
       XCTAssertNil(free.macOSSpaceCaution(for: 77_000_000_000))
       XCTAssertEqual(free.spaceCautions(for: 40_000_000_000).count, 1)
       XCTAssertTrue(free.spaceCautions(for: 77_000_000_000).isEmpty)
