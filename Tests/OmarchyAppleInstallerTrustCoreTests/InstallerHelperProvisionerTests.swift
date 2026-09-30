@@ -120,6 +120,22 @@
       XCTAssertEqual(blesser.calls, [])
     }
 
+    func testAStandardAccountCanUseAHelperThatIsAlreadyCurrent() async {
+      let outcome = await provisioner(
+        FakeProbe(registered: true, version: "28"), administrator: false
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .alreadyCurrent)
+    }
+
+    func testAStandardAccountIsToldAnAdministratorIsNeededToInstall() async {
+      let blesser = FakeBlesser(silent: .blessed)
+      let outcome = await provisioner(
+        FakeProbe(registered: false), blesser: blesser, administrator: false
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .notAdministrator)
+      XCTAssertEqual(blesser.calls, [])
+    }
+
     func testSwitchedOffHelperIsTurnedBackOnWhenThePersonChoseTo() async {
       let probe = FakeProbe(registered: true, answering: false, installsVersion: "28")
       let blesser = FakeBlesser(silent: .blessed, installing: probe)
@@ -316,6 +332,7 @@
       _ probe: FakeProbe,
       blesser: any InstallerHelperBlessing = FakeBlesser(),
       validator: FakeValidator = FakeValidator(accepts: true),
+      administrator: Bool = true,
       bundled: String? = "28",
       housekeeping: any InstallerHelperHousekeeping = NoInstallerHelperHousekeeping()
     ) -> InstallerHelperProvisioner {
@@ -323,6 +340,7 @@
         probe: probe,
         blesser: blesser,
         credentialValidator: validator,
+        administrators: FakeAdministrators(isAdministrator: administrator),
         bundledHelperVersion: bundled,
         housekeeping: housekeeping
       )
@@ -467,6 +485,11 @@
         if done { continuation.resume() }
       }
     }
+  }
+
+  private struct FakeAdministrators: HelperAdministratorChecking {
+    let isAdministrator: Bool
+    func isAdministrator(_ username: String) -> Bool { isAdministrator }
   }
 
   private struct FakeValidator: MachineOwnerCredentialValidating {

@@ -69,6 +69,7 @@
         InstallerHelperSetupError.cancelled,
         InstallerHelperSetupError.switchedOff,
         InstallerHelperSetupError.unavailable,
+        InstallerHelperSetupError.notAdministrator,
         InstallerHelperSetupError.failed("launchd"),
         CocoaError(.fileNoSuchFile),
       ]

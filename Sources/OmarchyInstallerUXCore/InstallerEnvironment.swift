@@ -188,6 +188,8 @@
     case switchedOff
     /// The helper is busy with another job, for example another user's.
     case busy
+    /// The account is not an administrator, and the helper needs installing.
+    case notAdministrator
     /// This build cannot install the helper, and none is in place.
     case unavailable
     /// The message is for diagnostics only.
@@ -420,6 +422,7 @@
     case helperSwitchedOff
     case helperSetupFailed
     case helperBusy
+    case notAdministrator
   }
 
   public struct CredentialSheetContext: Equatable, Sendable {

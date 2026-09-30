@@ -83,6 +83,9 @@
         return removalServiceMissing
       case .busy:
         return removalServiceBusy
+      case .notAdministrator:
+        return
+          "This account isn’t a macOS administrator, and setting up the removal service needs one. Use an administrator account. No disk changes were made."
       case .failed, nil:
         return "The removal service couldn’t be set up. Try again. No disk changes were made."
       }

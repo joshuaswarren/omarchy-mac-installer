@@ -13,7 +13,8 @@ enum InstallerHelperSetup {
     probe: SystemInstallerHelperProbe(submitter: submitter),
     blesser: canInstall
       ? SMJobBlessInstallerHelperBlesser() : UnavailableInstallerHelperBlesser(),
-    credentialValidator: OpenDirectoryAdministratorCredentialValidator(),
+    credentialValidator: OpenDirectoryMachineOwnerCredentialValidator(),
+    administrators: OpenDirectoryAdministratorMembership(),
     bundledHelperVersion: InstallerHelperProvisioner.bundledHelperVersion(),
     housekeeping: SystemInstallerHelperHousekeeping(submitter: submitter)
   )
@@ -49,6 +50,8 @@ enum InstallerHelperSetup {
       return
     case .credentialsRejected:
       throw EngineXPCSubmissionError.machineOwnerCredentialsRejected
+    case .notAdministrator:
+      throw InstallerHelperSetupError.notAdministrator
     case .cancelled:
       throw InstallerHelperSetupError.cancelled
     case .disabled:

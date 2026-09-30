@@ -659,6 +659,7 @@
         (.cancelled, .helperSetupCancelled),
         (.switchedOff, .helperSwitchedOff),
         (.busy, .helperBusy),
+        (.notAdministrator, .notAdministrator),
         (.failed("launchd"), .helperSetupFailed),
         (.unavailable, .helperSetupFailed),
       ]

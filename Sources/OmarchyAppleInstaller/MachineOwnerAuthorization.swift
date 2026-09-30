@@ -91,20 +91,17 @@
     }
   }
 
-  /// Checks the typed credentials in the app before they are used to install
-  /// the helper: the password must be right and the account an
-  /// administrator, since macOS only lets administrators install it. A
-  /// rejection here shows the sheet's usual message instead of macOS's
-  /// dialog.
-  public struct OpenDirectoryAdministratorCredentialValidator:
-    MachineOwnerCredentialValidating
-  {
+  /// Whether an account may install the privileged helper: macOS only lets
+  /// administrators do that. Asked only when the helper actually needs
+  /// installing, so a standard account can still use a helper already there.
+  public protocol HelperAdministratorChecking: Sendable {
+    func isAdministrator(_ username: String) -> Bool
+  }
+
+  public struct OpenDirectoryAdministratorMembership: HelperAdministratorChecking {
     public init() {}
 
-    public func validate(
-      _ authorization: MachineOwnerAuthorization
-    ) throws {
-      try OpenDirectoryMachineOwnerCredentialValidator().validate(authorization)
+    public func isAdministrator(_ username: String) -> Bool {
       do {
         let node = try ODNode(
           session: ODSession.default(),
@@ -112,7 +109,7 @@
         )
         let user = try node.record(
           withRecordType: kODRecordTypeUsers,
-          name: authorization.username,
+          name: username,
           attributes: nil
         )
         let admin = try node.record(
@@ -121,8 +118,9 @@
           attributes: nil
         )
         try admin.isMemberRecord(user)
+        return true
       } catch {
-        throw MachineOwnerCredentialValidationError.rejected
+        return false
       }
     }
   }

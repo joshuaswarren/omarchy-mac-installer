@@ -33,6 +33,9 @@
     /// The typed name or password was not accepted locally. Nothing was
     /// attempted.
     case credentialsRejected
+    /// The password is right but the account is not an administrator, and the
+    /// helper needs installing, which only administrators may do.
+    case notAdministrator
     /// The person cancelled macOS's administrator dialog, or macOS refused it.
     case cancelled
     /// The helper is switched off and was left that way.
@@ -118,6 +121,7 @@
     private let probe: any InstallerHelperProbing
     private let blesser: any InstallerHelperBlessing
     private let credentialValidator: any MachineOwnerCredentialValidating
+    private let administrators: any HelperAdministratorChecking
     private let bundledHelperVersion: String?
     private let housekeeping: any InstallerHelperHousekeeping
 
@@ -129,12 +133,14 @@
       probe: any InstallerHelperProbing,
       blesser: any InstallerHelperBlessing,
       credentialValidator: any MachineOwnerCredentialValidating,
+      administrators: any HelperAdministratorChecking,
       bundledHelperVersion: String?,
       housekeeping: any InstallerHelperHousekeeping = NoInstallerHelperHousekeeping()
     ) {
       self.probe = probe
       self.blesser = blesser
       self.credentialValidator = credentialValidator
+      self.administrators = administrators
       self.bundledHelperVersion = bundledHelperVersion
       self.housekeeping = housekeeping
     }
@@ -190,8 +196,9 @@
     }
 
     /// Makes the helper current for the action the person just authorized.
-    /// The typed credentials are checked locally first, so a typo never leads
-    /// to a system dialog; macOS's dialog appears only when the credentials
+    /// The password is checked locally first, so a typo never leads to a
+    /// system dialog; an administrator is required only if the helper has to
+    /// be installed; macOS's dialog appears only when the credentials
     /// were right and macOS still refused to use them.
     ///
     /// - Parameter reenablingSwitchedOff: the person chose to turn a helper
@@ -215,6 +222,11 @@
         return .busy
       case .missing, .outdated, .disabled:
         break
+      }
+      // Only installing needs an administrator; a standard account can use a
+      // helper that is already current.
+      guard administrators.isAdministrator(authorization.username) else {
+        return .notAdministrator
       }
       switch await blesser.blessSilently(with: authorization) {
       case .blessed:
