@@ -35,16 +35,29 @@
           "busy"))
     }
 
-    func testALostReplyCountsAsRemovedOnlyOnceTheHelperHasRetired() {
-      // The helper deletes its job file only after a completed removal.
-      XCTAssertEqual(RemovalConnectionLoss(helperStillRegistered: false), .completed)
-      XCTAssertEqual(RemovalConnectionLoss(helperStillRegistered: true), .unknown)
+    func testALostReplyCountsAsRemovedOnlyWhenTheOutcomeShowsOnDisk() {
+      let after: UInt64 = 500_000_000_000
+      let reclaim: UInt64 = 100_000_000_000
+      func loss(_ retired: Bool, _ container: UInt64?) -> RemovalConnectionLoss {
+        RemovalConnectionLoss(
+          helperRetired: retired, macOSContainerBytes: container, macOSBytesAfter: after,
+          reclaimBytes: reclaim)
+      }
+      XCTAssertEqual(loss(true, after), .completed)
+      XCTAssertEqual(loss(true, after - reclaim / 4), .completed, "most of the way there")
+      // The space never came back: removal didn't finish, or never started.
+      XCTAssertEqual(loss(true, after - reclaim), .unknown)
+      // A helper still (or again) present leaves it unknown, whatever the disk.
+      XCTAssertEqual(loss(false, after), .unknown)
+      XCTAssertEqual(loss(true, nil), .unknown, "an unreadable container proves nothing")
+      XCTAssertEqual(
+        RemovalConnectionLoss(
+          helperRetired: true, macOSContainerBytes: after, macOSBytesAfter: after,
+          reclaimBytes: 0), .unknown)
       XCTAssertTrue(
         PlainLanguage.removalCompletedWithoutReply(freeSpace: false).hasPrefix(
           "Omarchy and its data have been removed."))
-      XCTAssertTrue(
-        PlainLanguage.removalCompletedWithoutReply(freeSpace: true).hasPrefix(
-          "The free space is now part of macOS."))
+      XCTAssertTrue(PlainLanguage.removalNotStarted.contains("No disk changes were made."))
     }
 
     func testACurrentHelperScansRightAway() {

@@ -47,17 +47,35 @@
     }
   }
 
-  /// What a lost connection after a submitted removal means. The helper
-  /// deletes its own job file only once a removal has completed, just before
-  /// it replies and exits; if the Mac sleeps then, it can exit before the
-  /// reply arrives. So a job file that is gone proves the removal completed,
-  /// while one still there leaves it unknown.
+  /// What a lost connection after a submitted removal means. It counts as
+  /// done only when the outcome shows on disk: the helper has retired
+  /// completely (it deletes its job file, binary and state only after a
+  /// completed removal) and the macOS container has grown most of the way to
+  /// its size after removal. Anything less stays unknown, including a helper
+  /// briefly absent while another build reinstalls it.
   public enum RemovalConnectionLoss: Equatable, Sendable {
     case completed
     case unknown
 
-    public init(helperStillRegistered: Bool) {
-      self = helperStillRegistered ? .unknown : .completed
+    /// - Parameters:
+    ///   - helperRetired: the helper's job file, binary and state directory
+    ///     are all gone, in two looks a moment apart.
+    ///   - macOSContainerBytes: the macOS APFS container's size now, if known.
+    ///   - macOSBytesAfter: its size once removal completes, from the plan.
+    ///   - reclaimBytes: the space removal returns to it, from the plan.
+    public init(
+      helperRetired: Bool, macOSContainerBytes: UInt64?, macOSBytesAfter: UInt64,
+      reclaimBytes: UInt64
+    ) {
+      guard helperRetired, let macOSContainerBytes, reclaimBytes > 0,
+        macOSBytesAfter >= reclaimBytes
+      else {
+        self = .unknown
+        return
+      }
+      // Past halfway from the size before removal to the size after it.
+      let threshold = macOSBytesAfter - reclaimBytes / 2
+      self = macOSContainerBytes >= threshold ? .completed : .unknown
     }
   }
 
@@ -76,6 +94,8 @@
     public static let removalCredentialsFirst =
       "To look for Omarchy on this Mac, enter your macOS administrator account. It sets up the removal service and approves the removal you’ll review next. macOS will show a notice that \(windowTitle) added a background item."
     public static let removalContinue = "Continue"
+    public static let removalNotStarted =
+      "The removal service didn’t answer, so removal didn’t start. No disk changes were made. Close this window and try again."
     public static let removalServiceBusy =
       "The removal service is busy with another request. Close this window and try again when it finishes. No disk changes were made."
     public static let removalBlockedModel =

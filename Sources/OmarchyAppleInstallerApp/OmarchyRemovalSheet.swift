@@ -453,17 +453,25 @@ struct OmarchyRemovalSheet: View {
         return
       }
     #endif
+    // A helper that doesn't answer now means the request was never sent, so
+    // nothing started; only a failure after sending is uncertain.
+    guard let client, (try? await client.ping()) != nil else {
+      submitted = false
+      message = PlainLanguage.removalNotStarted
+      return
+    }
     do {
-      guard let client else { throw EngineXPCSubmissionError.connectionFailed }
       let reply = try await client.removal(
         ticket: ticket, confirmation: phrase, authorization: authorization)
       completed = reply.completed
       if reply.requiresReview { onRequiresReview() }
       message = reply.message
     } catch {
-      switch RemovalConnectionLoss(
-        helperStillRegistered: InstallerHelperSetup.display.status != .missing)
-      {
+      let outcome = RemovalConnectionLoss(
+        helperRetired: await RemovalOutcomeProbe.helperRetired(),
+        macOSContainerBytes: RemovalOutcomeProbe.macOSContainerBytes(),
+        macOSBytesAfter: ticket.macOSBytesAfter, reclaimBytes: ticket.reclaimBytes)
+      switch outcome {
       case .completed:
         completed = true
         message = PlainLanguage.removalCompletedWithoutReply(freeSpace: ticket.kind == .freeSpace)
