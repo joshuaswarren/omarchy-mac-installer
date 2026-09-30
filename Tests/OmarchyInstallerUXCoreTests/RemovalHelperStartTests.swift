@@ -25,6 +25,16 @@
       XCTAssertTrue(PlainLanguage.removalBlockedModel.hasSuffix("No disk changes were made."))
     }
 
+    func testABusyHelperIsLeftToFinish() {
+      for canInstall in [true, false] {
+        XCTAssertEqual(
+          RemovalHelperStart(helper: HelperDisplay(status: .busy, canInstall: canInstall)), .busy)
+      }
+      XCTAssertTrue(
+        PlainLanguage.removalHelperSetupMessage(for: InstallerHelperSetupError.busy).contains(
+          "busy"))
+    }
+
     func testACurrentHelperScansRightAway() {
       for canInstall in [true, false] {
         XCTAssertEqual(

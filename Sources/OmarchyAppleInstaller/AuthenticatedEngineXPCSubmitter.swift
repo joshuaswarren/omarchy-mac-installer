@@ -142,6 +142,54 @@
       }
     }
 
+    /// How a ping went, for deciding what to do with an installed helper.
+    public enum PingResult: Equatable, Sendable {
+      /// The helper answered yes.
+      case answered
+      /// The connection ended before the timeout without a yes: nothing is
+      /// listening, or the helper refused this app, as a helper from another
+      /// build does, or it is uninstalling itself.
+      case refused
+      /// No answer within the timeout: the helper may just be busy with a long
+      /// job, so it must not be treated as broken or replaced on that alone.
+      case noAnswer
+    }
+
+    public func pingResult(timeout: Duration = .seconds(8)) async -> PingResult {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timedOut = EngineXPCFlag()
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        timedOut.set()
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let answered: Bool? = await withCheckedContinuation { continuation in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.ping { answer in
+          gate.resume(returning: answer)
+          connectionHandle.invalidate()
+        }
+      }
+      if answered == true {
+        return .answered
+      }
+      return timedOut.isSet ? .noAnswer : .refused
+    }
+
     /// Asks the helper to remove the installer app the package left behind.
     /// Returns the helper's summary, or nil when it does not answer in time.
     public func retirePackageInstalledApps(timeout: Duration = .seconds(10)) async -> String? {
@@ -598,6 +646,30 @@
       let candidate = continuation
       continuation = nil
       return candidate
+    }
+  }
+
+  private final class EngineXPCFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+  }
+
+  private final class EngineXPCOptionalBoolGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool?, Never>?
+
+    init(continuation: CheckedContinuation<Bool?, Never>) {
+      self.continuation = continuation
+    }
+
+    func resume(returning value: Bool?) {
+      lock.lock()
+      let candidate = continuation
+      continuation = nil
+      lock.unlock()
+      candidate?.resume(returning: value)
     }
   }
 

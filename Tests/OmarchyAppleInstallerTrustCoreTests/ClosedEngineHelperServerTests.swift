@@ -26,6 +26,31 @@
       }
     }
 
+    func testPingAndVersionAnswerWithoutWaitingOnTheServer() throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server, version: "28")
+      // Both reply before returning: no hop onto the actor, which a long job
+      // keeps busy.
+      final class Replies: @unchecked Sendable {
+        let lock = NSLock()
+        var pinged: Bool?
+        var version: String?
+      }
+      let replies = Replies()
+      endpoint.ping { value in replies.lock.withLock { replies.pinged = value } }
+      endpoint.helperVersion { value in replies.lock.withLock { replies.version = value } }
+      replies.lock.withLock {
+        XCTAssertEqual(replies.pinged, true)
+        XCTAssertEqual(replies.version, "28")
+      }
+    }
+
     func testEndpointRetiresPackageInstalledAppsAndSummarizes() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }

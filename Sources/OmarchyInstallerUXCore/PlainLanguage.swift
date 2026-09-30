@@ -129,6 +129,8 @@
     public static let helperRetiringHeadline = "The installation service was just removed"
     public static let helperRetiringDetail =
       "Omarchy's removal finished and its installation service is removing itself. Nothing was changed. Try again in a moment; the app sets the service up again with your password."
+    public static let authorizeHelperBusy =
+      "The installation service is busy with another request, so nothing was changed. Try again when it finishes."
     public static let authorizeHelperFailed =
       "The installation service couldn’t be set up, so nothing was changed. Try again."
 

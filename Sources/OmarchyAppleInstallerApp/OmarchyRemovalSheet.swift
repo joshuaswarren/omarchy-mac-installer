@@ -357,6 +357,9 @@ struct OmarchyRemovalSheet: View {
       case .blockedModel:
         message = PlainLanguage.removalBlockedModel
         return
+      case .busy:
+        message = PlainLanguage.removalServiceBusy
+        return
       case .scan:
         break
       case .credentialsFirst:

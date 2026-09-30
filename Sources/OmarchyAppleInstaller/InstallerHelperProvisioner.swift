@@ -15,6 +15,10 @@
     /// The helper is registered but launchd has not loaded it, because the
     /// person switched it off in Login Items.
     case disabled
+    /// The helper is loaded but did not answer in time, as when it is busy
+    /// verifying a large payload for another job. It is never replaced for
+    /// that alone, which would end the job.
+    case busy
   }
 
   /// What `InstallerHelperProvisioner.ensureCurrent` did.
@@ -33,6 +37,8 @@
     case cancelled
     /// The helper is switched off and was left that way.
     case disabled
+    /// The helper is busy with another job; nothing was changed.
+    case busy
     /// This build cannot install the helper itself.
     case unavailable
     /// Installation reported success but the helper does not answer, or the
@@ -46,8 +52,8 @@
     /// Cheap and synchronous, safe on the main actor: whether launchd has the
     /// helper's job file.
     var isRegistered: Bool { get }
-    /// Whether the helper answers a ping in time.
-    func answers() async -> Bool
+    /// How the helper answered a ping: yes, refused quickly, or not in time.
+    func ping() async -> AuthenticatedEngineXPCSubmitter.PingResult
     /// Whether launchd has the helper's job loaded. Switching the helper off in
     /// Login Items unloads the job but leaves its file, while a helper from
     /// another build stays loaded and refuses this app.
@@ -165,10 +171,17 @@
       guard probe.isRegistered else {
         return .missing
       }
-      guard await probe.answers() else {
-        // Loaded but silent means another build that refuses this app; it is
-        // replaced like any outdated helper, not reported as switched off.
+      switch await probe.ping() {
+      case .answered:
+        break
+      case .refused:
+        // Loaded but refusing means another build that only accepts its own
+        // app; it is replaced like any outdated helper, not reported as
+        // switched off.
         return await probe.isLoaded() ? .outdated : .disabled
+      case .noAnswer:
+        // Slow is not broken: a loaded helper may be busy with another job.
+        return await probe.isLoaded() ? .busy : .disabled
       }
       guard let bundledHelperVersion else {
         return .current
@@ -198,6 +211,8 @@
         return .alreadyCurrent
       case .disabled where !reenablingSwitchedOff:
         return .disabled
+      case .busy:
+        return .busy
       case .missing, .outdated, .disabled:
         break
       }
@@ -237,7 +252,7 @@
         return outcome
       case .outdated:
         return .failed("The helper was installed but an older build still answers.")
-      case .missing, .disabled:
+      case .missing, .disabled, .busy:
         return .failed("The helper was installed but does not answer.")
       }
     }
@@ -304,13 +319,11 @@
       }.value
     }
 
-    public func answers() async -> Bool {
-      do {
-        try await submitter().ping()
-        return true
-      } catch {
-        return false
+    public func ping() async -> AuthenticatedEngineXPCSubmitter.PingResult {
+      guard let submitter = try? submitter() else {
+        return .refused
       }
+      return await submitter.pingResult()
     }
 
     public func reportedVersion() async -> String? {

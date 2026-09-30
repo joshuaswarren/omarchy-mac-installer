@@ -20,6 +20,7 @@
         (FakeProbe(registered: false), "28", .missing),
         (FakeProbe(registered: true, answering: false), "28", .disabled),
         (FakeProbe(registered: true, answering: false, loaded: true), "28", .outdated),
+        (FakeProbe(registered: true, answering: false, slow: true), "28", .busy),
         (FakeProbe(registered: true, version: "28"), "28", .current),
         (FakeProbe(registered: true, version: "27"), "28", .outdated),
         (FakeProbe(registered: true, version: nil), "28", .outdated),
@@ -104,6 +105,19 @@
       let outcome = await provisioner(probe, blesser: blesser).ensureCurrent(owner)
       XCTAssertEqual(outcome, .installedSilently)
       XCTAssertEqual(blesser.calls, [.silent("owner")])
+    }
+
+    func testABusyHelperIsNeverReplacedMidJob() async {
+      // Marcelo's review: a helper verifying a large payload answers late; a
+      // re-bless would end its job.
+      let blesser = FakeBlesser(silent: .blessed)
+      for reenabling in [false, true] {
+        let outcome = await provisioner(
+          FakeProbe(registered: true, answering: false, slow: true), blesser: blesser
+        ).ensureCurrent(owner, reenablingSwitchedOff: reenabling)
+        XCTAssertEqual(outcome, .busy)
+      }
+      XCTAssertEqual(blesser.calls, [])
     }
 
     func testSwitchedOffHelperIsTurnedBackOnWhenThePersonChoseTo() async {
@@ -276,18 +290,20 @@
           helperCodeSigningRequirement: #"identifier "com.omarchy.apple-installer.helper""#
         )
       }
-      let answered = await probe.answers()
+      // Refused, not timed out: nothing is listening, so it is not "busy".
+      let pinged = await probe.ping()
       let version = await probe.reportedVersion()
-      XCTAssertFalse(answered)
+      XCTAssertEqual(pinged, .refused)
       XCTAssertNil(version)
     }
 
     func testSystemProbeTreatsAMissingConfigurationAsNotAnswering() async {
       struct NoConfiguration: Error {}
       let probe = SystemInstallerHelperProbe { throw NoConfiguration() }
-      let answered = await probe.answers()
+      // Refused, not timed out: nothing is listening, so it is not "busy".
+      let pinged = await probe.ping()
       let version = await probe.reportedVersion()
-      XCTAssertFalse(answered)
+      XCTAssertEqual(pinged, .refused)
       XCTAssertNil(version)
     }
 
@@ -318,6 +334,7 @@
     private var registered: Bool
     private var answering: Bool
     private let loaded: Bool
+    private let slow: Bool
     private var version: String?
     private let installsVersion: String?
     private var pingCount = 0
@@ -326,12 +343,15 @@
     ///   nil leaves a helper that never answers.
     /// - Parameter loaded: whether launchd has the job loaded while it does
     ///   not answer; false models a helper switched off in Login Items.
+    /// - Parameter slow: a loaded helper that does not answer in time, as when
+    ///   busy verifying a payload; otherwise a silent helper refuses at once.
     init(
-      registered: Bool, answering: Bool = true, loaded: Bool = false, version: String? = nil,
-      installsVersion: String? = nil
+      registered: Bool, answering: Bool = true, loaded: Bool = false, slow: Bool = false,
+      version: String? = nil, installsVersion: String? = nil
     ) {
       self.registered = registered
-      self.loaded = loaded
+      self.loaded = loaded || slow
+      self.slow = slow
       self.answering = answering && registered
       self.version = version
       self.installsVersion = installsVersion
@@ -341,10 +361,11 @@
 
     var isRegistered: Bool { lock.withLock { registered } }
 
-    func answers() async -> Bool {
+    func ping() async -> AuthenticatedEngineXPCSubmitter.PingResult {
       lock.withLock {
         pingCount += 1
-        return answering
+        if answering { return .answered }
+        return slow ? .noAnswer : .refused
       }
     }
 

@@ -33,6 +33,14 @@
     case retiring
   }
 
+  /// A flag set once and read from any thread.
+  final class HelperRetirementFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+  }
+
   public actor ClosedEngineHelperServer {
     private static let explicitlyUnsupportedDevices = ["apple,j614s"]
 
@@ -45,8 +53,11 @@
     private let espDisks: any InstallConfESPDiskOperating
     private let selfUninstaller: any HelperSelfUninstalling
     private var isExecuting = false
-    /// Set once a removal completes: the helper is uninstalling itself.
-    public private(set) var isRetiring = false
+    /// Set once a removal completes: the helper is uninstalling itself. Kept
+    /// outside the actor so ping and the version check can read it at once,
+    /// even while the actor is busy verifying a payload for a long job.
+    private nonisolated let retirement = HelperRetirementFlag()
+    public nonisolated var isRetiring: Bool { retirement.isSet }
     private var completedInstallPlan: CompletedEngineInstallPlan?
     private var installConfConsumed = false
     private var removalPlan:
@@ -181,7 +192,7 @@
       if reply.completed {
         // Nothing of Omarchy is left, so the helper goes too. It takes no more
         // work from here on, before this reply even leaves.
-        isRetiring = true
+        retirement.set()
         selfUninstaller.uninstallAfterRemoval()
       }
       return reply
@@ -407,22 +418,21 @@
 
     /// A retiring helper answers no, so the app treats it as gone and sets up
     /// a fresh one rather than sending it work.
+    /// Answers at once, never waiting on the server's actor, so a helper
+    /// busy with a long job still answers and is not mistaken for broken.
     public func ping(reply: @escaping @Sendable (Bool) -> Void) {
-      let server = server
-      Task { reply(!(await server.isRetiring)) }
+      reply(!server.isRetiring)
     }
 
     public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
-      let server = server
-      let version = version
-      Task { reply(await server.isRetiring ? "" : version) }
+      reply(server.isRetiring ? "" : version)
     }
 
     public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {
       let server = server
       let retirement = retirement
       Task.detached {
-        guard !(await server.isRetiring) else {
+        guard !server.isRetiring else {
           return reply("helper is retiring; nothing changed")
         }
         reply(PackageInstalledAppRetirement.summary(retirement.run()))

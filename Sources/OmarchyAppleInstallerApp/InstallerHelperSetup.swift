@@ -53,6 +53,8 @@ enum InstallerHelperSetup {
       throw InstallerHelperSetupError.cancelled
     case .disabled:
       throw InstallerHelperSetupError.switchedOff
+    case .busy:
+      throw InstallerHelperSetupError.busy
     case .unavailable:
       throw InstallerHelperSetupError.unavailable
     case .failed(let message):

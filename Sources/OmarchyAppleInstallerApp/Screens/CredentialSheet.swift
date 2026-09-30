@@ -184,6 +184,7 @@ struct CredentialSheet: View {
     case .helperSetupCancelled: PlainLanguage.authorizeHelperCancelled
     case .helperSwitchedOff: PlainLanguage.authorizeHelperSwitchedOff
     case .helperSetupFailed: PlainLanguage.authorizeHelperFailed
+    case .helperBusy: PlainLanguage.authorizeHelperBusy
     case nil: nil
     }
   }

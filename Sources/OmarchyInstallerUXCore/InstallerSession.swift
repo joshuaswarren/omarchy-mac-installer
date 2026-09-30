@@ -634,6 +634,7 @@
           switch setup {
           case .cancelled: .helperSetupCancelled
           case .switchedOff: .helperSwitchedOff
+          case .busy: .helperBusy
           case .unavailable, .failed: .helperSetupFailed
           }
         let reopened = context.failed(sheetError)

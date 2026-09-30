@@ -658,6 +658,7 @@
       let cases: [(InstallerHelperSetupError, CredentialSheetError)] = [
         (.cancelled, .helperSetupCancelled),
         (.switchedOff, .helperSwitchedOff),
+        (.busy, .helperBusy),
         (.failed("launchd"), .helperSetupFailed),
         (.unavailable, .helperSetupFailed),
       ]

@@ -186,6 +186,8 @@
     case cancelled
     /// The helper is switched off in Login Items.
     case switchedOff
+    /// The helper is busy with another job, for example another user's.
+    case busy
     /// This build cannot install the helper, and none is in place.
     case unavailable
     /// The message is for diagnostics only.
@@ -417,6 +419,7 @@
     case helperSetupCancelled
     case helperSwitchedOff
     case helperSetupFailed
+    case helperBusy
   }
 
   public struct CredentialSheetContext: Equatable, Sendable {

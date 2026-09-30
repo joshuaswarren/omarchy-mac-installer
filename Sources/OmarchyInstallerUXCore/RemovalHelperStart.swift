@@ -19,6 +19,8 @@
     case switchedOff
     /// This Mac model is refused outright; nothing privileged is set up.
     case blockedModel
+    /// The helper is busy with another job; try again later.
+    case busy
 
     /// - Parameter helper: the status from asking the helper itself, so a
     ///   switched-off helper shows as `.disabled`.
@@ -37,6 +39,8 @@
         self = helper.canInstall ? .credentialsFirst : .scan
       case .disabled:
         self = helper.canInstall ? .switchedOff : .scan
+      case .busy:
+        self = .busy
       case .missing:
         self = helper.canInstall ? .credentialsFirst : .unavailable
       }
@@ -47,6 +51,8 @@
     public static let removalCredentialsFirst =
       "To look for Omarchy on this Mac, enter your macOS administrator account. It sets up the removal service and approves the removal you’ll review next. macOS will show a notice that \(windowTitle) added a background item."
     public static let removalContinue = "Continue"
+    public static let removalServiceBusy =
+      "The removal service is busy with another request. Close this window and try again when it finishes. No disk changes were made."
     public static let removalBlockedModel =
       "Removal is not supported on this Mac model. No disk changes were made."
     public static let removalSwitchedOff =
@@ -75,6 +81,8 @@
           "The removal service is switched off. In System Settings, open General → Login Items & Extensions, switch it on under Allow in the Background, then try again. No disk changes were made."
       case .unavailable:
         return removalServiceMissing
+      case .busy:
+        return removalServiceBusy
       case .failed, nil:
         return "The removal service couldn’t be set up. Try again. No disk changes were made."
       }
