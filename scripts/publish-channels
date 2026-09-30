@@ -434,20 +434,67 @@ print("\n".join(sorted({name.split("/")[0] for name in zipfile.ZipFile(sys.argv[
   xcrun stapler validate "$work/unpacked/$INSTALLER_APP_NAME.app" >/dev/null 2>&1 ||
     die "the app in the zip has no stapled notarization ticket: $zip"
 
+  # It must also be this team's app, the version being published, a newer
+  # build than the channel already serves, and able to install its own helper.
+  local app="$work/unpacked/$INSTALLER_APP_NAME.app" team_requirement build previous
+  team_requirement="anchor apple generic and identifier \"$INSTALLER_APP_IDENTIFIER\" and certificate leaf[subject.OU] = \"$INSTALLER_TEAM_ID\""
+  codesign --verify --strict -R="$team_requirement" "$app" >/dev/null 2>&1 ||
+    die "the app in the zip is not signed by team $INSTALLER_TEAM_ID: $zip"
+  build=$(python3 - "$app" "$version" "$INSTALLER_HELPER_IDENTIFIER" 2>"$work/app-check.err" <<'PY'
+import os
+import plistlib
+import sys
+
+app, version, helper = sys.argv[1:4]
+with open(os.path.join(app, "Contents/Info.plist"), "rb") as stream:
+    info = plistlib.load(stream)
+shipped = info.get("CFBundleShortVersionString")
+if shipped != version:
+    sys.exit(f"the app is version {shipped}, not {version}")
+build = str(info.get("CFBundleVersion", ""))
+if not build.isdigit():
+    sys.exit("the app has no numeric build number")
+if not (info.get("SMPrivilegedExecutables") or {}).get(helper):
+    sys.exit("the app does not declare its helper for SMJobBless, so it cannot install it")
+path = os.path.join(app, "Contents/Library/LaunchServices", helper)
+if os.path.islink(path) or not os.path.isfile(path) or not os.access(path, os.X_OK):
+    sys.exit("the app has no helper where SMJobBless looks for it")
+with open(path, "rb") as stream:
+    if b"__launchd_plist" not in stream.read():
+        sys.exit("the app's helper carries no launchd job for SMJobBless")
+print(build)
+PY
+  ) || die "$(cat "$work/app-check.err"): $zip"
+
   digest=$(file_digest "$zip")
+  if fetch_public "installer/$channel/installer.json" "$work/previous.json"; then
+    previous=$(python3 - "$work/previous.json" "$digest" <<'PY'
+import json
+import sys
+
+document = json.load(open(sys.argv[1]))
+# Republishing the very same zip, as after a failed upload, is allowed.
+same = document.get("sha256") == sys.argv[2]
+print("same" if same else document.get("build_number", ""))
+PY
+    ) || die "the channel's current installer.json is unreadable"
+    [[ $previous == "same" || -z $previous ]] || (( build > previous )) ||
+      die "build $build is not above build $previous already published to $channel"
+  fi
   printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.zip" >"$work/zip.sha256"
   immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.zip"
 
   python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$zip")" \
-    "$STREAM_BASE/$immutable_key" <<'PY'
+    "$STREAM_BASE/$immutable_key" "$build" <<'PY'
 import datetime
 import json
 import sys
 
-output, version, sha256, size_bytes, source = sys.argv[1:6]
+output, version, sha256, size_bytes, source, build = sys.argv[1:7]
 document = {
     "schema_version": 1,
     "version": version,
+    "build_number": int(build),
     "sha256": sha256,
     "size_bytes": int(size_bytes),
     "published_at": datetime.datetime.now(datetime.timezone.utc)

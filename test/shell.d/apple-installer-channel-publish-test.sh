@@ -122,7 +122,15 @@ cat >"$BIN_DIR/ditto" <<'SHIM'
 #!/bin/bash
 printf 'ditto %s\n' "$*" >>"$CALLS"
 [[ $1 == -x && $2 == -k ]] || exit 64
-python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$3" "$4"
+python3 - "$3" "$4" <<'PY'
+import os, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for entry in archive.infolist():
+        path = archive.extract(entry, sys.argv[2])
+        mode = entry.external_attr >> 16
+        if mode:
+            os.chmod(path, mode & 0o7777)
+PY
 SHIM
 
 cat >"$BIN_DIR/xcrun" <<'SHIM'
@@ -408,14 +416,21 @@ print(json.loads(base64.b64decode(d["catalog"]))["sequence"])
 pass "promoting rc does not disturb stable"
 
 # --- the app zip publishes to an immutable key and the channel -------------
-# make_app_zip OUT [FILLER BYTES] [EXTRA TOP-LEVEL ENTRY]
+# make_app_zip OUT [FILLER BYTES] [EXTRA TOP-LEVEL ENTRY] [VERSION] [BUILD] [DECLARES HELPER 1/0]
 make_app_zip() {
-  python3 - "$1" "$INSTALLER_APP_NAME.app" "${2:-4096}" "${3:-}" <<'PY'
-import sys, zipfile
-out, app, filler, extra = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+  python3 - "$1" "$INSTALLER_APP_NAME.app" "${2:-4096}" "${3:-}" "${4:-2.0.0}" "${5:-1}" \
+    "${6:-1}" "$INSTALLER_HELPER_IDENTIFIER" <<'PY'
+import plistlib, sys, zipfile
+out, app, filler, extra, version, build, declares, helper = sys.argv[1:9]
+info = {"CFBundleShortVersionString": version, "CFBundleVersion": build}
+if declares == "1":
+    info["SMPrivilegedExecutables"] = {helper: 'identifier "' + helper + '"'}
 with zipfile.ZipFile(out, "w") as archive:
-    archive.writestr(f"{app}/Contents/Info.plist", "<plist/>")
-    archive.writestr(f"{app}/Contents/MacOS/app", b"\0" * filler)
+    archive.writestr(f"{app}/Contents/Info.plist", plistlib.dumps(info))
+    archive.writestr(f"{app}/Contents/MacOS/app", b"\0" * int(filler))
+    entry = zipfile.ZipInfo(f"{app}/Contents/Library/LaunchServices/{helper}")
+    entry.external_attr = 0o100755 << 16
+    archive.writestr(entry, b"\xcf\xfa\xed\xfe __TEXT __launchd_plist " + b"\0" * 64)
     if extra:
         archive.writestr(extra, "x")
 PY
@@ -436,6 +451,10 @@ grep -q "\"source\": \".*/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.zip\"" \
   fail "the pointer names the immutable zip" "$(cat "$STREAM_DIR/installer/stable/installer.json")"
 grep -q "^xcrun stapler validate .*/unpacked/$INSTALLER_APP_NAME.app" "$CALLS" ||
   fail "the app inside the zip is checked for a stapled ticket" "$(grep stapler "$CALLS")"
+grep -qF -- "-R=anchor apple generic and identifier \"$INSTALLER_APP_IDENTIFIER\" and certificate leaf[subject.OU] = \"$INSTALLER_TEAM_ID\"" "$CALLS" ||
+  fail "the app is checked against the team's signing requirement" "$(grep codesign "$CALLS")"
+grep -q '"build_number": 1' "$STREAM_DIR/installer/stable/installer.json" ||
+  fail "the pointer records the build number" "$(cat "$STREAM_DIR/installer/stable/installer.json")"
 pass "the installer zip publishes to both an immutable key and the channel"
 
 grep -qF -- "--content-disposition attachment; filename=\"$INSTALLER_APP_NAME.zip\"" "$CALLS" ||
@@ -476,8 +495,29 @@ grep -q "stapled notarization" "$WORK/unstapled.log" ||
   fail "the refusal names notarization" "$(cat "$WORK/unstapled.log")"
 pass "only a zip of the signed, stapled app is uploaded"
 
+# --- the zip must be this version, a newer build, and able to install its helper
+make_app_zip "$WORK/WrongVersion.zip" 4096 "" 2.0.9 5
+make_app_zip "$WORK/NoHelper.zip" 4096 "" 2.0.2 5 0
+make_app_zip "$WORK/OldBuild.zip" 5000 "" 2.0.2 1
+for case in WrongVersion:2.0.2 NoHelper:2.0.2 OldBuild:2.0.2; do
+  : >"$CALLS"
+  name=${case%%:*} version=${case#*:}
+  if OMARCHY_PUBLISH_ASSUME_YES=installer-v$version "$PUBLISHER" app-publish \
+    --zip "$WORK/$name.zip" --version "$version" >"$WORK/$name.log" 2>&1; then
+    fail "a $name zip is refused"
+  fi
+  grep -q "^aws s3 cp" "$CALLS" && fail "a $name zip uploads nothing"
+done
+grep -q "version 2.0.9, not 2.0.2" "$WORK/WrongVersion.log" ||
+  fail "the refusal names the version" "$(cat "$WORK/WrongVersion.log")"
+grep -q "cannot install it" "$WORK/NoHelper.log" ||
+  fail "the refusal names the helper" "$(cat "$WORK/NoHelper.log")"
+grep -q "build 1 is not above build 1" "$WORK/OldBuild.log" ||
+  fail "the refusal names the build" "$(cat "$WORK/OldBuild.log")"
+pass "only this version, a newer build, with a helper it can install, is uploaded"
+
 # --- republishing the same immutable version with different bytes is refused -
-make_app_zip "$WORK/Different.zip" 8192
+make_app_zip "$WORK/Different.zip" 8192 "" 2.0.0 2
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
   --zip "$WORK/Different.zip" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
   fail "rewriting an immutable version is refused"
