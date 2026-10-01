@@ -509,13 +509,12 @@
     /// an older process whose bundle was updated in place, still counts. Nil
     /// when the process list can't be verified.
     static func anotherInstallerIsOpen(
-      processes: [(pid: pid_t, path: String)]? = PackageInstalledAppRetirement.runningProcesses(),
+      processes: [PackageInstalledAppRetirement.RunningProcess]? =
+        PackageInstalledAppRetirement.runningProcesses(),
       own: pid_t = getpid()
     ) -> Bool? {
       guard let processes else { return nil }
-      return processes.contains { process in
-        process.pid != own && process.path.hasSuffix(".app/Contents/MacOS/OmarchyAppleInstallerApp")
-      }
+      return processes.contains { $0.pid != own && $0.mayBeInstaller }
     }
 
     private static func runWithStatus(

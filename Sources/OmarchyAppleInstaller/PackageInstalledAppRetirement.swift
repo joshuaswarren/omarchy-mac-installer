@@ -46,7 +46,12 @@
       bundleIdentifier: String = InstallerProductIdentity.appIdentifier,
       packageOwner: uid_t = 0,
       runningExecutablePaths: @escaping @Sendable () -> [String]? = {
-        PackageInstalledAppRetirement.runningProcesses()?.map(\.path)
+        // A copy of the installer whose path can't be read could be running
+        // from the very bundle being retired, so the list proves nothing.
+        guard let processes = PackageInstalledAppRetirement.runningProcesses(),
+          !processes.contains(where: { $0.path == nil && $0.mayBeInstaller })
+        else { return nil }
+        return processes.compactMap(\.path)
       }
     ) {
       self.applicationsDirectory = applicationsDirectory
@@ -183,16 +188,38 @@
       return paths.contains { $0.hasPrefix(contents) }
     }
 
-    /// The executable path of every process this process can see.
-    public static func runningExecutablePaths() -> [String] {
-      runningProcesses()?.map(\.path) ?? []
+    /// The installer app's executable, by which its processes are found.
+    public static let installerExecutableName = "OmarchyAppleInstallerApp"
+
+    /// One running process. `path` is nil when the kernel can't give it, as
+    /// for a live process whose executable was deleted or replaced on disk;
+    /// `name` is then the kernel's record of it (the first 16 characters).
+    public struct RunningProcess: Sendable {
+      public let pid: pid_t
+      public let path: String?
+      public let name: String
+
+      /// Could be a copy of the installer: by path, or by name when the path
+      /// is gone.
+      public var mayBeInstaller: Bool {
+        if let path {
+          return path.hasSuffix(".app/Contents/MacOS/" + installerExecutableName)
+        }
+        return name == String(installerExecutableName.prefix(Int(MAXCOMLEN)))
+      }
     }
 
-    /// Every running process with its executable path, or nil when the list
-    /// can't be read. A process whose path can't be read because it is gone
-    /// or a zombie (ENOENT, ESRCH) has no executable and is left out; any
-    /// other failure makes the whole list unverified, so nil.
-    public static func runningProcesses() -> [(pid: pid_t, path: String)]? {
+    /// The executable path of every process this process can see.
+    public static func runningExecutablePaths() -> [String] {
+      runningProcesses()?.compactMap(\.path) ?? []
+    }
+
+    /// Every running process, or nil when the list can't be verified. A
+    /// process whose path can't be read is looked up again: if it has exited
+    /// or is a zombie it has no executable and is left out; if it is live, it
+    /// is kept with its kernel name; if even that can't be read, the list is
+    /// unverified.
+    public static func runningProcesses() -> [RunningProcess]? {
       let capacity = proc_listallpids(nil, 0)
       guard capacity > 0 else {
         return nil
@@ -206,19 +233,50 @@
         return nil
       }
       var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-      var processes: [(pid: pid_t, path: String)] = []
+      var processes: [RunningProcess] = []
       for pid in pids.prefix(min(Int(listed), pids.count)) where pid > 0 {
         let length = path.withUnsafeMutableBufferPointer { buffer in
           proc_pidpath(pid, buffer.baseAddress, UInt32(buffer.count))
         }
-        guard length > 0 else {
-          if errno == ENOENT || errno == ESRCH { continue }
+        if length > 0 {
+          let bytes = path.prefix(Int(length)).map { UInt8(bitPattern: $0) }
+          processes.append(
+            RunningProcess(pid: pid, path: String(decoding: bytes, as: UTF8.self), name: ""))
+          continue
+        }
+        switch kernelRecord(of: pid) {
+        case .gone:
+          continue
+        case .live(let name):
+          processes.append(RunningProcess(pid: pid, path: nil, name: name))
+        case .unreadable:
           return nil
         }
-        let bytes = path.prefix(Int(length)).map { UInt8(bitPattern: $0) }
-        processes.append((pid, String(decoding: bytes, as: UTF8.self)))
       }
       return processes
+    }
+
+    private enum KernelRecord {
+      case gone
+      case live(name: String)
+      case unreadable
+    }
+
+    /// The kernel's record of a process, readable by any user.
+    private static func kernelRecord(of pid: pid_t) -> KernelRecord {
+      var info = kinfo_proc()
+      var size = MemoryLayout<kinfo_proc>.stride
+      var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+      guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else {
+        return .unreadable
+      }
+      guard size > 0, info.kp_proc.p_stat != SZOMB else {
+        return .gone
+      }
+      let name = withUnsafeBytes(of: info.kp_proc.p_comm) { bytes in
+        String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+      }
+      return .live(name: name)
     }
   }
 #endif

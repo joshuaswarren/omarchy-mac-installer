@@ -178,18 +178,38 @@
     }
 
     func testAnotherInstallerIsAnyOtherProcessOfTheAppEvenFromTheSameBundle() {
+      typealias Process = PackageInstalledAppRetirement.RunningProcess
       let app =
         "/Applications/\(InstallerProductIdentity.appName).app/Contents/MacOS/OmarchyAppleInstallerApp"
       let us: pid_t = 100
+      let ours = Process(pid: us, path: app, name: "")
+      func open(_ others: [Process]?) -> Bool? {
+        SystemInstallerHelperProbe.anotherInstallerIsOpen(
+          processes: others.map { [ours] + $0 }, own: us)
+      }
       // Another user's copy of the very same bundle is another installer.
-      XCTAssertEqual(
-        SystemInstallerHelperProbe.anotherInstallerIsOpen(
-          processes: [(us, app), (200, app)], own: us), true)
-      XCTAssertEqual(
-        SystemInstallerHelperProbe.anotherInstallerIsOpen(
-          processes: [(us, app), (300, "/usr/bin/true")], own: us), false)
+      XCTAssertEqual(open([Process(pid: 200, path: app, name: "")]), true)
+      XCTAssertEqual(open([Process(pid: 300, path: "/usr/bin/true", name: "")]), false)
+      // A live installer whose bundle was deleted or updated in place has no
+      // readable path; its kernel name (16 characters) still gives it away.
+      XCTAssertEqual(open([Process(pid: 400, path: nil, name: "OmarchyAppleInst")]), true)
+      XCTAssertEqual(open([Process(pid: 500, path: nil, name: "node")]), false)
       // An unverified process list proves nothing.
-      XCTAssertNil(SystemInstallerHelperProbe.anotherInstallerIsOpen(processes: nil, own: us))
+      XCTAssertNil(open(nil))
+    }
+
+    func testLiveProcessesWithoutPathsThatAreNotInstallersDoNotBlock() {
+      // As measured on a typical Mac: live node and codex processes whose
+      // executables were replaced on disk have no readable path. Injected, so
+      // the result doesn't depend on what else is open while tests run.
+      typealias Process = PackageInstalledAppRetirement.RunningProcess
+      let processes = [
+        Process(pid: 100, path: "/usr/bin/true", name: ""),
+        Process(pid: 200, path: nil, name: "node"),
+        Process(pid: 300, path: nil, name: "codex"),
+      ]
+      XCTAssertEqual(
+        SystemInstallerHelperProbe.anotherInstallerIsOpen(processes: processes, own: 100), false)
     }
 
     func testTheProcessListReadsHereAndIncludesThisProcess() throws {
