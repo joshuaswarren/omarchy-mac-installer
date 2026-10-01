@@ -151,6 +151,13 @@
       XCTAssertEqual(URL(fileURLWithPath: aside).deletingLastPathComponent().path, "/var/db")
     }
 
+    func testAnUnverifiableProcessListKeepsTheBundle() throws {
+      try makeBundle("Current")
+      let results = retirement(runningExecutablePaths: { nil }).run()
+      XCTAssertEqual(results["Current.app"], .keptRunning)
+      XCTAssertTrue(exists("Current.app"))
+    }
+
     func testRunningExecutablePathsIncludesThisProcess() {
       let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
       let paths = PackageInstalledAppRetirement.runningExecutablePaths()
@@ -169,7 +176,7 @@
     }
 
     private func retirement(
-      packageOwner: uid_t = getuid(), runningExecutablePaths: @escaping @Sendable () -> [String]
+      packageOwner: uid_t = getuid(), runningExecutablePaths: @escaping @Sendable () -> [String]?
     ) -> PackageInstalledAppRetirement {
       PackageInstalledAppRetirement(
         applicationsDirectory: applications,

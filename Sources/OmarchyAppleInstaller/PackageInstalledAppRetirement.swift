@@ -26,7 +26,8 @@
     private let appNames: [String]
     private let bundleIdentifier: String
     private let packageOwner: uid_t
-    private let runningExecutablePaths: @Sendable () -> [String]
+    /// Nil when the process list can't be verified.
+    private let runningExecutablePaths: @Sendable () -> [String]?
 
     /// - Parameter privateDirectory: where a candidate is moved before it is
     ///   checked again and deleted. It is writable only by root, on the same
@@ -44,8 +45,9 @@
       ],
       bundleIdentifier: String = InstallerProductIdentity.appIdentifier,
       packageOwner: uid_t = 0,
-      runningExecutablePaths: @escaping @Sendable () -> [String] =
-        PackageInstalledAppRetirement.runningExecutablePaths
+      runningExecutablePaths: @escaping @Sendable () -> [String]? = {
+        PackageInstalledAppRetirement.runningProcesses()?.map(\.path)
+      }
     ) {
       self.applicationsDirectory = applicationsDirectory
       self.privateDirectory = privateDirectory
@@ -173,16 +175,27 @@
         && status.st_mode & 0o077 == 0
     }
 
+    /// An unverifiable process list counts as running: a bundle is never
+    /// removed on a guess.
     private func isRunning(from bundle: URL) -> Bool {
       let contents = bundle.appendingPathComponent("Contents", isDirectory: true).path + "/"
-      return runningExecutablePaths().contains { $0.hasPrefix(contents) }
+      guard let paths = runningExecutablePaths() else { return true }
+      return paths.contains { $0.hasPrefix(contents) }
     }
 
     /// The executable path of every process this process can see.
     public static func runningExecutablePaths() -> [String] {
+      runningProcesses()?.map(\.path) ?? []
+    }
+
+    /// Every running process with its executable path, or nil when the list
+    /// can't be read. A process whose path can't be read because it is gone
+    /// or a zombie (ENOENT, ESRCH) has no executable and is left out; any
+    /// other failure makes the whole list unverified, so nil.
+    public static func runningProcesses() -> [(pid: pid_t, path: String)]? {
       let capacity = proc_listallpids(nil, 0)
       guard capacity > 0 else {
-        return []
+        return nil
       }
       var pids = [pid_t](repeating: 0, count: Int(capacity) * 2)
       // Returns the number of process IDs written.
@@ -190,19 +203,22 @@
         proc_listallpids(buffer.baseAddress, Int32(buffer.count))
       }
       guard listed > 0 else {
-        return []
+        return nil
       }
-      let count = min(Int(listed), pids.count)
       var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-      return pids.prefix(count).compactMap { pid in
-        guard pid > 0 else { return nil }
+      var processes: [(pid: pid_t, path: String)] = []
+      for pid in pids.prefix(min(Int(listed), pids.count)) where pid > 0 {
         let length = path.withUnsafeMutableBufferPointer { buffer in
           proc_pidpath(pid, buffer.baseAddress, UInt32(buffer.count))
         }
-        guard length > 0 else { return nil }
+        guard length > 0 else {
+          if errno == ENOENT || errno == ESRCH { continue }
+          return nil
+        }
         let bytes = path.prefix(Int(length)).map { UInt8(bitPattern: $0) }
-        return String(decoding: bytes, as: UTF8.self)
+        processes.append((pid, String(decoding: bytes, as: UTF8.self)))
       }
+      return processes
     }
   }
 #endif

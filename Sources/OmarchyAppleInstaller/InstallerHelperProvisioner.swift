@@ -469,8 +469,10 @@
     public func observeWork() async -> InstallerHelperWorkObservation {
       let label = InstallerProductIdentity.helperIdentifier
       return await Task.detached {
-        if Self.anotherInstallerIsOpen() {
-          return .working
+        switch Self.anotherInstallerIsOpen() {
+        case true?: return .working
+        case nil: return .unknown
+        case false?: break
         }
         let launchd = Self.runWithStatus("/bin/launchctl", ["print", "system/\(label)"])
         switch launchd.status {
@@ -501,13 +503,18 @@
       }.value
     }
 
-    /// Another copy of the installer, of any build or name, is running: only
-    /// an installer sends an older helper work.
-    private static func anotherInstallerIsOpen() -> Bool {
-      let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
-      return PackageInstalledAppRetirement.runningExecutablePaths().contains { path in
-        path.hasSuffix(".app/Contents/MacOS/OmarchyAppleInstallerApp")
-          && URL(fileURLWithPath: path).resolvingSymlinksInPath().path != own
+    /// Another copy of the installer, of any build, name or user, is running:
+    /// only an installer sends an older helper work. Only this process is
+    /// excluded, by ID, so the same bundle open in another user's session, or
+    /// an older process whose bundle was updated in place, still counts. Nil
+    /// when the process list can't be verified.
+    static func anotherInstallerIsOpen(
+      processes: [(pid: pid_t, path: String)]? = PackageInstalledAppRetirement.runningProcesses(),
+      own: pid_t = getpid()
+    ) -> Bool? {
+      guard let processes else { return nil }
+      return processes.contains { process in
+        process.pid != own && process.path.hasSuffix(".app/Contents/MacOS/OmarchyAppleInstallerApp")
       }
     }
 

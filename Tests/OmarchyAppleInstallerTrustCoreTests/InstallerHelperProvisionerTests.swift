@@ -177,6 +177,26 @@
       XCTAssertEqual(blesser.calls, [])
     }
 
+    func testAnotherInstallerIsAnyOtherProcessOfTheAppEvenFromTheSameBundle() {
+      let app =
+        "/Applications/\(InstallerProductIdentity.appName).app/Contents/MacOS/OmarchyAppleInstallerApp"
+      let us: pid_t = 100
+      // Another user's copy of the very same bundle is another installer.
+      XCTAssertEqual(
+        SystemInstallerHelperProbe.anotherInstallerIsOpen(
+          processes: [(us, app), (200, app)], own: us), true)
+      XCTAssertEqual(
+        SystemInstallerHelperProbe.anotherInstallerIsOpen(
+          processes: [(us, app), (300, "/usr/bin/true")], own: us), false)
+      // An unverified process list proves nothing.
+      XCTAssertNil(SystemInstallerHelperProbe.anotherInstallerIsOpen(processes: nil, own: us))
+    }
+
+    func testTheProcessListReadsHereAndIncludesThisProcess() throws {
+      let processes = try XCTUnwrap(PackageInstalledAppRetirement.runningProcesses())
+      XCTAssertTrue(processes.contains { $0.pid == getpid() })
+    }
+
     func testAHelperWhoseWorkCannotBeSeenIsNotReplaced() async {
       // Fourth review: a failed inspection is not proof of idleness.
       let blesser = FakeBlesser(silent: .blessed)
