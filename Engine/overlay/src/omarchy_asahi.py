@@ -30,6 +30,14 @@ INSTALLER_TITLE_PATTERN = re.compile(r"^[A-Za-z0-9 ._()-]{1,64}$")
 VOLUME_GROUP_PATTERN = re.compile(r"^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$")
 PARTITION_PATTERN = re.compile(r"^disk[0-9]+s[0-9]+$")
 READBACK_CHUNK_BYTES = 1024 * 1024
+# Where every macOS through 14 named its restore bundle in bootcaches.plist,
+# and where macOS 26 still keeps it in Preboot, though its bless2 no longer
+# names it.
+RESTORE_BUNDLE_PATH = "./Restore"
+# From macOS 15 the recovery image in a restore image is an Apple Encrypted
+# Archive, which hdiutil cannot attach without Apple's key.
+AEA_MAGIC = b"AEA1"
+HOST_ROOT = "/"
 
 
 class AsahiAdapterError(RuntimeError):
@@ -373,18 +381,143 @@ def _write_step2(installer):
     os.chmod(installer.step2_sh, 0o755)
 
 
+class _WithoutRecoveryMount:
+    """subprocess for stub, minus attaching or detaching its recovery image."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+
+    def run(self, command, *args, **kwargs):
+        if command[:1] == ["hdiutil"] and "recovery" in command:
+            return self._module.CompletedProcess(command, 0)
+        return self._module.run(command, *args, **kwargs)
+
+
 def stub_installer(sysinfo, dutil, osinfo):
-    """A StubInstaller whose Recovery setup is Omarchy's own step2.sh."""
+    """A StubInstaller that reads macOS 26 firmware's bootcaches.plist and
+    writes Omarchy's own step2.sh as its Recovery setup."""
     installer = stub.StubInstaller(sysinfo, dutil, osinfo)
+    load_identity = installer.load_identity
+
+    def load_identity_naming_the_restore_bundle():
+        identity = load_identity()
+        installer.bootcaches["bless2"].setdefault(
+            "RestoreBundlePath", RESTORE_BUNDLE_PATH
+        )
+        return identity
+
+    installer.load_identity = load_identity_naming_the_restore_bundle
+
+    collect_firmware = installer.collect_firmware
+
+    def collect_firmware_from_an_encrypted_recovery(pkg):
+        image = os.path.join(
+            installer.osi.recovery,
+            installer.osi.vgid,
+            "usr/standalone/firmware/arm64eBaseSystem.dmg",
+        )
+        with open(image, "rb") as fd:
+            if fd.read(len(AEA_MAGIC)) != AEA_MAGIC:
+                return collect_firmware(pkg)
+        # The firmware the recovery image carries is the same build's as
+        # the running macOS's own /usr/share/firmware and /usr/sbin, so it is
+        # read from there, and only when the builds match.
+        wanted = installer.manifest["ProductBuildVersion"]
+        running = installer.sysinfo.macos_build
+        if running != wanted:
+            raise AsahiAdapterError(
+                f"the {wanted} recovery image is encrypted; run the installer "
+                f"from macOS {wanted}, not {running}, to collect its firmware"
+            )
+        os.makedirs("recovery/usr")
+        module = stub.subprocess
+        try:
+            for name in ("share", "sbin"):
+                os.symlink(
+                    os.path.join(HOST_ROOT, "usr", name),
+                    os.path.join("recovery/usr", name),
+                )
+            # Only stub's own name is rebound, never the shared module.
+            stub.subprocess = _WithoutRecoveryMount(module)
+            return collect_firmware(pkg)
+        finally:
+            stub.subprocess = module
+            shutil.rmtree("recovery")
+
+    installer.collect_firmware = collect_firmware_from_an_encrypted_recovery
+
     install_files = installer.install_files
 
-    def install_files_with_omarchys_step2(cur_os):
+    def install_files_with_decrypted_images_and_omarchys_step2(cur_os):
         result = install_files(cur_os)
+        _use_decrypted_images(installer, cur_os)
         _write_step2(installer)
         return result
 
-    installer.install_files = install_files_with_omarchys_step2
+    installer.install_files = install_files_with_decrypted_images_and_omarchys_step2
     return installer
+
+
+def _is_encrypted(path):
+    with open(path, "rb") as fd:
+        return fd.read(len(AEA_MAGIC)) == AEA_MAGIC
+
+
+def _use_decrypted_images(installer, cur_os):
+    """Swap the stub's AEA images for the running macOS's decrypted ones.
+
+    A macOS 26 restore image ships its recoveryOS and ExclaveOS images
+    encrypted; the stub's recoveryOS kernel cannot mount them ("Failed to
+    mount root image"). macOS keeps the same build's images decrypted in its
+    own Recovery and Preboot volumes, and their signed root hashes are the
+    ones the stub's boot objects are personalized for.
+    """
+    image = "usr/standalone/firmware/arm64eBaseSystem.dmg"
+    stub_image = os.path.join(installer.osi.recovery, installer.osi.vgid, image)
+    if not _is_encrypted(stub_image):
+        return
+    wanted = installer.manifest["ProductBuildVersion"]
+    running = installer.sysinfo.macos_build
+    if running != wanted:
+        raise AsahiAdapterError(
+            f"the {wanted} recovery image is encrypted; run the installer "
+            f"from macOS {wanted}, not {running}, to use its decrypted copy"
+        )
+    host_image = os.path.join(cur_os.recovery, cur_os.vgid, image)
+    # A UDIF image ends in its 512-byte "koly" trailer.
+    with open(host_image, "rb") as fd:
+        fd.seek(0, os.SEEK_END)
+        trailer = b""
+        if fd.tell() >= 512:
+            fd.seek(-512, os.SEEK_END)
+            trailer = fd.read(4)
+    if trailer != b"koly":
+        raise AsahiAdapterError(
+            "the running macOS's recovery image is not a decrypted disk image"
+        )
+    copies = [(host_image, stub_image)]
+    bless2 = installer.bootcaches["bless2"]
+    restore = os.path.join(
+        installer.pb_vgid, bless2.get("RestoreBundlePath", RESTORE_BUNDLE_PATH)
+    )
+    host_restore = os.path.join(cur_os.preboot, cur_os.vgid, "restore")
+    for name in sorted(os.listdir(restore)):
+        path = os.path.join(restore, name)
+        if not os.path.isfile(path) or not _is_encrypted(path):
+            continue
+        source = os.path.join(host_restore, name)
+        if not os.path.isfile(source) or _is_encrypted(source):
+            raise AsahiAdapterError(
+                f"the running macOS has no decrypted {name} for the stub"
+            )
+        copies.append((source, path))
+    for source, target in copies:
+        # Removed first: the stub container has room for one copy at a time.
+        os.unlink(target)
+        shutil.copyfile(source, target)
 
 
 class AsahiInPlaceRepairAdapter:
