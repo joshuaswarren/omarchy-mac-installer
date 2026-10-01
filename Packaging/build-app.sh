@@ -87,6 +87,9 @@ sealed_catalog_signature="$release_directory/catalog.json.sig"
 
 [[ ${OMARCHY_PRIVATE_PLAIN_TEST:-0} != "1" || ${OMARCHY_PRIVATE_LIMINE_TEST:-0} != "1" ]] \
   || fail "private plain and Limine profiles are mutually exclusive"
+[[ ${OMARCHY_DEVELOPER_BUILD:-0} != "1" \
+  || ( ${OMARCHY_PRIVATE_PLAIN_TEST:-0} != "1" && ${OMARCHY_PRIVATE_LIMINE_TEST:-0} != "1" ) ]] \
+  || fail "the developer build cannot also be a private profile"
 sealed_catalog_available=false
 if [[ -e $sealed_catalog || -L $sealed_catalog \
   || -e $sealed_catalog_signature || -L $sealed_catalog_signature ]]; then
@@ -108,6 +111,11 @@ fi
 
 if [[ ${OMARCHY_PRIVATE_LIMINE_TEST:-0} == "1" && $sealed_catalog_available != "true" ]]; then
   fail "private Limine builds require a sealed private catalog"
+fi
+# A developer catalog can admit Macs no public catalog does, so it must never
+# reach a developer build over the network.
+if [[ ${OMARCHY_DEVELOPER_BUILD:-0} == "1" && $sealed_catalog_available != "true" ]]; then
+  fail "developer builds require a sealed developer catalog"
 fi
 
 if [[ ${OMARCHY_PRIVATE_LIMINE_TEST:-0} == "1" ]]; then
@@ -270,8 +278,11 @@ for model in json.loads(catalog.read_text())["models"]:
     if source.stat().st_size != artifact["sizeBytes"] or hashlib.sha256(source.read_bytes()).hexdigest() != expected:
         raise SystemExit("bundled engine differs from signed catalog")
     target = destination / name
-    if target.exists() and hashlib.sha256(target.read_bytes()).hexdigest() != expected:
-        raise SystemExit("bundled engine conflicts with inspection engine")
+    if target.exists():
+        if hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+            raise SystemExit("bundled engine conflicts with inspection engine")
+        # The inspection engine is already this exact execution engine.
+        continue
     shutil.copyfile(source, target)
     target.chmod(0o444)
 PYCODE
@@ -293,6 +304,9 @@ if [[ ${OMARCHY_PRIVATE_PLAIN_TEST:-0} == "1" ]]; then
 fi
 if [[ ${OMARCHY_PRIVATE_LIMINE_TEST:-0} == "1" ]]; then
   plutil -insert OmarchyPrivateLimineTest -bool true "$contents/Info.plist"
+fi
+if [[ ${OMARCHY_DEVELOPER_BUILD:-0} == "1" ]]; then
+  plutil -insert OmarchyDeveloperBuild -bool true "$contents/Info.plist"
 fi
 plutil -replace CFBundleVersion \
   -string "$build_number" "$contents/Info.plist"
