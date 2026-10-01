@@ -66,6 +66,9 @@
     /// nothing in it may decide trust, and the summary is untrusted text.
     case engineFailed(EngineFailureNotice)
     case emptyResponse
+    /// The request was never handed to the helper: it didn't answer before
+    /// sending, or no connection could be made. Nothing started.
+    case notSubmitted
   }
 
   public struct AuthenticatedEngineXPCSubmitter:
@@ -326,7 +329,13 @@
       ticket: OmarchyRemovalTicket? = nil, confirmation: String = "",
       authorization: MachineOwnerAuthorization? = nil
     ) async throws -> OmarchyRemovalReply {
-      try await ping()
+      // Failures before the request is handed over mean nothing started, and
+      // are told apart from a reply lost after sending.
+      do {
+        try await ping()
+      } catch {
+        throw EngineXPCSubmissionError.notSubmitted
+      }
       let connection = makeConnection()
       let handle = SendableXPCConnection(connection)
       let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -344,7 +353,7 @@
             handle.invalidate()
           }) as? ClosedEngineXPCService
         else {
-          gate.resume(throwing: EngineXPCSubmissionError.connectionFailed)
+          gate.resume(throwing: EngineXPCSubmissionError.notSubmitted)
           handle.invalidate()
           return
         }

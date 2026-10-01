@@ -40,6 +40,22 @@
       XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
+    /// Third review: a removal that never reached the helper must not look
+    /// like a reply lost after sending, which would hold the person in review.
+    func testARemovalThatCannotBeSentIsNotSubmitted() async throws {
+      let submitter = try AuthenticatedEngineXPCSubmitter(
+        machServiceName: "com.omarchy.apple-installer.test.absent",
+        helperCodeSigningRequirement:
+          #"identifier "com.omarchy.apple-installer.helper""#
+      )
+      do {
+        _ = try await submitter.removal()
+        XCTFail("a removal to an absent helper must throw")
+      } catch let error as EngineXPCSubmissionError {
+        XCTAssertEqual(error, .notSubmitted)
+      }
+    }
+
     func testValidServiceAndRequirementAreAcceptedWithoutRegistration() throws {
       XCTAssertNoThrow(
         try AuthenticatedEngineXPCSubmitter(

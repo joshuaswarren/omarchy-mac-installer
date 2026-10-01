@@ -453,9 +453,7 @@ struct OmarchyRemovalSheet: View {
         return
       }
     #endif
-    // A helper that doesn't answer now means the request was never sent, so
-    // nothing started; only a failure after sending is uncertain.
-    guard let client, (try? await client.ping()) != nil else {
+    guard let client else {
       submitted = false
       message = PlainLanguage.removalNotStarted
       return
@@ -466,6 +464,10 @@ struct OmarchyRemovalSheet: View {
       completed = reply.completed
       if reply.requiresReview { onRequiresReview() }
       message = reply.message
+    } catch EngineXPCSubmissionError.notSubmitted {
+      // Never sent, so nothing started and nothing needs review.
+      submitted = false
+      message = PlainLanguage.removalNotStarted
     } catch {
       let outcome = RemovalConnectionLoss(
         helperRetired: await RemovalOutcomeProbe.helperRetired(),
