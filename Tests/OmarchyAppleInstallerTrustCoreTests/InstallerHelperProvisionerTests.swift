@@ -166,6 +166,30 @@
       XCTAssertEqual(probe.cancels, 1, "it takes work again")
     }
 
+    func testAHelperThatCannotBeAskedIsNotReplacedWhileItsEngineRuns() async {
+      // Third review: no answer is not proof of idleness.
+      let blesser = FakeBlesser(silent: .blessed)
+      let outcome = await provisioner(
+        FakeProbe(registered: true, version: nil, replacement: nil, engineRunning: true),
+        blesser: blesser
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .busy)
+      XCTAssertEqual(blesser.calls, [])
+    }
+
+    func testNothingIsReplacedIfTheHelperIsNoLongerClearAtTheLastCheck() async {
+      // Third review: a hold must still be valid when the bless happens, after
+      // however long the authorization took.
+      let probe = FakeProbe(
+        registered: true, version: "27", installsVersion: "28", replacement: true,
+        laterReplacement: false)
+      let blesser = FakeBlesser(silent: .blessed, installing: probe)
+      let outcome = await provisioner(probe, blesser: blesser).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .busy)
+      XCTAssertEqual(blesser.calls, [.silent("owner"), .declined])
+      XCTAssertEqual(probe.cancels, 1)
+    }
+
     func testAnOlderHelperThatCannotBeAskedIsStillReplaced() async {
       let probe = FakeProbe(registered: true, version: nil, installsVersion: "28", replacement: nil)
       let outcome = await provisioner(
@@ -391,7 +415,8 @@
     private var answering: Bool
     private let loaded: Bool
     private let slow: Bool
-    private let replacement: Bool?
+    private var replacement: [Bool?]
+    private let engineRunning: Bool
     private var cancelled = 0
     private var version: String?
     private let installsVersion: String?
@@ -405,9 +430,13 @@
     ///   busy verifying a payload; otherwise a silent helper refuses at once.
     init(
       registered: Bool, answering: Bool = true, loaded: Bool = false, slow: Bool = false,
-      version: String? = nil, installsVersion: String? = nil, replacement: Bool? = nil
+      version: String? = nil, installsVersion: String? = nil, replacement: Bool? = nil,
+      laterReplacement: Bool?? = nil, engineRunning: Bool = false
     ) {
-      self.replacement = replacement
+      // The first answer is for the request; the next, if given, for the
+      // check immediately before installing.
+      self.replacement = laterReplacement.map { [replacement, $0] } ?? [replacement]
+      self.engineRunning = engineRunning
       self.registered = registered
       self.loaded = loaded || slow
       self.slow = slow
@@ -430,11 +459,15 @@
 
     var cancels: Int { lock.withLock { cancelled } }
 
-    func prepareForReplacement() async -> Bool? { replacement }
+    func prepareForReplacement(token: String) async -> Bool? {
+      lock.withLock { replacement.count > 1 ? replacement.removeFirst() : replacement[0] }
+    }
 
-    func cancelReplacement() async {
+    func cancelReplacement(token: String) async {
       lock.withLock { cancelled += 1 }
     }
+
+    func isRunningAChildProcess() async -> Bool { engineRunning }
 
     func isLoaded() async -> Bool {
       lock.withLock { answering || loaded }
@@ -457,6 +490,7 @@
     enum Call: Equatable {
       case silent(String)
       case dialog
+      case declined
     }
 
     private let lock = NSLock()
@@ -477,18 +511,33 @@
 
     var calls: [Call] { lock.withLock { recorded } }
 
+    /// Like the real blesser: once authorized, the check runs immediately
+    /// before installing, and a no installs nothing.
     func blessSilently(
-      with authorization: MachineOwnerAuthorization
+      with authorization: MachineOwnerAuthorization,
+      confirm: @escaping @Sendable () async -> Bool
     ) async -> InstallerHelperBlessResult {
       lock.withLock { recorded.append(.silent(authorization.username)) }
-      if silent == .blessed { installing?.installBundledHelper() }
-      return silent
+      return await finish(silent, confirm)
     }
 
-    func blessWithDialog() async -> InstallerHelperBlessResult {
+    func blessWithDialog(
+      confirm: @escaping @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult {
       lock.withLock { recorded.append(.dialog) }
-      if dialog == .blessed { installing?.installBundledHelper() }
-      return dialog
+      return await finish(dialog, confirm)
+    }
+
+    private func finish(
+      _ result: InstallerHelperBlessResult, _ confirm: @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult {
+      guard result == .blessed else { return result }
+      guard await confirm() else {
+        lock.withLock { recorded.append(.declined) }
+        return .declined
+      }
+      installing?.installBundledHelper()
+      return .blessed
     }
   }
 

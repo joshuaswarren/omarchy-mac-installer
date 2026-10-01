@@ -36,24 +36,29 @@
     case beingReplaced
   }
 
-  /// Whether the helper is idle, working on a job, or agreed to be replaced.
-  /// One lock decides it, so "may it be replaced?" and "may this job start?"
-  /// can never both say yes.
+  /// Whether the helper is idle, working on a job, or held for replacement by
+  /// one app. One lock decides it, so "may it be replaced?" and "may this job
+  /// start?" never both say yes, and only one app at a time holds it.
   final class HelperWorkState: @unchecked Sendable {
     private enum Phase {
       case idle
       case working
-      case replacing(since: Date)
+      case replacing(token: String, since: Date)
     }
 
     private let lock = NSLock()
     private var phase = Phase.idle
-    /// A replacement that never happened (a cancelled dialog, a crashed app)
-    /// stops blocking work after this long.
+    /// A hold that is neither renewed nor released (a crashed app) stops
+    /// blocking work after this long. The holder renews it immediately before
+    /// it replaces the helper, so a lapse never lets it replace a working one.
     private let replacementLapse: TimeInterval
 
     init(replacementLapse: TimeInterval = 120) {
       self.replacementLapse = replacementLapse
+    }
+
+    private func lapsed(_ since: Date) -> Bool {
+      Date().timeIntervalSince(since) > replacementLapse
     }
 
     func beginJob() throws {
@@ -63,10 +68,8 @@
           phase = .working
         case .working:
           throw ClosedEngineHelperError.busy
-        case .replacing(let since):
-          guard Date().timeIntervalSince(since) > replacementLapse else {
-            throw ClosedEngineHelperError.beingReplaced
-          }
+        case .replacing(_, let since):
+          guard lapsed(since) else { throw ClosedEngineHelperError.beingReplaced }
           phase = .working
         }
       }
@@ -78,19 +81,27 @@
       }
     }
 
-    /// True when no job runs; from then on no job starts until the
-    /// replacement is cancelled or lapses.
-    func beginReplacement() -> Bool {
+    /// True when no job runs and no other app holds the replacement. The
+    /// same token renews its hold; from then on no job starts until it is
+    /// released or lapses.
+    func beginReplacement(token: String) -> Bool {
       lock.withLock {
-        if case .working = phase { return false }
-        phase = .replacing(since: Date())
-        return true
+        switch phase {
+        case .working:
+          return false
+        case .replacing(let holder, let since) where holder != token && !lapsed(since):
+          return false
+        case .idle, .replacing:
+          phase = .replacing(token: token, since: Date())
+          return true
+        }
       }
     }
 
-    func cancelReplacement() {
+    /// Releases the hold, only for the app that holds it.
+    func cancelReplacement(token: String) {
       lock.withLock {
-        if case .replacing = phase { phase = .idle }
+        if case .replacing(let holder, _) = phase, holder == token { phase = .idle }
       }
     }
   }
@@ -501,14 +512,17 @@
       reply(server.isRetiring ? "" : version)
     }
 
-    /// Answers at once: yes if no job runs, and from then on no job starts,
-    /// so the caller can replace this helper without cutting a job short.
-    public func prepareForReplacement(reply: @escaping @Sendable (Bool) -> Void) {
-      reply(server.work.beginReplacement())
+    /// Answers at once: yes if no job runs and no other app holds the
+    /// replacement; from then on no job starts, so the caller can replace
+    /// this helper without cutting a job short.
+    public func prepareForReplacement(
+      token: String, reply: @escaping @Sendable (Bool) -> Void
+    ) {
+      reply(!token.isEmpty && server.work.beginReplacement(token: token))
     }
 
-    public func cancelReplacement(reply: @escaping @Sendable () -> Void) {
-      server.work.cancelReplacement()
+    public func cancelReplacement(token: String, reply: @escaping @Sendable () -> Void) {
+      server.work.cancelReplacement(token: token)
       reply()
     }
 

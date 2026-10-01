@@ -19,12 +19,13 @@
     /// See `PackageInstalledAppRetirement`.
     func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void)
 
-    /// Yes if no job runs; the helper then refuses new jobs until it is
-    /// replaced, the replacement is cancelled, or it lapses. Helpers older
-    /// than this call never answer it.
-    func prepareForReplacement(reply: @escaping @Sendable (Bool) -> Void)
+    /// Yes if no job runs and no other app holds the replacement; the helper
+    /// then refuses new jobs until it is replaced, the hold is released, or
+    /// it lapses. The same token renews the hold. Helpers older than this
+    /// call never answer it.
+    func prepareForReplacement(token: String, reply: @escaping @Sendable (Bool) -> Void)
 
-    func cancelReplacement(reply: @escaping @Sendable () -> Void)
+    func cancelReplacement(token: String, reply: @escaping @Sendable () -> Void)
 
     func removal(
       ticket: String, confirmation: String, machineOwner: String, password: Data,
@@ -202,7 +203,9 @@
 
     /// Nil when the helper doesn't answer in time, as helpers older than the
     /// call never do.
-    public func prepareForReplacement(timeout: Duration = .seconds(3)) async -> Bool? {
+    public func prepareForReplacement(
+      token: String, timeout: Duration = .seconds(3)
+    ) async -> Bool? {
       let connection = makeConnection()
       let connectionHandle = SendableXPCConnection(connection)
       let timer = Task {
@@ -224,14 +227,14 @@
           connectionHandle.invalidate()
           return
         }
-        proxy.prepareForReplacement { granted in
+        proxy.prepareForReplacement(token: token) { granted in
           gate.resume(returning: granted)
           connectionHandle.invalidate()
         }
       }
     }
 
-    public func cancelReplacement(timeout: Duration = .seconds(3)) async {
+    public func cancelReplacement(token: String, timeout: Duration = .seconds(3)) async {
       let connection = makeConnection()
       let connectionHandle = SendableXPCConnection(connection)
       let timer = Task {
@@ -253,7 +256,7 @@
           connectionHandle.invalidate()
           return
         }
-        proxy.cancelReplacement {
+        proxy.cancelReplacement(token: token) {
           gate.resume(returning: true)
           connectionHandle.invalidate()
         }

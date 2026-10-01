@@ -30,53 +30,85 @@
     }
 
     public func blessSilently(
-      with authorization: MachineOwnerAuthorization
+      with authorization: MachineOwnerAuthorization,
+      confirm: @escaping @Sendable () async -> Bool
     ) async -> InstallerHelperBlessResult {
+      await bless(credentials: authorization, allowingDialog: false, confirm: confirm)
+    }
+
+    public func blessWithDialog(
+      confirm: @escaping @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult {
+      await bless(credentials: nil, allowingDialog: true, confirm: confirm)
+    }
+
+    /// Authorizes (a dialog may take minutes), then confirms, then blesses at
+    /// once, so the confirmation describes the helper that is replaced.
+    private func bless(
+      credentials: MachineOwnerAuthorization?,
+      allowingDialog: Bool,
+      confirm: @escaping @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult {
+      let authorized = await Task.detached {
+        Self.authorize(credentials: credentials, allowingDialog: allowingDialog)
+      }.value
+      let rights: BlessAuthorization
+      switch authorized {
+      case .success(let granted):
+        rights = granted
+      case .failure(let result):
+        return result.value
+      }
+      guard await confirm() else {
+        return .declined
+      }
       let label = label
       return await Task.detached {
-        Self.bless(label: label, credentials: authorization, allowingDialog: false)
+        var error: Unmanaged<CFError>?
+        guard SMJobBless(kSMDomainSystemLaunchd, label as CFString, rights.reference, &error)
+        else {
+          let message = error.map { String(describing: $0.takeRetainedValue()) } ?? "unknown"
+          return .failed("SMJobBless failed: \(message)")
+        }
+        return .blessed
       }.value
     }
 
-    public func blessWithDialog() async -> InstallerHelperBlessResult {
-      let label = label
-      return await Task.detached {
-        Self.bless(label: label, credentials: nil, allowingDialog: true)
-      }.value
+    /// An authorization holding the bless right, freed when it goes away.
+    private final class BlessAuthorization: @unchecked Sendable {
+      let reference: AuthorizationRef
+      init(_ reference: AuthorizationRef) { self.reference = reference }
+      deinit { AuthorizationFree(reference, []) }
     }
 
-    private static func bless(
-      label: String,
+    private struct NotAuthorized: Error {
+      let value: InstallerHelperBlessResult
+    }
+
+    private static func authorize(
       credentials: MachineOwnerAuthorization?,
       allowingDialog: Bool
-    ) -> InstallerHelperBlessResult {
+    ) -> Result<BlessAuthorization, NotAuthorized> {
       var reference: AuthorizationRef?
       guard AuthorizationCreate(nil, nil, [], &reference) == errAuthorizationSuccess,
         let reference
       else {
-        return .failed("AuthorizationCreate failed")
+        return .failure(NotAuthorized(value: .failed("AuthorizationCreate failed")))
       }
-      defer { AuthorizationFree(reference, []) }
-
+      let rights = BlessAuthorization(reference)
       let status = copyBlessRight(
         reference, credentials: credentials, allowingDialog: allowingDialog)
       switch status {
       case errAuthorizationSuccess:
-        break
+        return .success(rights)
       case errAuthorizationDenied, errAuthorizationInteractionNotAllowed:
-        return .refused
+        return .failure(NotAuthorized(value: .refused))
       case errAuthorizationCanceled:
-        return .cancelled
+        return .failure(NotAuthorized(value: .cancelled))
       default:
-        return .failed("AuthorizationCopyRights returned \(status)")
+        return .failure(
+          NotAuthorized(value: .failed("AuthorizationCopyRights returned \(status)")))
       }
-
-      var error: Unmanaged<CFError>?
-      guard SMJobBless(kSMDomainSystemLaunchd, label as CFString, reference, &error) else {
-        let message = error.map { String(describing: $0.takeRetainedValue()) } ?? "unknown"
-        return .failed("SMJobBless failed: \(message)")
-      }
-      return .blessed
     }
 
     /// Requests the bless right. With credentials, they go in the

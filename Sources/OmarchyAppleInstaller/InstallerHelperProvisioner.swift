@@ -63,12 +63,15 @@
     var isRegistered: Bool { get }
     /// How the helper answered a ping: yes, refused quickly, or not in time.
     func ping() async -> AuthenticatedEngineXPCSubmitter.PingResult
-    /// True if the installed helper agrees to be replaced (no job runs, and
-    /// it starts none meanwhile), false if it is working, nil if it can't
-    /// be asked.
-    func prepareForReplacement() async -> Bool?
-    /// Lets a helper that agreed to be replaced take work again.
-    func cancelReplacement() async
+    /// True if the installed helper agrees to be replaced by this token (no
+    /// job runs, no other app holds it, and it starts none meanwhile), false
+    /// if it is working or held, nil if it can't be asked.
+    func prepareForReplacement(token: String) async -> Bool?
+    /// Lets a helper this token held take work again.
+    func cancelReplacement(token: String) async
+    /// Whether the installed helper has a child process running: for a
+    /// helper that can't be asked, its engine at work.
+    func isRunningAChildProcess() async -> Bool
     /// Whether launchd has the helper's job loaded. Switching the helper off in
     /// Login Items unloads the job but leaves its file, while a helper from
     /// another build stays loaded and refuses this app.
@@ -85,17 +88,26 @@
     case cancelled
     /// This build cannot install the helper.
     case unavailable
+    /// Authorized, but the last check before installing found the installed
+    /// helper at work; nothing was installed.
+    case declined
     case failed(String)
   }
 
   /// Installs the helper bundled in the app, replacing any installed copy.
+  /// `confirm` runs after authorization succeeds and immediately before the
+  /// installed copy is replaced, however long a dialog took; when it says no,
+  /// nothing is installed and the result is `.declined`.
   public protocol InstallerHelperBlessing: Sendable {
     /// Uses the typed credentials and never shows a system dialog.
     func blessSilently(
-      with authorization: MachineOwnerAuthorization
+      with authorization: MachineOwnerAuthorization,
+      confirm: @escaping @Sendable () async -> Bool
     ) async -> InstallerHelperBlessResult
     /// Lets macOS show its own administrator dialog.
-    func blessWithDialog() async -> InstallerHelperBlessResult
+    func blessWithDialog(
+      confirm: @escaping @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult
   }
 
   /// Follow-up work once the app has installed its own helper, such as
@@ -116,12 +128,15 @@
     public init() {}
 
     public func blessSilently(
-      with authorization: MachineOwnerAuthorization
+      with authorization: MachineOwnerAuthorization,
+      confirm: @escaping @Sendable () async -> Bool
     ) async -> InstallerHelperBlessResult {
       .unavailable
     }
 
-    public func blessWithDialog() async -> InstallerHelperBlessResult {
+    public func blessWithDialog(
+      confirm: @escaping @Sendable () async -> Bool
+    ) async -> InstallerHelperBlessResult {
       .unavailable
     }
   }
@@ -241,31 +256,70 @@
       guard administrators.isAdministrator(authorization.username) else {
         return .notAdministrator
       }
-      // An installed helper is asked first: it agrees only when no job runs,
-      // and then starts none, so replacing it (which ends its engine too)
-      // never cuts a disk operation short. Older helpers can't be asked.
-      var agreedToBeReplaced = false
-      if status == .outdated {
-        switch await probe.prepareForReplacement() {
+      // Replacing a helper ends its engine too, so it is replaced only with
+      // proof that it is idle, and that proof is checked again immediately
+      // before installing. A helper that answers is held for this app alone;
+      // one that can't be asked (older, or refusing this app) counts as idle
+      // only while no engine process runs under it.
+      let token = UUID().uuidString
+      let probe = probe
+      let clearance: Clearance
+      switch status {
+      case .outdated:
+        switch await probe.prepareForReplacement(token: token) {
+        case true?:
+          clearance = .held
         case false?:
           return .busy
-        case true?:
-          agreedToBeReplaced = true
         case nil:
-          break
+          guard !(await probe.isRunningAChildProcess()) else { return .busy }
+          clearance = .unaskable
         }
+      default:
+        clearance = .nothingInstalled
       }
-      let outcome = await bless(authorization)
-      if agreedToBeReplaced, !outcome.installed {
-        await probe.cancelReplacement()
+      let confirm: @Sendable () async -> Bool = {
+        await Self.stillClear(clearance, probe: probe, token: token)
+      }
+      let outcome = await bless(authorization, confirm: confirm)
+      if !outcome.installed {
+        await probe.cancelReplacement(token: token)
       }
       return outcome
     }
 
+    private enum Clearance: Sendable {
+      case held
+      case unaskable
+      case nothingInstalled
+    }
+
+    /// The last check before installing, after any dialog: the hold is still
+    /// this app's and the helper still idle, or, where nothing was installed,
+    /// nothing another app has installed since is at work.
+    private static func stillClear(
+      _ clearance: Clearance, probe: any InstallerHelperProbing, token: String
+    ) async -> Bool {
+      switch clearance {
+      case .held:
+        return await probe.prepareForReplacement(token: token) == true
+      case .unaskable:
+        return !(await probe.isRunningAChildProcess())
+      case .nothingInstalled:
+        guard probe.isRegistered else { return true }
+        switch await probe.prepareForReplacement(token: token) {
+        case true?: return true
+        case false?: return false
+        case nil: return !(await probe.isRunningAChildProcess())
+        }
+      }
+    }
+
     private func bless(
-      _ authorization: MachineOwnerAuthorization
+      _ authorization: MachineOwnerAuthorization,
+      confirm: @escaping @Sendable () async -> Bool
     ) async -> InstallerHelperProvisioningOutcome {
-      switch await blesser.blessSilently(with: authorization) {
+      switch await blesser.blessSilently(with: authorization, confirm: confirm) {
       case .blessed:
         return await confirmCurrent(.installedSilently)
       case .refused:
@@ -274,16 +328,20 @@
         return .cancelled
       case .unavailable:
         return .unavailable
+      case .declined:
+        return .busy
       case .failed(let message):
         return .failed(message)
       }
-      switch await blesser.blessWithDialog() {
+      switch await blesser.blessWithDialog(confirm: confirm) {
       case .blessed:
         return await confirmCurrent(.installedWithDialog)
       case .refused, .cancelled:
         return .cancelled
       case .unavailable:
         return .unavailable
+      case .declined:
+        return .busy
       case .failed(let message):
         return .failed(message)
       }
@@ -382,15 +440,51 @@
       return await submitter.helperVersion()
     }
 
-    public func prepareForReplacement() async -> Bool? {
+    public func prepareForReplacement(token: String) async -> Bool? {
       guard let submitter = try? submitter() else {
         return nil
       }
-      return await submitter.prepareForReplacement()
+      return await submitter.prepareForReplacement(token: token)
     }
 
-    public func cancelReplacement() async {
-      await (try? submitter())?.cancelReplacement()
+    public func cancelReplacement(token: String) async {
+      await (try? submitter())?.cancelReplacement(token: token)
+    }
+
+    /// launchd reports the helper's pid without privileges, and `ps` lists
+    /// every process's parent; an engine runs as the helper's child.
+    public func isRunningAChildProcess() async -> Bool {
+      let label = InstallerProductIdentity.helperIdentifier
+      return await Task.detached {
+        guard let launchd = Self.run("/bin/launchctl", ["print", "system/\(label)"]),
+          let line = launchd.split(separator: "\n").first(where: {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("pid = ")
+          }),
+          let pid = Int(line.split(separator: "=").last?.trimmingCharacters(in: .whitespaces) ?? "")
+        else {
+          return false
+        }
+        guard let table = Self.run("/bin/ps", ["-axo", "ppid="]) else {
+          // Unknown counts as busy: never replace a helper we can't see into.
+          return true
+        }
+        return table.split(separator: "\n").contains {
+          Int($0.trimmingCharacters(in: .whitespaces)) == pid
+        }
+      }.value
+    }
+
+    private static func run(_ path: String, _ arguments: [String]) -> String? {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: path)
+      process.arguments = arguments
+      let output = Pipe()
+      process.standardOutput = output
+      process.standardError = FileHandle.nullDevice
+      do { try process.run() } catch { return nil }
+      let data = output.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
   }
 #endif

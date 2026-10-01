@@ -71,22 +71,42 @@
     func testWorkAndReplacementNeverBothGoAhead() throws {
       let work = HelperWorkState()
       try work.beginJob()
-      XCTAssertFalse(work.beginReplacement(), "a running job is never cut short")
+      XCTAssertFalse(work.beginReplacement(token: "A"), "a running job is never cut short")
       XCTAssertThrowsError(try work.beginJob()) {
         XCTAssertEqual($0 as? ClosedEngineHelperError, .busy)
       }
       work.endJob()
-      XCTAssertTrue(work.beginReplacement())
+      XCTAssertTrue(work.beginReplacement(token: "A"))
       XCTAssertThrowsError(try work.beginJob(), "no job starts once replacement is agreed") {
         XCTAssertEqual($0 as? ClosedEngineHelperError, .beingReplaced)
       }
-      work.cancelReplacement()
+      work.cancelReplacement(token: "A")
       XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testOnlyOneAppHoldsTheReplacementAtATime() throws {
+      // Third review: A waits in a password dialog; B must not get the helper
+      // meanwhile, replace it and start work for A to cut short later.
+      let work = HelperWorkState()
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      XCTAssertFalse(work.beginReplacement(token: "B"))
+      XCTAssertTrue(work.beginReplacement(token: "A"), "the holder renews")
+      work.cancelReplacement(token: "B")
+      XCTAssertThrowsError(try work.beginJob(), "only the holder releases it")
+      work.cancelReplacement(token: "A")
+      XCTAssertTrue(work.beginReplacement(token: "B"))
+    }
+
+    func testAnUnrenewedHoldLapsesForOthers() throws {
+      let work = HelperWorkState(replacementLapse: 0)
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      Thread.sleep(forTimeInterval: 0.01)
+      XCTAssertTrue(work.beginReplacement(token: "B"))
     }
 
     func testAReplacementThatNeverHappensLapses() throws {
       let work = HelperWorkState(replacementLapse: 0)
-      XCTAssertTrue(work.beginReplacement())
+      XCTAssertTrue(work.beginReplacement(token: "A"))
       Thread.sleep(forTimeInterval: 0.01)
       XCTAssertNoThrow(try work.beginJob())
     }
@@ -104,7 +124,7 @@
       let endpoint = ClosedEngineXPCServiceEndpoint(server: server)
       func prepare() async -> Bool {
         await withCheckedContinuation { c in
-          endpoint.prepareForReplacement { c.resume(returning: $0) }
+          endpoint.prepareForReplacement(token: "A") { c.resume(returning: $0) }
         }
       }
       try work.beginJob()
@@ -119,7 +139,7 @@
       } catch let error as ClosedEngineHelperError {
         XCTAssertEqual(error, .beingReplaced)
       }
-      await withCheckedContinuation { c in endpoint.cancelReplacement { c.resume() } }
+      await withCheckedContinuation { c in endpoint.cancelReplacement(token: "A") { c.resume() } }
       XCTAssertNoThrow(try work.beginJob())
     }
 
