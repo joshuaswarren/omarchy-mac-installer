@@ -502,9 +502,16 @@ PY
     -w '%{http_code}' "$STREAM_BASE/installer/$channel/installer.json" 2>/dev/null) || true
   case $status in
     200)
-      if fetch_public "installer/$channel/$ZIP_FILE_NAME" "$work/previous.zip"; then
-        served=$(file_digest "$work/previous.zip")
-      fi
+      # What the channel serves now; as for installer.json, only a 404 means
+      # there is nothing, and any other failure stops the publish.
+      local zip_status
+      zip_status=$(curl -sSL -H 'Cache-Control: no-cache' -o "$work/previous.zip" \
+        -w '%{http_code}' "$STREAM_BASE/installer/$channel/$ZIP_FILE_NAME" 2>/dev/null) || true
+      case $zip_status in
+        200) served=$(file_digest "$work/previous.zip") ;;
+        404) ;;
+        *) die "could not read $channel's current zip (HTTP ${zip_status:-none}); the rollback check can't be skipped" ;;
+      esac
       previous=$(python3 - "$work/previous.json" "$digest" "$served" <<'PY'
 import json
 import sys

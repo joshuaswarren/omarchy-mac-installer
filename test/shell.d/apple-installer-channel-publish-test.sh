@@ -537,6 +537,22 @@ grep -q "HTTP 503" "$WORK/unavailable.log" || fail "the refusal names the failur
 grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable channel uploads nothing"
 pass "a failed read of the channel never skips the build check"
 
+# --- nor is the rollback check: a failed read of the live zip stops the publish
+# Reproduces the review: the channel serves a newer zip whose installer.json was
+# never updated, and the live zip can't be read; retrying the old zip must not
+# overwrite the newer one.
+: >"$CALLS"
+cp "$WORK/Next.zip" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
+if CURL_UNAVAILABLE=installer/stable/$INSTALLER_FILE_STEM.zip OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 \
+  "$PUBLISHER" app-publish --zip "$ZIP" --version 2.0.0 >"$WORK/zip-unavailable.log" 2>&1; then
+  fail "an unreadable live zip refuses the retry"
+fi
+grep -q "rollback check" "$WORK/zip-unavailable.log" ||
+  fail "the refusal names the rollback check" "$(cat "$WORK/zip-unavailable.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable live zip uploads nothing"
+cp "$ZIP" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
+pass "a failed read of the live zip never permits a rollback"
+
 # --- a build with a leading zero compares as decimal, not octal
 # (on edge, so the stable and rc checks below are undisturbed)
 make_app_zip "$WORK/Eight.zip" 6050 "" 2.0.4 8
