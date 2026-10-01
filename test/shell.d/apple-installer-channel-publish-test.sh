@@ -543,7 +543,7 @@ grep -q "HTTP 503" "$WORK/unavailable.log" || fail "the refusal names the failur
 grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable channel uploads nothing"
 pass "a failed read of the channel never skips the build check"
 
-# --- nor is the rollback check: a failed read of the live zip stops the publish
+# --- nor is the zip: a failed read of the live zip stops the publish
 # Reproduces the review: the channel serves a newer zip whose installer.json was
 # never updated, and the live zip can't be read; retrying the old zip must not
 # overwrite the newer one.
@@ -553,8 +553,8 @@ if CURL_UNAVAILABLE=installer/stable/$INSTALLER_FILE_STEM.zip OMARCHY_PUBLISH_AS
   "$PUBLISHER" app-publish --zip "$ZIP" --version 2.0.0 >"$WORK/zip-unavailable.log" 2>&1; then
   fail "an unreadable live zip refuses the retry"
 fi
-grep -q "rollback check" "$WORK/zip-unavailable.log" ||
-  fail "the refusal names the rollback check" "$(cat "$WORK/zip-unavailable.log")"
+grep -q "current zip" "$WORK/zip-unavailable.log" ||
+  fail "the refusal names the zip" "$(cat "$WORK/zip-unavailable.log")"
 grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable live zip uploads nothing"
 # A 200 that is cut short is a failed read too, not a smaller zip.
 : >"$CALLS"
@@ -611,6 +611,52 @@ grep -q "build 35 is not above build 40" "$WORK/middle.log" ||
 grep -q "^aws s3 cp" "$CALLS" && fail "a middle build uploads nothing"
 rm -f "$STREAM_DIR/installer/rc/installer.json" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
 pass "the zip a channel serves counts toward the build it must beat"
+
+# --- a zip served without metadata still sets the build to beat
+# Reproduces the review: build 35 replacing a served build 40 because the
+# interrupted first publish never wrote installer.json.
+cp "$WORK/Served40.zip" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.9 "$PUBLISHER" app-publish \
+  --zip "$WORK/Middle.zip" --version 2.0.9 --to rc >"$WORK/orphan.log" 2>&1; then
+  fail "a build below a zip served without metadata is refused"
+fi
+grep -q "build 35 is not above build 40" "$WORK/orphan.log" ||
+  fail "the refusal names the orphaned zip's build" "$(cat "$WORK/orphan.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a build below an orphaned zip uploads nothing"
+pass "a zip served without metadata counts toward the build it must beat"
+
+# --- an interrupted publish of this very zip may finish, but not past newer metadata
+printf '{"schema_version": 1, "version": "2.0.7", "sha256": "old", "build_number": 30}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/resume.log" 2>&1 ||
+  fail "the zip already served may finish publishing" "$(cat "$WORK/resume.log")"
+grep -q '"build_number": 40' "$STREAM_DIR/installer/rc/installer.json" ||
+  fail "the finished publish records the zip's build" "$(cat "$STREAM_DIR/installer/rc/installer.json")"
+printf '{"schema_version": 1, "version": "2.0.9", "sha256": "other", "build_number": 50}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/stale-resume.log" 2>&1; then
+  fail "the served zip can't finish over metadata recording a newer build"
+fi
+grep -q "build 40 is not above build 50" "$WORK/stale-resume.log" ||
+  fail "the refusal names the recorded build" "$(cat "$WORK/stale-resume.log")"
+pass "an interrupted publish finishes only if it still beats the metadata"
+
+# --- republishing the identical zip still validates the metadata
+printf '{"schema_version": 1, "version": "2.0.8", "sha256": "%s", "build_number": "x7"}\n' \
+  "$(shasum -a 256 "$WORK/Served40.zip" | cut -d' ' -f1)" >"$STREAM_DIR/installer/rc/installer.json"
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/same-malformed.log" 2>&1; then
+  fail "an identical zip over malformed metadata is refused"
+fi
+grep -q "malformed build_number" "$WORK/same-malformed.log" ||
+  fail "the refusal names the malformed field" "$(cat "$WORK/same-malformed.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "malformed metadata uploads nothing"
+rm -f "$STREAM_DIR/installer/rc/installer.json" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+pass "an identical zip never skips the metadata check"
 
 # --- a build with a leading zero compares as decimal, not octal
 # (on edge, so the stable and rc checks below are undisturbed)

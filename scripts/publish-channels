@@ -516,41 +516,54 @@ PY
   ) || die "$(cat "$work/app-check.err"): $zip"
 
   digest=$(file_digest "$zip")
-  local status served=""
+  # What the channel serves now, metadata and zip each on its own: the zip goes
+  # up first, so an interrupted publish can leave either without the other.
+  # Only a 404 means nothing is there; any other failure stops the publish.
+  local status zip_status served=""
   status=$(fetch_status "installer/$channel/installer.json" "$work/previous.json")
   case $status in
-    200)
-      # What the channel serves now; as for installer.json, only a 404 means
-      # there is nothing, and any other failure stops the publish.
-      local zip_status
-      zip_status=$(fetch_status "installer/$channel/$ZIP_FILE_NAME" "$work/previous.zip")
-      case $zip_status in
-        200) served=$(file_digest "$work/previous.zip") ;;
-        404) ;;
-        *) die "could not read $channel's current zip ($zip_status); the rollback check can't be skipped" ;;
-      esac
-      previous=$(python3 - "$work/previous.json" "$digest" "$served" "$work/previous.zip" \
-        "$INSTALLER_APP_NAME.app" "$LEGACY_BUILD_FLOOR" 2>"$work/previous.err" <<'PY'
+    200) ;;
+    404) rm -f "$work/previous.json" ;;
+    *) die "could not read $channel's current installer.json ($status); the build check can't be skipped" ;;
+  esac
+  zip_status=$(fetch_status "installer/$channel/$ZIP_FILE_NAME" "$work/previous.zip")
+  case $zip_status in
+    200) served=$(file_digest "$work/previous.zip") ;;
+    404) ;;
+    *) die "could not read $channel's current zip ($zip_status); the build check can't be skipped" ;;
+  esac
+  if [[ $status == 200 || -n $served ]]; then
+    previous=$(python3 - "$work/previous.json" "$digest" "$served" "$work/previous.zip" \
+      "$INSTALLER_APP_NAME.app" "$LEGACY_BUILD_FLOOR" 2>"$work/previous.err" <<'PY'
 import json
+import os
 import plistlib
 import sys
 import zipfile
 
 document_path, digest, served, zip_path, app, floor = sys.argv[1:7]
-document = json.load(open(document_path))
-# The very same zip may be republished, as after a failed upload, but only if
-# the channel does not already serve some other zip from a half-finished run.
-if document.get("sha256") == digest and served in ("", digest):
-    print("same")
+document = json.load(open(document_path)) if os.path.exists(document_path) else None
+recorded = None
+if document is not None:
+    # installer.json from before build numbers were recorded has none; the
+    # last such release was the 2.0.10 package, build 27, so that is the floor.
+    recorded = document.get("build_number", floor)
+    if isinstance(recorded, bool) or not str(recorded).isdigit():
+        sys.exit(f"the channel's installer.json has a malformed build_number: {recorded!r}")
+    recorded = int(recorded)
+    # The very same zip may be republished, as after a failed upload, but only
+    # if the channel does not already serve some other zip.
+    if document.get("sha256") == digest and served in ("", digest):
+        print("same")
+        sys.exit(0)
+if served == digest:
+    # This zip is already served, left by an interrupted run of this publish;
+    # it still has to beat whatever the metadata records.
+    print("same" if recorded is None else recorded)
     sys.exit(0)
-# installer.json from before build numbers were recorded has none; the last
-# such release was the 2.0.10 package, build 27, so that is the floor.
-recorded = document.get("build_number", floor)
-if isinstance(recorded, bool) or not str(recorded).isdigit():
-    sys.exit(f"the channel's installer.json has a malformed build_number: {recorded!r}")
-builds = [int(recorded)]
-# An interrupted publish can leave old metadata beside a newer zip; the zip
-# actually served counts too, so no middle build slips between them.
+builds = [] if recorded is None else [recorded]
+# The zip actually served counts too, so no build slips beneath it, whether
+# the metadata beside it is older or missing.
 if served:
     try:
         with zipfile.ZipFile(zip_path) as archive:
@@ -560,13 +573,10 @@ if served:
         sys.exit(f"the channel's current zip has no readable build number: {error}")
 print(max(builds))
 PY
-      ) || die "$(cat "$work/previous.err")"
-      [[ $previous == "same" ]] || (( 10#$build > 10#$previous )) ||
-        die "build $build is not above build $previous already published to $channel"
-      ;;
-    404) ;;
-    *) die "could not read $channel's current installer.json ($status); the build check can't be skipped" ;;
-  esac
+    ) || die "$(cat "$work/previous.err")"
+    [[ $previous == "same" ]] || (( 10#$build > 10#$previous )) ||
+      die "build $build is not above build $previous already published to $channel"
+  fi
   printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.zip" >"$work/zip.sha256"
   immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.zip"
 
