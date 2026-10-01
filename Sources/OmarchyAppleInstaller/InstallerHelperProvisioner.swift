@@ -69,15 +69,24 @@
     func prepareForReplacement(token: String) async -> Bool?
     /// Lets a helper this token held take work again.
     func cancelReplacement(token: String) async
-    /// Whether the installed helper has a child process running: for a
-    /// helper that can't be asked, its engine at work.
-    func isRunningAChildProcess() async -> Bool
+    /// For a helper that can't be asked: whether it is verifiably idle (no
+    /// engine runs under it and no other copy of the installer, the only
+    /// thing that sends it work, is open), at work, or unknown.
+    func observeWork() async -> InstallerHelperWorkObservation
     /// Whether launchd has the helper's job loaded. Switching the helper off in
     /// Login Items unloads the job but leaves its file, while a helper from
     /// another build stays loaded and refuses this app.
     func isLoaded() async -> Bool
     /// The build the running helper reports, or nil when it reports none.
     func reportedVersion() async -> String?
+  }
+
+  public enum InstallerHelperWorkObservation: Equatable, Sendable {
+    case idle
+    case working
+    /// The process list or the helper's job couldn't be read. Treated like
+    /// working: a helper is never replaced on a guess.
+    case unknown
   }
 
   public enum InstallerHelperBlessResult: Equatable, Sendable {
@@ -272,7 +281,7 @@
         case false?:
           return .busy
         case nil:
-          guard !(await probe.isRunningAChildProcess()) else { return .busy }
+          guard await probe.observeWork() == .idle else { return .busy }
           clearance = .unaskable
         }
       default:
@@ -288,7 +297,7 @@
       return outcome
     }
 
-    private enum Clearance: Sendable {
+    private enum Clearance: Sendable, Equatable {
       case held
       case unaskable
       case nothingInstalled
@@ -303,14 +312,16 @@
       switch clearance {
       case .held:
         return await probe.prepareForReplacement(token: token) == true
-      case .unaskable:
-        return !(await probe.isRunningAChildProcess())
-      case .nothingInstalled:
-        guard probe.isRegistered else { return true }
+      case .unaskable, .nothingInstalled:
+        if clearance == .nothingInstalled, !probe.isRegistered {
+          return true
+        }
+        // Whatever is installed now is asked first: a newer helper another
+        // app put in place meanwhile can be held, and must be.
         switch await probe.prepareForReplacement(token: token) {
         case true?: return true
         case false?: return false
-        case nil: return !(await probe.isRunningAChildProcess())
+        case nil: return await probe.observeWork() == .idle
         }
       }
     }
@@ -452,39 +463,68 @@
     }
 
     /// launchd reports the helper's pid without privileges, and `ps` lists
-    /// every process's parent; an engine runs as the helper's child.
-    public func isRunningAChildProcess() async -> Bool {
+    /// every process's parent; an engine runs as the helper's child. Only a
+    /// helper verifiably not running, or running with no child, while no other
+    /// copy of the installer is open, counts as idle; a failed read is unknown.
+    public func observeWork() async -> InstallerHelperWorkObservation {
       let label = InstallerProductIdentity.helperIdentifier
       return await Task.detached {
-        guard let launchd = Self.run("/bin/launchctl", ["print", "system/\(label)"]),
-          let line = launchd.split(separator: "\n").first(where: {
-            $0.trimmingCharacters(in: .whitespaces).hasPrefix("pid = ")
-          }),
-          let pid = Int(line.split(separator: "=").last?.trimmingCharacters(in: .whitespaces) ?? "")
-        else {
-          return false
+        if Self.anotherInstallerIsOpen() {
+          return .working
         }
-        guard let table = Self.run("/bin/ps", ["-axo", "ppid="]) else {
-          // Unknown counts as busy: never replace a helper we can't see into.
-          return true
+        let launchd = Self.runWithStatus("/bin/launchctl", ["print", "system/\(label)"])
+        switch launchd.status {
+        case 0:
+          break
+        case 113:
+          return .idle  // no such job: nothing runs
+        default:
+          return .unknown
         }
-        return table.split(separator: "\n").contains {
+        let pidLines = launchd.output.split(separator: "\n").filter {
+          $0.trimmingCharacters(in: .whitespaces).hasPrefix("pid = ")
+        }
+        guard let line = pidLines.first else {
+          // Loaded but not running: launchd prints a pid only for a live job.
+          return launchd.output.contains("state = not running") ? .idle : .unknown
+        }
+        let pidText = line.split(separator: "=").last?.trimmingCharacters(in: .whitespaces)
+        guard let pid = Int(pidText ?? ""), pid > 0 else {
+          return .unknown
+        }
+        let table = Self.runWithStatus("/bin/ps", ["-axo", "ppid="])
+        guard table.status == 0 else { return .unknown }
+        let hasChild = table.output.split(separator: "\n").contains {
           Int($0.trimmingCharacters(in: .whitespaces)) == pid
         }
+        return hasChild ? .working : .idle
       }.value
     }
 
-    private static func run(_ path: String, _ arguments: [String]) -> String? {
+    /// Another copy of the installer, of any build or name, is running: only
+    /// an installer sends an older helper work.
+    private static func anotherInstallerIsOpen() -> Bool {
+      let own = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path
+      return PackageInstalledAppRetirement.runningExecutablePaths().contains { path in
+        path.hasSuffix(".app/Contents/MacOS/OmarchyAppleInstallerApp")
+          && URL(fileURLWithPath: path).resolvingSymlinksInPath().path != own
+      }
+    }
+
+    private static func runWithStatus(
+      _ path: String, _ arguments: [String]
+    ) -> (status: Int32, output: String) {
       let process = Process()
       process.executableURL = URL(fileURLWithPath: path)
       process.arguments = arguments
       let output = Pipe()
       process.standardOutput = output
       process.standardError = FileHandle.nullDevice
-      do { try process.run() } catch { return nil }
+      do { try process.run() } catch { return (-1, "") }
       let data = output.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
-      return process.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
+      return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
+
   }
 #endif

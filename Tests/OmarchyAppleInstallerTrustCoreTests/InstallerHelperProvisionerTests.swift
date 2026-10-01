@@ -170,7 +170,18 @@
       // Third review: no answer is not proof of idleness.
       let blesser = FakeBlesser(silent: .blessed)
       let outcome = await provisioner(
-        FakeProbe(registered: true, version: nil, replacement: nil, engineRunning: true),
+        FakeProbe(registered: true, version: nil, replacement: nil, work: .working),
+        blesser: blesser
+      ).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .busy)
+      XCTAssertEqual(blesser.calls, [])
+    }
+
+    func testAHelperWhoseWorkCannotBeSeenIsNotReplaced() async {
+      // Fourth review: a failed inspection is not proof of idleness.
+      let blesser = FakeBlesser(silent: .blessed)
+      let outcome = await provisioner(
+        FakeProbe(registered: true, version: nil, replacement: nil, work: .unknown),
         blesser: blesser
       ).ensureCurrent(owner)
       XCTAssertEqual(outcome, .busy)
@@ -416,7 +427,7 @@
     private let loaded: Bool
     private let slow: Bool
     private var replacement: [Bool?]
-    private let engineRunning: Bool
+    private let work: InstallerHelperWorkObservation
     private var cancelled = 0
     private var version: String?
     private let installsVersion: String?
@@ -431,12 +442,12 @@
     init(
       registered: Bool, answering: Bool = true, loaded: Bool = false, slow: Bool = false,
       version: String? = nil, installsVersion: String? = nil, replacement: Bool? = nil,
-      laterReplacement: Bool?? = nil, engineRunning: Bool = false
+      laterReplacement: Bool?? = nil, work: InstallerHelperWorkObservation = .idle
     ) {
       // The first answer is for the request; the next, if given, for the
       // check immediately before installing.
       self.replacement = laterReplacement.map { [replacement, $0] } ?? [replacement]
-      self.engineRunning = engineRunning
+      self.work = work
       self.registered = registered
       self.loaded = loaded || slow
       self.slow = slow
@@ -467,7 +478,7 @@
       lock.withLock { cancelled += 1 }
     }
 
-    func isRunningAChildProcess() async -> Bool { engineRunning }
+    func observeWork() async -> InstallerHelperWorkObservation { work }
 
     func isLoaded() async -> Bool {
       lock.withLock { answering || loaded }
