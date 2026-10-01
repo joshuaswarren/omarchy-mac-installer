@@ -10,8 +10,11 @@
 
     static let minimumFreeSpace: UInt64 = 1 << 30
     static let memberGap: UInt64 = 16 << 20
-    // asahi-installer's STUB_SIZE is 2,499,805,184 bytes.
-    static let stubSizes: ClosedRange<UInt64> = 2_300_000_000...2_700_000_000
+    // asahi-installer's STUB_SIZE is 2,499,805,184 bytes; a stub on macOS 26
+    // firmware (the MacBook Neo) is 5,999,951,872.
+    static let stubSizes: [ClosedRange<UInt64>] = [
+      2_300_000_000...2_700_000_000, 5_800_000_000...6_200_000_000,
+    ]
     static let maximumESP: UInt64 = 1 << 30
 
     static func recognize(_ snapshot: RemovalSnapshot) throws -> RemovalLayout {
@@ -85,7 +88,8 @@
         let systems = volumes.filter { $0.roles == ["System"] }
         let data = volumes.filter { $0.roles == ["Data"] }
         guard !systems.isEmpty, !data.isEmpty else { return .foreign }
-        guard stubSizes.contains(part.size), volumes.count == 4, systems.count == 1,
+        guard stubSizes.contains(where: { $0.contains(part.size) }), volumes.count == 4,
+          systems.count == 1,
           data.count == 1, let group = systems[0].group, data[0].group == group,
           volumes.filter({ $0.roles == ["Preboot"] }).count == 1,
           volumes.filter({ $0.roles == ["Recovery"] }).count == 1

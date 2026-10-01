@@ -19,6 +19,15 @@
       XCTAssertEqual(plan.targetMacOSBytes, 994_662_584_320)
     }
 
+    func testANeoInstallWithItsMacos26StubIsRecognised() throws {
+      let disk = FakeRemovalDisk(F.neoMacos26(), install: F.convergedInstall)
+      let plan = try OmarchyRemovalPlan(disks: disk)
+      XCTAssertEqual(plan.kind, .installation)
+      XCTAssertEqual(
+        plan.members.map(\.uuid),
+        [F.convergedInstall.stub, F.convergedInstall.esp] + F.convergedInstall.linux)
+    }
+
     func testOlderOmarchyMacInstallIsRecognisedWithItsOneRootPartition() throws {
       let disk = FakeRemovalDisk(F.alarm(), install: F.alarmInstall)
       let plan = try OmarchyRemovalPlan(disks: disk)
