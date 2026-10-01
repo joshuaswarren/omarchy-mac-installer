@@ -241,6 +241,15 @@
       XCTAssertEqual(probe.cancels, 1)
     }
 
+    func testAHoldWhoseReplyWasLostIsReleased() async {
+      // Fourth review: the helper may have granted the hold before its reply
+      // was lost; releasing by token keeps it from refusing work meanwhile.
+      let probe = FakeProbe(registered: true, version: nil, replacement: nil, work: .working)
+      let outcome = await provisioner(probe).ensureCurrent(owner)
+      XCTAssertEqual(outcome, .busy)
+      XCTAssertEqual(probe.cancels, 1)
+    }
+
     func testAnOlderHelperThatCannotBeAskedIsStillReplaced() async {
       let probe = FakeProbe(registered: true, version: nil, installsVersion: "28", replacement: nil)
       let outcome = await provisioner(

@@ -281,6 +281,10 @@
         case false?:
           return .busy
         case nil:
+          // The reply may have been lost after a hold was granted; release
+          // it, which only the holder's token can, so the helper doesn't
+          // refuse work until it lapses.
+          await probe.cancelReplacement(token: token)
           guard await probe.observeWork() == .idle else { return .busy }
           clearance = .unaskable
         }
@@ -305,7 +309,11 @@
 
     /// The last check before installing, after any dialog: the hold is still
     /// this app's and the helper still idle, or, where nothing was installed,
-    /// nothing another app has installed since is at work.
+    /// nothing another app has installed since is at work. A held helper can't
+    /// start a job after this check. For one that can't be asked, a job could
+    /// still start in the instant between this check and `SMJobBless`; an
+    /// older helper has no way to refuse work, so that window is a documented
+    /// migration limitation.
     private static func stillClear(
       _ clearance: Clearance, probe: any InstallerHelperProbing, token: String
     ) async -> Bool {

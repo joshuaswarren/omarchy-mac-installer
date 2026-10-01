@@ -50,9 +50,10 @@
   /// What a lost connection after a submitted removal means. It counts as
   /// done only when the outcome shows on disk: the helper has retired
   /// completely (it deletes its job file, binary and state only after a
-  /// completed removal) and the macOS container has grown most of the way to
-  /// its size after removal. Anything less stays unknown, including a helper
-  /// briefly absent while another build reinstalls it.
+  /// completed removal) and the macOS container has reached its planned size
+  /// after removal, by the helper's own completion tolerance. Anything less
+  /// stays unknown, including a helper briefly absent while another build
+  /// reinstalls it.
   public enum RemovalConnectionLoss: Equatable, Sendable {
     case completed
     case unknown
@@ -73,9 +74,13 @@
         self = .unknown
         return
       }
-      // Past halfway from the size before removal to the size after it.
-      let threshold = macOSBytesAfter - reclaimBytes / 2
-      self = macOSContainerBytes >= threshold ? .completed : .unknown
+      // The helper's own test that macOS took the space back: within 1 MiB
+      // of its planned size, and not beyond it.
+      let tolerance: UInt64 = 1_048_576
+      let reclaimed =
+        macOSContainerBytes <= macOSBytesAfter
+        && macOSBytesAfter - macOSContainerBytes <= tolerance
+      self = reclaimed ? .completed : .unknown
     }
   }
 

@@ -97,6 +97,12 @@
       XCTAssertTrue(work.beginReplacement(token: "B"))
     }
 
+    func testAHeldReplacementDoesNotLapseEarly() throws {
+      let work = HelperWorkState(replacementLapse: 60)
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      XCTAssertFalse(work.beginReplacement(token: "B"), "still held on the monotonic clock")
+    }
+
     func testAnUnrenewedHoldLapsesForOthers() throws {
       let work = HelperWorkState(replacementLapse: 0)
       XCTAssertTrue(work.beginReplacement(token: "A"))

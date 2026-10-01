@@ -44,7 +44,11 @@
           reclaimBytes: reclaim)
       }
       XCTAssertEqual(loss(true, after), .completed)
-      XCTAssertEqual(loss(true, after - reclaim / 4), .completed, "most of the way there")
+      // The helper's own tolerance: within 1 MiB of the planned size.
+      XCTAssertEqual(loss(true, after - 1_048_576), .completed)
+      XCTAssertEqual(loss(true, after - 1_048_577), .unknown)
+      XCTAssertEqual(loss(true, after - reclaim / 4), .unknown, "most of the way is not done")
+      XCTAssertEqual(loss(true, after + 4096), .unknown, "larger than planned is not this removal")
       // The space never came back: removal didn't finish, or never started.
       XCTAssertEqual(loss(true, after - reclaim), .unknown)
       // A helper still (or again) present leaves it unknown, whatever the disk.

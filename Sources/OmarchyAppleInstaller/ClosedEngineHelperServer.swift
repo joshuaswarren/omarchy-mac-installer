@@ -43,7 +43,7 @@
     private enum Phase {
       case idle
       case working
-      case replacing(token: String, since: Date)
+      case replacing(token: String, since: ContinuousClock.Instant)
     }
 
     private let lock = NSLock()
@@ -57,8 +57,10 @@
       self.replacementLapse = replacementLapse
     }
 
-    private func lapsed(_ since: Date) -> Bool {
-      Date().timeIntervalSince(since) > replacementLapse
+    /// Measured on a monotonic clock, so a change to the system time never
+    /// shortens or stretches a hold.
+    private func lapsed(_ since: ContinuousClock.Instant) -> Bool {
+      ContinuousClock.now - since > .seconds(replacementLapse)
     }
 
     func beginJob() throws {
@@ -92,7 +94,7 @@
         case .replacing(let holder, let since) where holder != token && !lapsed(since):
           return false
         case .idle, .replacing:
-          phase = .replacing(token: token, since: Date())
+          phase = .replacing(token: token, since: ContinuousClock.now)
           return true
         }
       }
