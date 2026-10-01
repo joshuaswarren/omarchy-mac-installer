@@ -93,6 +93,12 @@ while (( $# > 0 )); do
 done
 path=${url#*://*/}
 file=$BUCKET_DIR/$path
+if [[ -n ${CURL_TRUNCATED:-} && $path == *$CURL_TRUNCATED && -f $file ]]; then
+  # A 200 whose body is cut short, as on a reset connection.
+  [[ -n $output ]] && head -c 100 "$file" >"$output"
+  [[ -n $write_out ]] && printf '200'
+  exit 18
+fi
 if [[ -n ${CURL_UNAVAILABLE:-} && $path == *$CURL_UNAVAILABLE ]]; then
   [[ -n $write_out ]] && printf '503'
   exit 22
@@ -550,8 +556,17 @@ fi
 grep -q "rollback check" "$WORK/zip-unavailable.log" ||
   fail "the refusal names the rollback check" "$(cat "$WORK/zip-unavailable.log")"
 grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable live zip uploads nothing"
+# A 200 that is cut short is a failed read too, not a smaller zip.
+: >"$CALLS"
+if CURL_TRUNCATED=installer/stable/$INSTALLER_FILE_STEM.zip OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 \
+  "$PUBLISHER" app-publish --zip "$ZIP" --version 2.0.0 >"$WORK/zip-truncated.log" 2>&1; then
+  fail "a truncated live zip refuses the retry"
+fi
+grep -q "curl exit 18" "$WORK/zip-truncated.log" ||
+  fail "the refusal names the cut-short transfer" "$(cat "$WORK/zip-truncated.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a truncated live zip uploads nothing"
 cp "$ZIP" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
-pass "a failed read of the live zip never permits a rollback"
+pass "a failed or cut-short read of the live zip never permits a rollback"
 
 # --- a build with a leading zero compares as decimal, not octal
 # (on edge, so the stable and rc checks below are undisturbed)

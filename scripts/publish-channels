@@ -230,6 +230,22 @@ PY
   )
 }
 
+# Prints 200 only for a complete transfer and 404 for nothing there; anything
+# else, including a 200 whose body was cut short or reset, is printed as the
+# failure it was, so callers can't mistake it for either.
+fetch_status() {
+  local path=$1 output=$2 status rc=0
+  status=$(curl -sSL -H 'Cache-Control: no-cache' -o "$output" \
+    -w '%{http_code}' "$STREAM_BASE/$path" 2>/dev/null) || rc=$?
+  if [[ $status == 404 ]]; then
+    echo 404
+  elif (( rc == 0 )) && [[ $status == 200 ]]; then
+    echo 200
+  else
+    echo "HTTP ${status:-none}, curl exit $rc"
+  fi
+}
+
 fetch_public() {
   local path=$1 output=$2 status
   status=$(curl -fsSL -H 'Cache-Control: no-cache' -o "$output" \
@@ -498,19 +514,17 @@ PY
 
   digest=$(file_digest "$zip")
   local status served=""
-  status=$(curl -sSL -H 'Cache-Control: no-cache' -o "$work/previous.json" \
-    -w '%{http_code}' "$STREAM_BASE/installer/$channel/installer.json" 2>/dev/null) || true
+  status=$(fetch_status "installer/$channel/installer.json" "$work/previous.json")
   case $status in
     200)
       # What the channel serves now; as for installer.json, only a 404 means
       # there is nothing, and any other failure stops the publish.
       local zip_status
-      zip_status=$(curl -sSL -H 'Cache-Control: no-cache' -o "$work/previous.zip" \
-        -w '%{http_code}' "$STREAM_BASE/installer/$channel/$ZIP_FILE_NAME" 2>/dev/null) || true
+      zip_status=$(fetch_status "installer/$channel/$ZIP_FILE_NAME" "$work/previous.zip")
       case $zip_status in
         200) served=$(file_digest "$work/previous.zip") ;;
         404) ;;
-        *) die "could not read $channel's current zip (HTTP ${zip_status:-none}); the rollback check can't be skipped" ;;
+        *) die "could not read $channel's current zip ($zip_status); the rollback check can't be skipped" ;;
       esac
       previous=$(python3 - "$work/previous.json" "$digest" "$served" <<'PY'
 import json
@@ -528,7 +542,7 @@ PY
         die "build $build is not above build $previous already published to $channel"
       ;;
     404) ;;
-    *) die "could not read $channel's current installer.json (HTTP ${status:-none}); the build check can't be skipped" ;;
+    *) die "could not read $channel's current installer.json ($status); the build check can't be skipped" ;;
   esac
   printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.zip" >"$work/zip.sha256"
   immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.zip"
