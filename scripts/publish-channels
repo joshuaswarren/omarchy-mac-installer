@@ -37,6 +37,9 @@ SIGNING_TOOL="${OMARCHY_CATALOG_SIGNING_TOOL:-xcrun swift $script_directory/cata
 # The download is the notarized app in a zip; the installer package is no
 # longer published.
 ZIP_FILE_NAME="$INSTALLER_FILE_STEM.zip"
+# installer.json from the package era records no build number; the last
+# package release, 2.0.10, was build 27, so nothing at or below it publishes.
+LEGACY_BUILD_FLOOR=27
 ZIP_DOWNLOAD_NAME="$INSTALLER_APP_NAME.zip"
 NO_CACHE="no-cache, max-age=0, must-revalidate"
 
@@ -526,19 +529,39 @@ PY
         404) ;;
         *) die "could not read $channel's current zip ($zip_status); the rollback check can't be skipped" ;;
       esac
-      previous=$(python3 - "$work/previous.json" "$digest" "$served" <<'PY'
+      previous=$(python3 - "$work/previous.json" "$digest" "$served" "$work/previous.zip" \
+        "$INSTALLER_APP_NAME.app" "$LEGACY_BUILD_FLOOR" 2>"$work/previous.err" <<'PY'
 import json
+import plistlib
 import sys
+import zipfile
 
-document = json.load(open(sys.argv[1]))
+document_path, digest, served, zip_path, app, floor = sys.argv[1:7]
+document = json.load(open(document_path))
 # The very same zip may be republished, as after a failed upload, but only if
 # the channel does not already serve some other zip from a half-finished run.
-same = document.get("sha256") == sys.argv[2] and sys.argv[3] in ("", sys.argv[2])
-build = document.get("build_number", "")
-print("same" if same else (int(build) if str(build).isdigit() else ""))
+if document.get("sha256") == digest and served in ("", digest):
+    print("same")
+    sys.exit(0)
+# installer.json from before build numbers were recorded has none; the last
+# such release was the 2.0.10 package, build 27, so that is the floor.
+recorded = document.get("build_number", floor)
+if isinstance(recorded, bool) or not str(recorded).isdigit():
+    sys.exit(f"the channel's installer.json has a malformed build_number: {recorded!r}")
+builds = [int(recorded)]
+# An interrupted publish can leave old metadata beside a newer zip; the zip
+# actually served counts too, so no middle build slips between them.
+if served:
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            info = plistlib.loads(archive.read(f"{app}/Contents/Info.plist"))
+        builds.append(int(str(info["CFBundleVersion"])))
+    except Exception as error:
+        sys.exit(f"the channel's current zip has no readable build number: {error}")
+print(max(builds))
 PY
-      ) || die "the channel's current installer.json is unreadable"
-      [[ $previous == "same" || -z $previous ]] || (( 10#$build > 10#$previous )) ||
+      ) || die "$(cat "$work/previous.err")"
+      [[ $previous == "same" ]] || (( 10#$build > 10#$previous )) ||
         die "build $build is not above build $previous already published to $channel"
       ;;
     404) ;;

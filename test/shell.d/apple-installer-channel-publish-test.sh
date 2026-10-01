@@ -568,6 +568,50 @@ grep -q "^aws s3 cp" "$CALLS" && fail "a truncated live zip uploads nothing"
 cp "$ZIP" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
 pass "a failed or cut-short read of the live zip never permits a rollback"
 
+# --- package-era metadata has no build number: build 27 is the floor
+# Reproduces the review: build 1 replacing a published build 28 because the
+# channel's installer.json carried no build_number.
+mkdir -p "$STREAM_DIR/installer/rc"
+printf '{"schema_version": 1, "version": "2.0.10", "sha256": "old"}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+rm -f "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+make_app_zip "$WORK/Low.zip" 6200 "" 2.0.7 20
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.7 "$PUBLISHER" app-publish \
+  --zip "$WORK/Low.zip" --version 2.0.7 --to rc >"$WORK/floor.log" 2>&1; then
+  fail "a build at or below the package era's 27 is refused"
+fi
+grep -q "build 20 is not above build 27" "$WORK/floor.log" ||
+  fail "the refusal names the floor" "$(cat "$WORK/floor.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a build below the floor uploads nothing"
+printf '{"schema_version": 1, "version": "2.0.10", "sha256": "old", "build_number": "x7"}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.7 "$PUBLISHER" app-publish \
+  --zip "$WORK/Low.zip" --version 2.0.7 --to rc >"$WORK/malformed.log" 2>&1; then
+  fail "a malformed build_number stops the publish"
+fi
+grep -q "malformed build_number" "$WORK/malformed.log" ||
+  fail "the refusal names the malformed field" "$(cat "$WORK/malformed.log")"
+rm -f "$STREAM_DIR/installer/rc/installer.json"
+pass "missing build numbers count as 27, and malformed ones stop the publish"
+
+# --- old metadata beside a newer zip lets no middle build through
+make_app_zip "$WORK/Served40.zip" 6300 "" 2.0.8 40
+cp "$WORK/Served40.zip" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+printf '{"schema_version": 1, "version": "2.0.8", "sha256": "old", "build_number": 30}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+make_app_zip "$WORK/Middle.zip" 6400 "" 2.0.9 35
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.9 "$PUBLISHER" app-publish \
+  --zip "$WORK/Middle.zip" --version 2.0.9 --to rc >"$WORK/middle.log" 2>&1; then
+  fail "a build between stale metadata and the served zip is refused"
+fi
+grep -q "build 35 is not above build 40" "$WORK/middle.log" ||
+  fail "the refusal names the served zip's build" "$(cat "$WORK/middle.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a middle build uploads nothing"
+rm -f "$STREAM_DIR/installer/rc/installer.json" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+pass "the zip a channel serves counts toward the build it must beat"
+
 # --- a build with a leading zero compares as decimal, not octal
 # (on edge, so the stable and rc checks below are undisturbed)
 make_app_zip "$WORK/Eight.zip" 6050 "" 2.0.4 8
