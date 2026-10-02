@@ -1,5 +1,17 @@
 # Migration exploration validation
 
+## Disposable collection candidate, 2026-09-30 UTC
+
+Source candidate: `ed0b9299fb698c04b2703d70e6a66fb29abeeac1`, tree `09c16d54ff2f5a4980a102fb5bbdb8ca823bc11a`. One authoritative `./test/all` run passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 43 staging, and 120 bundle/fixture/restore/tree/replacement/collection checks, plus shell/packaging fixtures: **328 Python tests passed; one optional sgdisk case skipped**. This entry is a documentation-only follow-up to the tested candidate.
+
+The [collection extension](../../Development/migration_bundle_probe/COLLECTION.md) adds 23 cases. Instrumented open/enumeration checks prove recognized fake stores are pruned before access, including unreadable protected directories. Default/alternate roots, direct and ancestor remapping, synthetic opt-in versus unavailable adapters, similar-prefix ordinary paths, unknown settings and project dotfiles, symbolic/hardlink aliases, nested mount identity rejection, source changes, root permission changes, bounded depth/size, capability binding, and scratch isolation/cleanup are exercised. An actual encrypted roundtrip retains captured bytes, file modes and nanosecond mtimes after subsequent source edits.
+
+Focused collection checks, compilation/37 engine checks, and one 120-case migration closure passed with ResourceWarning treated as an error. Two independent read-only reviews found that renamed archive roots could redirect symlinks to different source objects. The implementation now omits symlinks whenever any root is renamed, with an explicit report and collision regression. Capability binding, root permissions, composed paths, and depth bounds were tightened before qualification. Final reviews reported no remaining blocker in the quiescent synthetic scope. Modified Markdown links and whitespace checks passed.
+
+Runner: Linux aarch64 `7.1.12-2-11.5-sep-ARCH`, Python 3.14.7, Bash 5.3.20, Git 2.55.0; age/QEMU hashes match the dependencies below. Tests remained unprivileged, with a sandbox allowance for private Unix sockets. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed. macOS app builds/signing and physical installation are not claimed.
+
+The collector accepts caller-created disposable sources and trusted fake-store layouts. It is not a real-home CLI or qualified adapter. It requires a quiescent source and snapshot-parent namespace; metadata checks do not prove atomic live capture. Cross-mount inputs, multiply linked regular files, renamed-root links and unsupported file types are withheld/rejected explicitly. Extended metadata, authenticated collection provenance, actual credential roots/aliases, Try transformations, production encrypted scratch/cleanup, shared runtime packaging and native boot/encryption remain work. Tickets 04–05 remain in progress.
+
 ## Approved replacement candidate, 2026-09-30 UTC
 
 Source candidate: `ac66d5cffd066c5bf7b148503a3ff6ae521104d2`, tree `1bc82c0547fd9415b5a3ec07cb35163cc41f356b`. One authoritative `./test/all` run on that committed candidate passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 43 staging, and 97 bundle/fixture/restore/tree/replacement tests, plus shell/packaging fixtures: **305 Python tests passed; one optional sgdisk case skipped**. This validation entry is a documentation-only follow-up.
