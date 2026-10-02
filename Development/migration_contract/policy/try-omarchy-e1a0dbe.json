@@ -1,0 +1,185 @@
+{
+  "credential_stores": [
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "ssh",
+      "roots": [
+        ".ssh"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "gnupg",
+      "roots": [
+        ".gnupg"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "gnome-keyring",
+      "roots": [
+        ".local/share/keyrings"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "1password",
+      "roots": [
+        ".config/1Password"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "codex",
+      "roots": [
+        ".codex"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "chromium",
+      "roots": [
+        ".config/chromium"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "brave",
+      "roots": [
+        ".config/BraveSoftware"
+      ]
+    }
+  ],
+  "mounts": [
+    {
+      "evidence": {
+        "path": "guest/native-overlay/usr/local/bin/omarchy-native-mac-share",
+        "sha256": "42e01c8da0b71cc249b92b9a80c2452dc223cc7ea2712baab4c74d1b7463cf95"
+      },
+      "id": "mac-share",
+      "path": "/mnt/mac",
+      "reason": "mac_shared_folder"
+    }
+  ],
+  "revision": "try-omarchy/e1a0dbe/1",
+  "rules": [
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/fragments/hypr-monitors-arm-qemu.append.lua",
+        "sha256": "d8a326f4ffe15d07daf1bc451f12b111fc95429381054457fd3e1b2062fbaa1a"
+      },
+      "id": "try-hypr-monitors",
+      "match": "exact",
+      "path": ".config/hypr/monitors.lua",
+      "reason": "display_configuration"
+    },
+    {
+      "action": "transform",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "try-hypr-input-overrides",
+      "match": "exact",
+      "path": ".config/hypr/input.lua",
+      "reason": "try_appended_fragment",
+      "transform": {
+        "block": "\n-- Try Omarchy's host pinch device carries gestures only.\ndofile(\"/usr/share/try-omarchy/pinch-input.lua\")\n\n-- Match Apple keyboard geometry (ansi/iso/jis) from the host cmdline.\ndofile(\"/usr/share/try-omarchy/apple-keyboard-input.lua\")\n",
+        "type": "strip-appended-block"
+      }
+    },
+    {
+      "action": "transform",
+      "evidence": {
+        "path": "guest/fragments/chromium-flags-wayland-ime.append.conf",
+        "sha256": "70b66ba3fcd3efd2258ee321094b37e04586649748fab6b6861ee7ce997b26e1"
+      },
+      "id": "try-chromium-wayland-ime",
+      "match": "exact",
+      "path": ".config/chromium-flags.conf",
+      "reason": "try_appended_fragment",
+      "transform": {
+        "block": "--enable-wayland-ime\n",
+        "type": "strip-appended-block"
+      }
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/fragments/pre-refresh-pacman-restore-arm.sh",
+        "sha256": "822285ef07c45327300671e2f65e4a177f2039301c74bcdd8ae9e157e3e1f938"
+      },
+      "id": "try-pacman-refresh-hook",
+      "match": "exact",
+      "path": ".config/omarchy/hooks/pre-refresh-pacman.d/restore-arm-pacman",
+      "reason": "vm_integration"
+    },
+    {
+      "action": "transform",
+      "evidence": {
+        "path": "guest/native-overlay/etc/skel/.config/omarchy/extensions/omarchy-menu.jsonc",
+        "sha256": "db08438034a03df0afbc11122239c640333f81a16d84179de69758d2e71f5684"
+      },
+      "id": "try-menu-entries",
+      "match": "exact",
+      "path": ".config/omarchy/extensions/omarchy-menu.jsonc",
+      "reason": "vm_integration",
+      "transform": {
+        "format": "jsonc",
+        "keys": [
+          "setup.try-omarchy",
+          "setup.security.touch-id",
+          "setup.try-omarchy-integrations"
+        ],
+        "type": "remove-json-keys"
+      }
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-runtime-link",
+      "match": "exact",
+      "path": ".local/share/omarchy",
+      "reason": "runtime_link"
+    },
+    {
+      "action": "preserve",
+      "evidence": {
+        "path": "guest/fragments/fcitx5-profile.ini",
+        "sha256": "06a789f19c36b51585104fae04b3759d3abf06c6d0d63bb33a8955fb04a3615c"
+      },
+      "id": "try-fcitx5-profile",
+      "match": "exact",
+      "path": ".config/fcitx5/profile",
+      "reason": "seeded_user_config"
+    },
+    {
+      "action": "preserve",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-hypr-toggles",
+      "match": "tree",
+      "path": ".local/state/omarchy/toggles",
+      "reason": "user_state"
+    }
+  ],
+  "schema": "omarchy-migration/policy/1",
+  "source": {
+    "commit": "e1a0dbe9820a8f7554ac3b930c2f13e1f41b25a1",
+    "provider": "try-omarchy",
+    "repository": "https://github.com/omacom/try-omarchy"
+  }
+}
