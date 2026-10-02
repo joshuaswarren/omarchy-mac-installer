@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Concrete stage-1 adapter over pinned upstream Asahi primitives."""
 
+import contextlib
 import hashlib
 import io
 import json
@@ -8,9 +9,11 @@ import os
 import re
 import stat
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
+import zlib
 from pathlib import PurePosixPath
 
 import asahi_firmware
@@ -379,6 +382,57 @@ def _write_step2(installer):
     with open(installer.step2_sh, "w") as fd:
         fd.write(script)
     os.chmod(installer.step2_sh, 0o755)
+# Aurora's J700 Stage 1 carries one versioned config block that names the ESP
+# and the Stage 2 path; it is filled in place so the image keeps its length
+# and STACKBOT tail (port of aurora-silicon/m1n1 tools/fill_stage1_config.py,
+# MIT).
+J700_STAGE1 = "esp/aurora/stage1-j700.bin"
+J700_STAGE1_MAGIC = b"AURORA-S1-CFG01\0"
+J700_STAGE1_BODY = struct.Struct("<II40s192s")
+J700_STAGE1_BLOCK = len(J700_STAGE1_MAGIC) + J700_STAGE1_BODY.size + 4
+J700_PROXY_WINDOW_MS = 5000
+CANONICAL_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+
+
+def fill_j700_stage1(image, uuid, path, window_ms):
+    if not CANONICAL_UUID.fullmatch(uuid):
+        raise AsahiAdapterError("ESP PARTUUID must be canonical lowercase")
+    if not path or any(not 0x20 <= ord(c) < 0x7F or c in ";\\" for c in path) or any(
+        component in ("", ".", "..") for component in path.split("/")
+    ):
+        raise AsahiAdapterError("Stage 2 path must be relative to the ESP root")
+    encoded = b";" + path.encode("ascii")
+    if len(encoded) >= 192:
+        raise AsahiAdapterError("Stage 2 path is too long")
+    if not 0 <= window_ms <= 99999:
+        raise AsahiAdapterError("proxy window must be 0..99999 ms")
+    if not image.endswith(b"STACKBOT"):
+        raise AsahiAdapterError("J700 Stage 1 does not end at STACKBOT")
+    if image.count(J700_STAGE1_MAGIC) != 1:
+        raise AsahiAdapterError("J700 Stage 1 config block must occur exactly once")
+    offset = image.index(J700_STAGE1_MAGIC)
+    if offset + J700_STAGE1_BLOCK > len(image) - 8:
+        raise AsahiAdapterError("J700 Stage 1 config block extends past the image")
+    if struct.unpack_from("<I", image, offset + len(J700_STAGE1_MAGIC))[0] != 1:
+        raise AsahiAdapterError("unsupported J700 Stage 1 config version")
+    body = J700_STAGE1_BODY.pack(
+        1, window_ms, uuid.encode("ascii").ljust(40, b"\0"), encoded.ljust(192, b"\0")
+    )
+    block = J700_STAGE1_MAGIC + body + struct.pack("<I", zlib.crc32(body))
+    return image[:offset] + block + image[offset + J700_STAGE1_BLOCK:]
+
+
+def install_board_stage1(device_class, read_member, esp_uuid, boot_object, next_object="m1n1/boot.bin"):
+    """Replace asahi's Stage 1 on boards that need their own (the J700)."""
+    if device_class != "j700ap":
+        return
+    try:
+        image = read_member(J700_STAGE1)
+    except KeyError as error:
+        raise AsahiAdapterError(f"this image has no {J700_STAGE1} for the MacBook Neo") from error
+    filled = fill_j700_stage1(image, esp_uuid.lower(), next_object, J700_PROXY_WINDOW_MS)
+    with open(boot_object, "wb") as fd:
+        fd.write(filled)
 
 
 class _WithoutRecoveryMount:
@@ -414,14 +468,17 @@ def stub_installer(sysinfo, dutil, osinfo):
     collect_firmware = installer.collect_firmware
 
     def collect_firmware_from_an_encrypted_recovery(pkg):
+        with _newer_trackpad_keys():
+            return _collect_firmware(pkg)
+
+    def _collect_firmware(pkg):
         image = os.path.join(
             installer.osi.recovery,
             installer.osi.vgid,
             "usr/standalone/firmware/arm64eBaseSystem.dmg",
         )
-        with open(image, "rb") as fd:
-            if fd.read(len(AEA_MAGIC)) != AEA_MAGIC:
-                return collect_firmware(pkg)
+        if not _is_encrypted(image):
+            return collect_firmware(pkg)
         # The firmware the recovery image carries is the same build's as
         # the running macOS's own /usr/share/firmware and /usr/sbin, so it is
         # read from there, and only when the builds match.
@@ -459,6 +516,31 @@ def stub_installer(sysinfo, dutil, osinfo):
 
     installer.install_files = install_files_with_decrypted_images_and_omarchys_step2
     return installer
+
+
+@contextlib.contextmanager
+def _newer_trackpad_keys():
+    """Count C1FE multitouch keys (the J700's trackpad) as trackpads.
+
+    asahi_firmware knows C1FD trackpads and C1FB Touch Bars; the MacBook Neo's
+    J700_Multitouch.im4p keys its trackpad C1FE0,0, which converts the same way.
+    """
+    multitouch = getattr(asahi_firmware, "multitouch", None)
+    if multitouch is None:
+        yield
+        return
+    original = multitouch.device_key_to_kind
+
+    def device_key_to_kind(key):
+        if key.startswith("C1FE"):
+            return multitouch.DEVICE_KIND_TRACKPAD
+        return original(key)
+
+    multitouch.device_key_to_kind = device_key_to_kind
+    try:
+        yield
+    finally:
+        multitouch.device_key_to_kind = original
 
 
 def _is_encrypted(path):
@@ -983,6 +1065,13 @@ class AsahiStage1Adapter:
             self.osins.firmware_package = firmware_package
 
         self.osins.install(self.installer.ins)
+        install_board_stage1(
+            self.installer.sysinfo.device_class,
+            self.osins.pkg.read,
+            self.osins.efi_part.uuid,
+            self.installer.ins.boot_obj_path,
+            self.template.get("next_object", "m1n1/boot.bin"),
+        )
         for target in self.osins.idata_targets:
             self.installer.ins.collect_installer_data(target)
             shutil.copy(

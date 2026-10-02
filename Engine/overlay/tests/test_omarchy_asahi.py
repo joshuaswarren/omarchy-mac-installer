@@ -61,6 +61,7 @@ class FakeStubInstaller:
         # Where the real stub writes the Recovery setup that Omarchy replaces.
         self.step2_sh = os.path.join(self.recovery.name, "step2.sh")
         self.icon_path = dutil.stub_icon_path
+        self.boot_obj_path = os.path.join(self.recovery.name, "boot.bin")
 
     def load_ipsw(self, ipsw):
         self.calls.append(("load_ipsw", ipsw))
@@ -113,6 +114,8 @@ from omarchy_asahi import (  # noqa: E402
     AsahiAdapterError,
     AsahiInPlaceRepairAdapter,
     AsahiStage1Adapter,
+    fill_j700_stage1,
+    install_board_stage1,
     stub_installer,
 )
 
@@ -819,7 +822,8 @@ class FakeInstaller:
     def __init__(self, dutil):
         self.dutil = dutil
         self.sys_disk = "disk0"
-        self.sysinfo = object()
+        # An M3 Air: asahi's own Stage 1 stays the boot object.
+        self.sysinfo = SimpleNamespace(device_class="j613ap")
         self.osinfo = object()
         self.cur_os = "current-os"
         self.chosen_firmware = "unset"
@@ -1472,6 +1476,109 @@ class DecryptedMacos26ImagesTests(unittest.TestCase):
         installer = self.make(self.AEA, {})
         with self.assertRaisesRegex(AsahiAdapterError, "recovery image"):
             installer.install_files(self.cur_os)
+
+
+def j700_stage1(path=b"", window=0, uuid=b""):
+    import struct as _struct
+    import zlib as _zlib
+    body = _struct.pack("<II40s192s", 1, window, uuid.ljust(40, b"\0"), path.ljust(192, b"\0"))
+    block = b"AURORA-S1-CFG01\0" + body + _struct.pack("<I", _zlib.crc32(body))
+    return b"m1n1 j700 stage 1" + block + b"\0" * 64 + b"STACKBOT"
+
+
+class J700Stage1Tests(unittest.TestCase):
+    UUID = "97c92d03-2cb3-461f-9134-134a58cc9fdc"
+
+    def test_the_block_is_filled_in_place(self):
+        import struct as _struct
+        import zlib as _zlib
+        image = j700_stage1()
+        filled = fill_j700_stage1(image, self.UUID, "m1n1/boot.bin", 5000)
+        self.assertEqual(len(filled), len(image))
+        self.assertTrue(filled.endswith(b"STACKBOT"))
+        offset = filled.index(b"AURORA-S1-CFG01\0") + 16
+        version, window, uuid, path = _struct.unpack_from("<II40s192s", filled, offset)
+        self.assertEqual((version, window), (1, 5000))
+        self.assertEqual(uuid.rstrip(b"\0"), self.UUID.encode())
+        self.assertEqual(path.rstrip(b"\0"), b";m1n1/boot.bin")
+        crc = _struct.unpack_from("<I", filled, offset + _struct.calcsize("<II40s192s"))[0]
+        self.assertEqual(crc, _zlib.crc32(filled[offset:offset + _struct.calcsize("<II40s192s")]))
+
+    def test_bad_inputs_are_refused(self):
+        image = j700_stage1()
+        for args in (
+            (image, self.UUID.upper(), "m1n1/boot.bin", 0),
+            (image, self.UUID, "/m1n1/boot.bin", 0),
+            (image, self.UUID, "m1n1/../boot.bin", 0),
+            (image, self.UUID, "m1n1/boot.bin", 100000),
+            (image[:-8], self.UUID, "m1n1/boot.bin", 0),
+            (image + image, self.UUID, "m1n1/boot.bin", 0),
+        ):
+            with self.assertRaises(AsahiAdapterError):
+                fill_j700_stage1(*args)
+
+    def write_generic(self, root):
+        target = Path(root) / "boot.bin"
+        target.write_bytes(b"asahi stage 1")
+        return target
+
+    def test_a_neo_gets_the_filled_j700_stage1(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = self.write_generic(root)
+            package = {"esp/aurora/stage1-j700.bin": j700_stage1()}
+            install_board_stage1("j700ap", package.__getitem__, self.UUID.upper(), str(target))
+            data = target.read_bytes()
+            self.assertTrue(data.startswith(b"m1n1 j700 stage 1"))
+            self.assertIn(b";m1n1/boot.bin", data)
+            self.assertIn(self.UUID.encode(), data)
+
+    def test_other_macs_keep_the_asahi_stage1(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = self.write_generic(root)
+            install_board_stage1("j613ap", {}.__getitem__, self.UUID, str(target))
+            self.assertEqual(target.read_bytes(), b"asahi stage 1")
+
+    def test_a_neo_image_without_the_j700_stage1_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = self.write_generic(root)
+            with self.assertRaisesRegex(AsahiAdapterError, "stage1-j700.bin"):
+                install_board_stage1("j700ap", {}.__getitem__, self.UUID, str(target))
+            self.assertEqual(target.read_bytes(), b"asahi stage 1")
+
+
+class NewerTrackpadKeyTests(unittest.TestCase):
+    """J700's Multitouch.im4p keys its trackpad C1FE, not C1FD."""
+
+    def test_c1fe_counts_as_a_trackpad_while_firmware_is_collected(self):
+        original = lambda key: "trackpad" if key.startswith("C1FD") else "unknown"
+        multitouch = SimpleNamespace(device_key_to_kind=original, DEVICE_KIND_TRACKPAD="trackpad")
+        seen = {}
+
+        class Stub:
+            def __init__(self, *args):
+                pass
+
+            def load_identity(self):
+                pass
+
+            def install_files(self, cur_os):
+                pass
+
+            def collect_firmware(self, pkg):
+                seen["C1FE0,0"] = multitouch.device_key_to_kind("C1FE0,0")
+                seen["C1FD0,0"] = multitouch.device_key_to_kind("C1FD0,0")
+                seen["C1FB0,0"] = multitouch.device_key_to_kind("C1FB0,0")
+
+        with patch("omarchy_asahi.stub.StubInstaller", Stub), patch(
+            "omarchy_asahi.asahi_firmware", SimpleNamespace(multitouch=multitouch)
+        ), patch("omarchy_asahi._is_encrypted", lambda path: False), patch(
+            "omarchy_asahi.os.path.join", lambda *parts: "/".join(str(p) for p in parts)
+        ):
+            installer = stub_installer("sysinfo", "dutil", "osinfo")
+            installer.osi = SimpleNamespace(recovery="r", vgid="v")
+            installer.collect_firmware("pkg")
+        self.assertEqual(seen, {"C1FE0,0": "trackpad", "C1FD0,0": "trackpad", "C1FB0,0": "unknown"})
+        self.assertIs(multitouch.device_key_to_kind, original)
 
 
 if __name__ == "__main__":
