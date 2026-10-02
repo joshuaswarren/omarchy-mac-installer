@@ -1,5 +1,13 @@
 # Migration exploration validation
 
+## Contract v1 candidate, 2026-10-02 UTC
+
+Source candidate: `3e7ae4672c`, tree `2b30c6df216edd77e8ca3b9dfd0c1998d79e2490`. The exact `git archive` of that commit ran `./test/all` on pancake: compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 120 bundle/fixture/restore/tree/replacement/collection and 19 new contract tests passed, plus `preclean-m1-test`: **347 Python tests passed; one optional skip** (348 run). Encryption and QEMU socket cases were enabled. The archive has no `.git`, so `apple-installer-identity-test.sh` stopped at its tracked-file check and the remaining shell fixtures did not run there; all ten `test/shell.d/apple-installer-*-test.sh` files then passed on the M4 in a clean checkout at the same commit.
+
+Runner: Linux aarch64 `7.1.12-2-11.5-sep-ARCH`, Python 3.14.7, Bash 5.3.20; `/usr/bin/core_perl` added to `PATH` as an Arch login shell does. age 1.3.2 `f28b1575…5b79053`, qemu-nbd 11.1.1 `4b42c1ba…e214d4` and libaio 0.3.113 `d22000af…ea7fabc` were copied from the verified tool records and checked by digest before use; nothing was installed system-wide. Shell fixtures: macOS 26.6.2 arm64, Bash 5 from Homebrew. Two earlier attempts on the same candidate are not evidence: one lacked `shasum` in a non-login shell, the other lacked libaio for qemu-nbd.
+
+The [contract](../../Development/migration_contract/CONTRACT.md) is a validated draft: public document schemas, one Try policy pinned to `e1a0dbe` with evidence drift detection, and shared fixtures. The probe, fixture and restorer do not consume it yet, and no transform is applied. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed. macOS app builds/signing and physical installation are not claimed. Ticket 04 remains in progress.
+
 ## Disposable collection candidate, 2026-09-30 UTC
 
 Source candidate: `ed0b9299fb698c04b2703d70e6a66fb29abeeac1`, tree `09c16d54ff2f5a4980a102fb5bbdb8ca823bc11a`. One authoritative `./test/all` run passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 43 staging, and 120 bundle/fixture/restore/tree/replacement/collection checks, plus shell/packaging fixtures: **328 Python tests passed; one optional sgdisk case skipped**. This entry is a documentation-only follow-up to the tested candidate.
