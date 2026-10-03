@@ -255,7 +255,7 @@ class ProvenanceTests(unittest.TestCase):
     def manifest(self, **changes):
         provenance = {
             "policy_revision": "try-omarchy/82927e9/1", "policy_sha256": "a" * 64, "request_sha256": "b" * 64,
-            "collection": {"counts": {"included": 3, "transformed": 1, "held-out": 1, "excluded": 1,
+            "collection": {"counts": {"included": 2, "transformed": 1, "held-out": 1, "excluded": 1,
                                       "unsupported": 0, "inert-link": 0},
                            "exceptions": [
                                {"source": ".config/hypr/input.lua", "archive": ".config/hypr/input.lua", "outcome": "transformed",
@@ -264,7 +264,11 @@ class ProvenanceTests(unittest.TestCase):
                                 "store": "ssh", "rule": None, "mount": None},
                                {"source": ".config/hypr/monitors.lua", "archive": ".config/hypr/monitors.lua", "outcome": "excluded",
                                 "reason": "display_configuration", "store": None, "rule": "try-hypr-monitors", "mount": None}]}}
-        manifest = {"schema": probe.TREE_SCHEMA, "export_id": str(uuid.uuid4()), "entries": [], "provenance": provenance}
+        entries = [{"path": ".config", "object": "objects/00000000", "kind": "directory", "mode": 0o700, "mtime_ns": 1},
+                   {"path": ".config/hypr", "object": "objects/00000001", "kind": "directory", "mode": 0o700, "mtime_ns": 1},
+                   {"path": ".config/hypr/input.lua", "object": "objects/00000002", "kind": "file", "mode": 0o644,
+                    "mtime_ns": 1, "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]
+        manifest = {"schema": probe.TREE_SCHEMA, "export_id": str(uuid.uuid4()), "entries": entries, "provenance": provenance}
         for path, value in changes.items():
             target = manifest
             keys = path.split(".")
@@ -280,6 +284,7 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(probe.TREE_SCHEMA, "omarchy-migration/bundle/2")
         probe.validate_manifest(self.manifest())
         probe.validate_manifest(self.manifest(provenance=KeyError))
+        probe.validate_manifest(self.manifest(**{"provenance.collection.exceptions.1.archive": ""}))
 
     def test_malformed_provenance_is_rejected(self):
         for change in ({"schema": probe.SCHEMA}, {"provenance.policy_revision": "Not A Label"},
@@ -289,6 +294,15 @@ class ProvenanceTests(unittest.TestCase):
                        {"provenance.collection.exceptions.1.source": "../.ssh"},
                        {"provenance.collection.exceptions.2.rule": "Bad Rule"},
                        {"provenance.collection.exceptions.0.mount": 7},
+                       {"provenance.policy_revision": "Try-Omarchy/82927e9/1"},
+                       {"provenance.collection.exceptions.1.store": "SSH"},
+                       {"provenance.collection.exceptions.2.reason": "Display_Configuration"},
+                       {"provenance.collection.counts.included": 3},
+                       {"provenance.collection.counts.included": 1100},
+                       {"provenance.collection.exceptions.1.archive": ".config/hypr"},
+                       {"provenance.collection.exceptions.0.archive": "elsewhere/input.lua"},
+                       {"provenance.collection.exceptions.1.source": "x" * 256},
+                       {"provenance.collection.exceptions.1.source": "/".join(["d"] * 65)},
                        {"unexpected": True}):
             with self.subTest(change=change), self.assertRaises(probe.Rejected):
                 probe.validate_manifest(self.manifest(**change))

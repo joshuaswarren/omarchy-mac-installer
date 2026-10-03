@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import pty
+import re
 import select
 import stat
 import subprocess
@@ -23,6 +24,8 @@ import termios
 import threading
 import time
 import uuid
+
+from . import contract
 
 
 SCHEMA = "omarchy-migration-probe/1"
@@ -168,15 +171,27 @@ def link_target(entry, entries):
     return final, tuple(sorted(directories))
 
 
-def _label(value, limit=128):
-    return (type(value) is str and 0 < len(value.encode("utf-8")) <= limit and value.isascii()
-            and value[0].isalnum() and all(char.isalnum() or char in "._/-_" for char in value))
+REASON = re.compile(r"[a-z0-9][a-z0-9._/_-]{0,127}")
+
+
+def _label(value):
+    """The contract's lowercase identifier rule (revisions, store, rule, mount ids)."""
+    return type(value) is str and len(value) <= 128 and contract.LABEL.fullmatch(value) is not None
+
+
+def _reason(value):
+    """Collection reasons: contract codes (underscores) or collector reasons (hyphens)."""
+    return type(value) is str and REASON.fullmatch(value) is not None
 
 
 def _relative(value):
     """An archive or source path inside the home; empty means the home itself."""
-    return (type(value) is str and len(value.encode("utf-8")) <= 4096 and "\0" not in value
-            and (value == "" or all(part not in ("", ".", "..") for part in value.split("/"))))
+    if type(value) is not str or "\0" in value or len(value.encode("utf-8")) > 4096:
+        return False
+    if value == "":
+        return True
+    parts = value.split("/")
+    return len(parts) <= 64 and all(part not in ("", ".", "..") and len(part.encode("utf-8")) <= 255 for part in parts)
 
 
 def validate_provenance(provenance):
@@ -203,7 +218,7 @@ def validate_provenance(provenance):
         if (not isinstance(item, dict) or set(item) != {"source", "archive", "outcome", "reason", "store", "rule", "mount"}
                 or not _relative(item["source"]) or not _relative(item["archive"])
                 or item["outcome"] not in PROVENANCE_OUTCOMES or item["outcome"] == "included"
-                or not _label(item["reason"])
+                or not _reason(item["reason"])
                 or any(item[key] is not None and not _label(item[key]) for key in ("store", "rule", "mount"))):
             raise Rejected("provenance exception")
     tally = {outcome: 0 for outcome in PROVENANCE_OUTCOMES}
@@ -211,6 +226,19 @@ def validate_provenance(provenance):
         tally[item["outcome"]] += 1
     if any(tally[outcome] != counts[outcome] for outcome in PROVENANCE_OUTCOMES if outcome != "included"):
         raise Rejected("provenance counts disagree with exceptions")
+
+
+def _provenance_matches_entries(provenance, entries):
+    counts, exceptions = provenance["collection"]["counts"], provenance["collection"]["exceptions"]
+    if sum(counts.values()) > MAX_ENTRIES:
+        raise Rejected("provenance counts exceed the entry limit")
+    if counts["included"] + counts["transformed"] + counts["inert-link"] != len(entries):
+        raise Rejected("provenance counts disagree with entries")
+    paths = {entry["path"] for entry in entries}
+    for item in exceptions:
+        # Withheld items never enter the bundle; changed or inert ones always do.
+        if (item["archive"] in paths) != (item["outcome"] in ("transformed", "inert-link")):
+            raise Rejected("provenance exception disagrees with entries")
 
 
 def validate_manifest(manifest):
@@ -292,6 +320,9 @@ def validate_manifest(manifest):
                     raise Rejected("ancestor must be a declared directory")
             elif str(parent) in paths:
                 raise Rejected("file used as parent")
+    if "provenance" in manifest:
+        # Only after every entry is known to be well formed.
+        _provenance_matches_entries(manifest["provenance"], entries)
 
 
 class AgeProcess:

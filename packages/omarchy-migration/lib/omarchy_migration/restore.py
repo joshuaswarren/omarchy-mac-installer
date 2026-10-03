@@ -19,8 +19,9 @@ from . import probe
 
 
 JOURNAL_SCHEMA = "omarchy-migration-restore-probe/1"
-TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/2"
-REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/3"
+# /4 and /5: an "applied" directory means this job created it and may finalize it.
+TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/4"
+REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/5"
 JOURNAL_LIMIT = 4 * 1024 * 1024
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -140,8 +141,9 @@ def _matches(entry, observed):
 
 
 def _final_mode(entry):
-    # The restorer's own checks refuse group- or other-writable directories.
-    return entry["mode"] & ~0o022
+    # Never group- or other-writable (the restorer's own checks refuse that),
+    # and always owner-traversable so retries can still observe the contents.
+    return (entry["mode"] | 0o500) & ~0o022
 
 
 def _created_directory_matches(entry, saved, observed):
@@ -666,28 +668,41 @@ class Restorer:
                    for position, other in enumerate(entries)):
                 continue
             self._check()
+            fingerprint = self._finalize_directory(entry, saved)
+            if fingerprint is None:
+                report[index] = self._action(entry, "conflict", "directory changed during application")
+                continue
+            saved["file"] = fingerprint
+            self._save()
+            report[index] = Action(entry["path"], "directory", "directory metadata restored")
+
+    def _finalize_directory(self, entry, saved):
+        """Set mode and mtime through a pinned descriptor; None if it changed.
+
+        Failing to reach the directory (a swapped, unsafe or vanished ancestor
+        or directory) is a conflict. Failing to change it, or to make the
+        change durable, still aborts like any other publication error.
+        """
+        reached = False
+        try:
             with self._parent(entry["path"]) as parent:
                 if parent is None:
-                    report[index] = self._action(entry, "conflict", "directory dependency is unavailable")
-                    continue
-                try:
-                    fd = os.open(entry["path"].split("/")[-1], DIRECTORY_FLAGS, dir_fd=parent)
-                except OSError:
-                    # Replaced by a link or another entry since publication.
-                    report[index] = self._action(entry, "conflict", "directory changed during application")
-                    continue
+                    return None
+                fd = os.open(entry["path"].split("/")[-1], DIRECTORY_FLAGS, dir_fd=parent)
                 try:
                     if not _created_directory_matches(entry, saved["file"], _directory_fingerprint(fd)):
-                        report[index] = self._action(entry, "conflict", "directory changed during application")
-                        continue
+                        return None
+                    reached = True
                     os.fchmod(fd, _final_mode(entry))
                     os.utime(fd, ns=(entry["mtime_ns"], entry["mtime_ns"]))
                     os.fsync(fd)
-                    saved["file"] = _directory_fingerprint(fd)
+                    return _directory_fingerprint(fd)
                 finally:
                     os.close(fd)
-            self._save()
-            report[index] = Action(entry["path"], "directory", "directory metadata restored")
+        except (OSError, probe.Rejected):
+            if reached:
+                raise
+            return None
 
     def _link_ready(self, entry):
         resolution = probe.link_target(entry, self._entries)

@@ -370,6 +370,8 @@ class _Snapshot:
                            "exceptions": [dict(item) for item in self.items if item["outcome"] != "included"]},
         }
         probe.validate_manifest(self.manifest)
+        if len(_json_bytes(self.manifest)) > probe.MAX_MANIFEST:
+            raise probe.Rejected("collection manifest size")
 
 
 @contextlib.contextmanager

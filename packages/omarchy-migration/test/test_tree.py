@@ -207,7 +207,6 @@ class TreeRestoreTests(unittest.TestCase):
     def test_existing_directory_modes_are_retained_and_later_changes_block_children(self):
         directory = self.target / "Projects"
         directory.mkdir(mode=0o750)
-        os.utime(directory, ns=(1, 1))
         with self.verified() as bundle:
             report = self.run_restore(bundle)
             self.assertEqual(report["Projects"].status, "directory")
@@ -220,7 +219,7 @@ class TreeRestoreTests(unittest.TestCase):
         self.assertEqual(report["Projects/demo/run"].status, "conflict")
         self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
 
-    def custom_bundle(self, build, finish=lambda root: None):
+    def custom_bundle(self, build, finish=lambda root: None, modes=None):
         """Encrypt a test-built tree; finish() runs after mtimes, e.g. to drop write bits."""
         source = self.root / "custom-source"
         source.mkdir(mode=0o700)
@@ -231,6 +230,11 @@ class TreeRestoreTests(unittest.TestCase):
         finish(source)
         self.addCleanup(lambda: [path.chmod(0o700) for path in source.rglob("*") if path.is_dir() and not path.is_symlink()])
         manifest = probe.make_tree_manifest(paths)
+        for entry in manifest["entries"]:
+            # A crafted producer may claim modes collection never emits.
+            if modes and entry["path"] in modes:
+                entry["mode"] = modes[entry["path"]]
+        probe.validate_manifest(manifest)
         ciphertext = self.root / "custom.age"
         probe.encrypt(self.age, SECRET, ciphertext, lambda stream: probe.write_archive(stream, manifest, paths))
         return ciphertext, manifest
@@ -314,12 +318,30 @@ class TreeRestoreTests(unittest.TestCase):
             self.assertEqual((self.target / "Pictures/a.png").read_bytes(), b"png\n")
             pictures = self.target / "Pictures"
             self.assertEqual(stat.S_IMODE(pictures.stat().st_mode), 0o750)  # mode set, journal not updated
+            journal = json.loads((self.job / "journal.json").read_text())
+            identity = next(entry["object"] for entry in bundle._manifest["entries"] if entry["path"] == "Pictures")
+            self.assertEqual(journal["entries"][identity]["file"]["mode"], 0o700)
             with restore.Restorer(bundle, self.target, self.job) as importer:
                 plan = importer.plan()
                 self.assertEqual({action.path: action.status for action in plan}["Pictures"], "restored")
                 report = {action.path: action for action in importer.apply(plan)}
         self.assertEqual(report["Pictures"].reason, "directory metadata restored")
         self.assertEqual(pictures.stat().st_mtime_ns, MTIME)
+
+    def test_directory_mode_without_owner_access_stays_traversable(self):
+        def build(root):
+            (root / "Locked").mkdir()
+            (root / "Locked/inner.txt").write_bytes(b"inner\n")
+        ciphertext, _ = self.custom_bundle(build, modes={"Locked": 0o300})
+        self.addCleanup(self.release_target)
+        with self.verified(ciphertext) as bundle:
+            first = self.run_restore(bundle)
+            second = self.run_restore(bundle)
+        locked = self.target / "Locked"
+        self.assertEqual(stat.S_IMODE(locked.stat().st_mode), 0o700)
+        self.assertEqual(first["Locked"].reason, "directory metadata restored")
+        self.assertEqual({action.status for action in second.values()} - {"restored", "directory", "present"}, set())
+        self.assertEqual((locked / "inner.txt").read_bytes(), b"inner\n")
 
     def test_group_writable_source_directory_is_restored_without_group_write(self):
         def build(root):
@@ -358,6 +380,7 @@ class TreeRestoreTests(unittest.TestCase):
         self.assertEqual(destination.read_bytes(), b"native user version")
 
     def test_link_dependencies_are_rechecked_after_regular_files_are_published(self):
+        root_mode = stat.S_IMODE(self.root.stat().st_mode)
         link = os.link
         changed = False
 
@@ -378,6 +401,8 @@ class TreeRestoreTests(unittest.TestCase):
         # The swapped directory is reported, not finalized through the link.
         self.assertEqual(report["Projects/demo/empty"].status, "conflict")
         self.assertNotEqual(self.root.stat().st_mtime_ns, MTIME)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), root_mode)
+        self.assertEqual(stat.S_IMODE((self.root / "moved-empty").stat().st_mode), 0o700)
 
     def test_existing_target_leaf_symlink_is_not_followed_or_aliased(self):
         outside = self.root / "outside"
