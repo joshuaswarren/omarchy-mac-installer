@@ -55,6 +55,30 @@
       "roots": [
         ".config/BraveSoftware"
       ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "firefox",
+      "roots": [
+        ".mozilla"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "pi",
+      "roots": [
+        ".pi/agent/auth.json"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "nss",
+      "roots": [
+        ".local/share/pki"
+      ]
     }
   ],
   "mounts": [
@@ -68,7 +92,7 @@
       "reason": "mac_shared_folder"
     }
   ],
-  "revision": "try-omarchy/e1a0dbe/1",
+  "revision": "try-omarchy/e1a0dbe/2",
   "rules": [
     {
       "action": "exclude",
@@ -174,6 +198,127 @@
       "match": "tree",
       "path": ".local/state/omarchy/toggles",
       "reason": "user_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/register-pinned-mise.sh",
+        "sha256": "c5d6bd843470d108c1798b35f3693fd3e7cc4e06ca5cfb883cade0b7d0f1b7db"
+      },
+      "id": "mise-installs",
+      "match": "tree",
+      "path": ".local/share/mise",
+      "reason": "reinstallable_toolchain"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/register-pinned-voxtype.sh",
+        "sha256": "0021597a69802c2cdd3594aef01ef9d990d5f0c1c9eaebadc9b16ebc3425b712"
+      },
+      "id": "voxtype-models",
+      "match": "tree",
+      "path": ".local/share/voxtype",
+      "reason": "reproducible_download"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/native-overlay/usr/share/pipewire/pipewire.conf.d/90-try-omarchy-quantum.conf",
+        "sha256": "32a56d8684b78269c3ee3fb8f8c249b58f0e2c809d669d99f5407ab1670d3eff"
+      },
+      "id": "wireplumber-state",
+      "match": "tree",
+      "path": ".local/state/wireplumber",
+      "reason": "hardware_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-clipboard-images",
+      "match": "tree",
+      "path": ".local/state/omarchy/clipboard-images",
+      "reason": "clipboard_history"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-clipboard-history",
+      "match": "exact",
+      "path": ".local/state/omarchy/clipboard-history.json",
+      "reason": "clipboard_history"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-migrations",
+      "match": "tree",
+      "path": ".local/state/omarchy/migrations",
+      "reason": "install_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-done",
+      "match": "tree",
+      "path": ".local/state/omarchy/done",
+      "reason": "install_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-first-run-log",
+      "match": "exact",
+      "path": ".local/state/omarchy/first-run.log",
+      "reason": "install_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-notifications",
+      "match": "tree",
+      "path": ".local/state/omarchy/notifications",
+      "reason": "transient_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-notifications-file",
+      "match": "exact",
+      "path": ".local/state/omarchy/notifications.json",
+      "reason": "transient_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/materialize-omarchy.sh",
+        "sha256": "70338c4b13ec30cfc6f6eb92eb005ab098674c00365b9874da089250e82748df"
+      },
+      "id": "omarchy-indicators",
+      "match": "tree",
+      "path": ".local/state/omarchy/indicators",
+      "reason": "transient_state"
     }
   ],
   "schema": "omarchy-migration/policy/1",

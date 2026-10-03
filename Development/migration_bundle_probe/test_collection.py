@@ -529,7 +529,7 @@ class CollectionTests(unittest.TestCase):
                            ".local/share/omarchy", ".config/chromium/Default/Cookies", ".local/share/keyrings/login.keyring"):
                 self.assertNotIn(absent, snapshot.paths)
             self.assertEqual(self.entry(snapshot, "Work")["mount"], "mac-share")
-            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/e1a0dbe/1")
+            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/e1a0dbe/2")
             self.assertEqual(snapshot.report["counts"]["held-out"], 2)
             self.assertEqual(snapshot.report["counts"]["excluded"], 3)
             self.assertEqual(snapshot.report["counts"]["transformed"], 3)

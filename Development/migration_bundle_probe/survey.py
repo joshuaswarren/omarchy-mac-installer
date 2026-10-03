@@ -136,7 +136,7 @@ class Survey:
                 return
             self.counts[kind]["files"] += 1
             self.counts[kind]["bytes"] += metadata.st_size
-            self.top_level[path.split("/")[0]] += metadata.st_size
+            self.top_level[size_key(path)] += metadata.st_size
             if match and match.item["action"] == "transform":
                 # Content is not read, so whether Try's additions are present is unknown.
                 self.note("transform", path, rule=match.item["id"])
@@ -149,6 +149,12 @@ class Survey:
             documents.append({"id": store["id"], "category": store["category"],
                               "present": store["id"] in self.stores, "adapter_available": False})
         return documents
+
+
+def size_key(path):
+    """Group sizes by top-level entry, or three levels deep inside dot-folders."""
+    parts = path.split("/")
+    return "/".join(parts[:3]) if parts[0].startswith(".") else parts[0]
 
 
 def omarchy_version(home, explicit):
@@ -217,7 +223,7 @@ def summary(survey, document):
             lines.append(f"  … and {bucket['count'] - len(bucket['examples'])} more")
     largest = survey.top_level.most_common(EXAMPLES)
     if largest:
-        lines += ["", "Largest top-level entries:"]
+        lines += ["", "Largest entries (dot-folders shown three levels deep):"]
         lines += [f"  ~/{name:<30} {size(total):>11}" for name, total in largest]
     return "\n".join(lines)
 

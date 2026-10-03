@@ -15,7 +15,7 @@ cd ~/migration-survey
 python3 -m Development.migration_bundle_probe.survey
 ```
 
-The summary lists category sizes, credential stores found, files the policy excludes or would clean of Try additions, links into the Mac share, other filesystems, and anything unsupported or unreadable, with up to ten example paths each. Add `--json` for the `inventory/1` contract document instead. Remove `~/migration-survey` afterwards; the checkout is not part of your home's survey results unless you run it from there and leave it in place.
+To update an existing checkout, run `git -C ~/migration-survey pull` instead of cloning. The summary lists category sizes, credential stores found, files the policy excludes or would clean of Try additions, links into the Mac share, other filesystems, and anything unsupported or unreadable, with up to ten example paths each, and the largest entries, broken down three levels inside dot-folders such as `.local/share/mise`. Add `--json` for the `inventory/1` contract document instead. Remove `~/migration-survey` afterwards; the checkout is not part of your home's survey results unless you run it from there and leave it in place.
 
 The summary is printed to your terminal only. It can contain file and folder names from your home; share it selectively.
 

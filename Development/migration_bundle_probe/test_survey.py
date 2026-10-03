@@ -135,6 +135,20 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(reasons["pipe"], "special-file")
         self.assertEqual(reasons["Documents/hardlink.md"], "multiply-linked-file")
 
+    def test_clipboard_history_is_excluded_and_large_dot_folders_are_broken_down(self):
+        for name, data in {".local/state/omarchy/clipboard-images/1.png": b"x" * 5000,
+                           ".local/share/mise/installs/node/bin/node": b"y" * 7000,
+                           ".local/share/zoxide/db.zo": b"z" * 30}.items():
+            path = self.home / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(data)
+        result = self.run_survey()
+        excluded = {item["path"] for item in result.outcomes["excluded"]["examples"]}
+        self.assertTrue({".local/state/omarchy/clipboard-images", ".local/share/mise"} <= excluded)
+        self.assertEqual(result.top_level[".local/share/zoxide"], 30)
+        self.assertNotIn(".local/share/mise", result.top_level)
+        self.assertEqual(result.top_level["Documents"], len(self.files["Documents/report.md"]))
+
     def test_refuses_a_home_owned_by_someone_else_and_bounds_entries(self):
         with patch.object(survey.os, "geteuid", return_value=os.geteuid() + 1):
             with self.assertRaisesRegex(survey.SurveyError, "another account"):

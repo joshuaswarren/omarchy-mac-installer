@@ -60,6 +60,28 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(self.policy.match(".local/share/omarchy/bin/omarchy").item["id"], "omarchy-runtime-link")
         self.assertIsNone(self.policy.match(".config/fcitx5/profile/extra"))
 
+    def test_revision_two_decisions_from_the_first_real_survey(self):
+        stores = {".mozilla/firefox/abc.default/cookies.sqlite": "firefox", ".pi/agent/auth.json": "pi",
+                  ".local/share/pki/nssdb/cert9.db": "nss", ".local/share/keyrings/login.keyring": "gnome-keyring"}
+        for path, store in stores.items():
+            self.assertEqual(self.policy.match(path), ("store", next(s for s in self.policy.stores if s["id"] == store)))
+        excluded = {".local/share/mise/installs/node/22/bin/node": "mise-installs",
+                    ".local/share/voxtype/models/base.bin": "voxtype-models",
+                    ".local/state/wireplumber/default-nodes": "wireplumber-state",
+                    ".local/state/omarchy/clipboard-images/1.png": "omarchy-clipboard-images",
+                    ".local/state/omarchy/clipboard-history.json": "omarchy-clipboard-history",
+                    ".local/state/omarchy/migrations/1700000000.sh": "omarchy-migrations",
+                    ".local/state/omarchy/first-run.log": "omarchy-first-run-log",
+                    ".local/state/omarchy/notifications.json": "omarchy-notifications-file"}
+        for path, rule_id in excluded.items():
+            match = self.policy.match(path)
+            self.assertEqual((match.kind, match.item["id"], match.item["action"]), ("rule", rule_id, "exclude"), path)
+        for path in (".pi/agent/settings.json", ".pi/agent/themes/omarchy-system.json", ".config/mise/config.toml",
+                     ".local/state/omarchy/current/theme/name", ".local/state/omarchy/agents/state.json",
+                     ".local/share/applications/chatgpt.desktop", ".local/share/zoxide/db.zo"):
+            self.assertIsNone(self.policy.match(path), path)
+        self.assertEqual(self.policy.match(".local/state/omarchy/toggles/hypr/flags.lua").item["action"], "preserve")
+
     def test_unknown_personal_paths_are_not_matched(self):
         for path in ("Documents/report.md", ".config/nvim/init.lua", ".bashrc", ".sshconfig"):
             self.assertIsNone(self.policy.match(path), path)
