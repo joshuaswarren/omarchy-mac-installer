@@ -379,6 +379,11 @@ def _policy(document):
         if path in seen:
             _fail("duplicate_item", where)
         seen.add(path)
+    # Nested rules would make the outcome depend on rule order.
+    for index, (path, where) in enumerate(rule_paths):
+        for other, _ in rule_paths[index + 1:]:
+            if path != other and _overlaps(path, other):
+                _fail("overlapping_paths", where)
 
 
 def _evidence(value, where):

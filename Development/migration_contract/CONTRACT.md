@@ -1,6 +1,6 @@
 # omarchy-migration contract v1
 
-Status: experimental draft for ticket 04, validated by `contract.py` and its fixtures. It formalizes the documents the disposable probe already exchanges so that Try, the installer and the native importer can be built against one versioned interface. It is not yet production code; the canonical home remains the shared Omarchy runtime (`bin/omarchy-migration`, `install/migration/omarchy_migration/`).
+Status: experimental draft for ticket 04, validated by `contract.py` and its fixtures. The disposable collector applies the policy through `policy.py`, and the runnable fixture exporter emits and consumes these documents; transforms run at export, so restore needs no provider rules. It formalizes the documents the disposable probe already exchanges so that Try, the installer and the native importer can be built against one versioned interface. It is not yet production code; the canonical home remains the shared Omarchy runtime (`bin/omarchy-migration`, `install/migration/omarchy_migration/`).
 
 ## Documents
 
@@ -51,8 +51,8 @@ A policy is the trusted, versioned description of one source build. `revision` n
 
 - **credential_stores** `{id, category, roots, adapter}` are matched first, before traversal, stat or open. A store is exported only when explicitly selected and only through an available adapter. Roots may not overlap each other or any rule.
 - **mounts** `{id, path, reason, evidence}` are absolute guest mount points such as the Mac share at `/mnt/mac`. Links into a mount are recorded as inert and never traversed; shared contents need an explicit selection.
-- **rules** `{id, path, match, action, reason, evidence[, transform]}` apply to one `exact` path or a whole `tree`. Actions are `exclude` (never exported), `preserve` (exported as personal configuration) and `transform` (exported after a declared, data-only change; `exact` matches only).
-- **transforms** are `strip-appended-block` (remove one provider-appended block, byte for byte) and `remove-json-keys` (remove named top-level keys from JSON or JSONC, keeping the rest). No transform executes code.
+- **rules** `{id, path, match, action, reason, evidence[, transform]}` apply to one `exact` path or a whole `tree`. Actions are `exclude` (never exported; excluding a path also excludes everything beneath it), `preserve` (exported as personal configuration) and `transform` (exported after a declared, data-only change; `exact` matches only). Rules may not nest inside each other, so the outcome never depends on rule order.
+- **transforms** are `strip-appended-block` (remove one provider-appended block starting on a line boundary, in LF or CRLF form, with or without its final newline at end of file) and `remove-json-keys` (remove named top-level keys from JSON or JSONC, keeping every other member and comment). Both fail closed: a repeated block, a block line left behind, malformed or non-standard JSONC (including non-JSON numbers and ambiguous line separators in comments) or input over 1 MiB withholds the file. No transform executes code.
 - **evidence** `{path[, sha256]}` cites the provider file a rule was derived from. `evidence.py` reports missing or changed evidence in a provider checkout; any drift requires a new policy revision before that provider build is supported. `sync-try` runs this on every Try update.
 
 Unknown personal configuration that matches no rule is preserved. Display, graphics, boot, hardware identity and VM integrations are excluded through rules rather than by guessing.

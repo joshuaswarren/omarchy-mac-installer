@@ -490,6 +490,18 @@
       ],
       "expect": "invalid_string",
       "value": "e1a0dbe"
+    },
+    {
+      "name": "nested rules depend on order",
+      "base": "policy",
+      "op": "set",
+      "path": [
+        "rules",
+        1,
+        "path"
+      ],
+      "expect": "overlapping_paths",
+      "value": ".config/hypr/monitors.lua/inner"
     }
   ],
   "raw": [

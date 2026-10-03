@@ -229,7 +229,8 @@ class _Snapshot:
         elif stat.S_ISREG(before.st_mode):
             if before.st_nlink != 1 or not before.st_mode & 0o400:
                 self._report(source, archive, "unsupported",
-                             "multiply-linked-file" if before.st_nlink != 1 else "unreadable-owner-file")
+                             "multiply-linked-file" if before.st_nlink != 1 else "unreadable-owner-file",
+                             rule=rule_id)
                 return
             if before.st_size > probe.MAX_TOTAL - self.total:
                 raise probe.Rejected("collection byte limit")
@@ -290,7 +291,7 @@ class _Snapshot:
             else:
                 self._report(source, archive, "included", "link-metadata", rule=rule_id)
         else:
-            self._report(source, archive, "unsupported", "special-file")
+            self._report(source, archive, "unsupported", "special-file", rule=rule_id)
             return
         after = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if _metadata(after) != _metadata(before):
@@ -304,8 +305,12 @@ class _Snapshot:
         for selection in self.request["selection"]:
             source, archive = selection["source"], selection["archive"]
             excluded = self._store(source)
+            rule = self._rule(source)
             if excluded:
                 self._report(source, archive, "held-out", excluded[1], excluded[0])
+            elif rule and rule["action"] == "exclude":
+                # Checked before opening ancestors, which may be the excluded path.
+                self._report(source, archive, "excluded", rule["reason"], rule=rule["id"])
             elif source:
                 with self._parent(source) as parent:
                     self._walk(parent, source.split("/")[-1], source, archive)

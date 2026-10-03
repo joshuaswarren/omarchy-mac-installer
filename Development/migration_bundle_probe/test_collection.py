@@ -409,6 +409,20 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(self.entry(snapshot, ".local/state/vm")["rule"], "vm-state")
             self.assertEqual(snapshot.report["counts"]["excluded"], 2)
 
+    def test_selecting_beneath_an_excluded_directory_reaches_nothing(self):
+        self.policy["rules"][0]["path"] = ".local/share/runtime"
+        self.write(".local/share/runtime/bin/tool", b"runtime contents\n")
+        self.request["selection"] = [{"source": ".local/share/runtime/bin", "archive": "bin"}]
+        opened = os.open
+
+        def guarded_open(value, flags, *args, **kwargs):
+            self.assertNotEqual(value, "runtime")
+            return opened(value, flags, *args, **kwargs)
+
+        with patch.object(collection.os, "open", side_effect=guarded_open), self.capture() as snapshot:
+            self.assertEqual(snapshot.paths, {})
+            self.assertEqual(snapshot.report["entries"][0]["outcome"], "excluded")
+
     def test_selected_excluded_root_is_reported_without_capture(self):
         self.write(".config/hypr/monitors.lua", b"monitor = host display\n")
         self.request["selection"] = [{"source": ".config/hypr/monitors.lua", "archive": "monitors.lua"}]
@@ -454,7 +468,13 @@ class CollectionTests(unittest.TestCase):
     def test_oversized_and_non_file_transform_targets_are_withheld(self):
         (self.source / ".config/omarchy/extensions/omarchy-menu.jsonc").mkdir(parents=True, mode=0o700)
         self.write(".config/app-flags.conf", b"x" * (collection.migration_policy.MAX_TRANSFORM_INPUT + 1))
-        with self.capture() as snapshot:
+        opened = os.open
+
+        def guarded_open(value, flags, *args, **kwargs):
+            self.assertNotIn(value, ("app-flags.conf", "omarchy-menu.jsonc"))
+            return opened(value, flags, *args, **kwargs)
+
+        with patch.object(collection.os, "open", side_effect=guarded_open), self.capture() as snapshot:
             self.assertEqual(self.entry(snapshot, ".config/omarchy/extensions/omarchy-menu.jsonc")["reason"],
                              "transform-target-not-file")
             self.assertEqual(self.entry(snapshot, ".config/app-flags.conf")["reason"], "transform-too-large")

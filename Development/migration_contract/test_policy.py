@@ -56,6 +56,10 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(self.policy.match(".local/state/omarchy/toggles/hypr/flags.lua").item["id"],
                          "omarchy-hypr-toggles")
 
+    def test_excluding_a_directory_excludes_its_descendants(self):
+        self.assertEqual(self.policy.match(".local/share/omarchy/bin/omarchy").item["id"], "omarchy-runtime-link")
+        self.assertIsNone(self.policy.match(".config/fcitx5/profile/extra"))
+
     def test_unknown_personal_paths_are_not_matched(self):
         for path in ("Documents/report.md", ".config/nvim/init.lua", ".bashrc", ".sshconfig"):
             self.assertIsNone(self.policy.match(path), path)
@@ -71,7 +75,8 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(self.policy.mount("//mnt/./mac/a")["id"], "mac-share")
         self.assertIsNone(self.policy.mount("/mnt/macintosh"))
         self.assertIsNone(self.policy.mount("Projects/x"))
-        self.assertEqual(self.policy.mount("/home/../mnt/mac")["id"], "unresolved")
+        self.assertIsNone(self.policy.mount("/home/../mnt/mac"))
+        self.assertIsNone(self.policy.mount("/mnt/mac/../../etc"))
 
     def test_policy_rejects_documents_that_are_not_policies(self):
         with self.assertRaises(contract.ContractError):
@@ -105,6 +110,21 @@ class StripBlockTests(unittest.TestCase):
     def test_missing_block_leaves_file_unchanged(self):
         data = b"-- nothing from Try here\n"
         self.assertEqual(self.policy.transform(rule("try-hypr-input-overrides"), data), (data, "not-applicable"))
+
+    def test_crlf_and_missing_final_newline_variants_are_stripped(self):
+        flags = rule("try-chromium-wayland-ime")
+        self.assertEqual(self.policy.transform(flags, b"--x\r\n--enable-wayland-ime\r\n"), (b"--x\r\n", "applied"))
+        self.assertEqual(self.policy.transform(flags, b"--x\n--enable-wayland-ime"), (b"--x\n", "applied"))
+        block = rule("try-hypr-input-overrides")["transform"]["block"]
+        crlf = b"input {}\r\n" + block.replace("\n", "\r\n").encode()
+        self.assertEqual(self.policy.transform(rule("try-hypr-input-overrides"), crlf), (b"input {}\r\n", "applied"))
+
+    def test_leftover_block_lines_are_residual(self):
+        input_rule = rule("try-hypr-input-overrides")
+        partial = b'input {}\ndofile("/usr/share/try-omarchy/pinch-input.lua")\n'
+        self.assertEqual(self.policy.transform(input_rule, partial), (None, "residual"))
+        self.assertEqual(self.policy.transform(rule("try-chromium-wayland-ime"), b"  --enable-wayland-ime  \n"),
+                         (None, "residual"))
 
     def test_repeated_block_is_ambiguous(self):
         line = b"--enable-wayland-ime\n"
@@ -158,10 +178,27 @@ class RemoveKeysTests(unittest.TestCase):
         self.assertEqual(self.keys(result.data), ["launch.x"])
         self.assertIn('// not a comment', result.data.decode())
 
+    def test_removing_the_last_member_keeps_comments_between_members(self):
+        data = b'{\n  "launch.notes": 1, // keep\n  // user note\n  "setup.try-omarchy": 2\n}\n'
+        result = self.policy.transform(self.menu, data)
+        self.assertEqual(self.keys(result.data), ["launch.notes"])
+        self.assertIn("// keep", result.data.decode())
+        self.assertIn("// user note", result.data.decode())
+        self.assertNotIn("launch.notes\": 1,", result.data.decode())
+
+    def test_carriage_return_ends_a_line_comment(self):
+        for data in (b'{"launch.a": 1, // c\r "setup.try-omarchy": 2\n}',
+                     b'{"launch.a": 1 // c\r, "setup.try-omarchy": 2\n}'):
+            with self.subTest(data=data):
+                result = self.policy.transform(self.menu, data)
+                self.assertEqual(result.status, "applied")
+                self.assertNotIn("setup.try-omarchy", result.data.decode())
+
     def test_malformed_or_ambiguous_input_fails_closed(self):
         for data in (b'{"setup.try-omarchy": {}', b'[]', b'{"a": 1} {"b": 2}',
                      b'{"setup.try-omarchy": 1, "setup.try-omarchy": 2}', b'{"a": tru}',
-                     b'{"a": "unterminated}', b'{/* open', b'\xff'):
+                     b'{"a": "unterminated}', b'{/* open', b'\xff', b'{"a": NaN}', b'{"a": 1_0}',
+                     b'{"a": +1}', b'{"a": Infinity}', b'{"a": 01}', '{"a": 1 // c\u2028 "setup.try-omarchy": 2}'.encode()):
             with self.subTest(data=data):
                 self.assertEqual(self.policy.transform(self.menu, data), (None, "failed"))
 
