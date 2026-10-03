@@ -375,6 +375,9 @@ class TreeRestoreTests(unittest.TestCase):
         self.assertEqual(report["Shortcuts/normalized"].status, "conflict")
         self.assertFalse(os.path.lexists(self.target / "Shortcuts/normalized"))
         self.assertEqual(report["Shortcuts/readme"].status, "restored")
+        # The swapped directory is reported, not finalized through the link.
+        self.assertEqual(report["Projects/demo/empty"].status, "conflict")
+        self.assertNotEqual(self.root.stat().st_mtime_ns, MTIME)
 
     def test_existing_target_leaf_symlink_is_not_followed_or_aliased(self):
         outside = self.root / "outside"

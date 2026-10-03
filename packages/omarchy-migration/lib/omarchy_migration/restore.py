@@ -670,7 +670,12 @@ class Restorer:
                 if parent is None:
                     report[index] = self._action(entry, "conflict", "directory dependency is unavailable")
                     continue
-                fd = os.open(entry["path"].split("/")[-1], DIRECTORY_FLAGS, dir_fd=parent)
+                try:
+                    fd = os.open(entry["path"].split("/")[-1], DIRECTORY_FLAGS, dir_fd=parent)
+                except OSError:
+                    # Replaced by a link or another entry since publication.
+                    report[index] = self._action(entry, "conflict", "directory changed during application")
+                    continue
                 try:
                     if not _created_directory_matches(entry, saved["file"], _directory_fingerprint(fd)):
                         report[index] = self._action(entry, "conflict", "directory changed during application")
