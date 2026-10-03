@@ -29,7 +29,8 @@ class CollectionTests(unittest.TestCase):
         self.source.mkdir(mode=0o700)
         self.parent.mkdir(mode=0o700)
         self.request = {"schema": collection.REQUEST_SCHEMA, "request_id": str(uuid.uuid4()),
-                        "selection": [{"source": "", "archive": ""}], "selected_adapters": []}
+                        "selection": [{"source": "", "archive": ""}], "selected_adapters": [],
+                        "selected_mounts": []}
         evidence = {"path": "synthetic"}
         self.policy = {
             "schema": "omarchy-migration/policy/1", "revision": "synthetic-default-and-alternate/1",
@@ -557,6 +558,92 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(exceptions["Work"], ("inert-link", "mac-share"))
             self.assertNotIn("Documents/notes.md", exceptions)
 
+    def make_share(self):
+        share = self.root / "mac-share"
+        files = {"Projects/plan.md": b"plan\n", "photo.jpg": b"\xff\xd8 synthetic", ".ssh/config": b"Host mac-side\n",
+                 "open-dir/x.txt": b"x", "a.txt": b"same inode"}
+        for name, data in files.items():
+            path = share / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            path.write_bytes(data)
+        (share / "open-dir").chmod(0o777)
+        self.addCleanup((share / "open-dir").chmod, 0o755)
+        os.link(share / "a.txt", share / "b.txt")
+        os.mkfifo(share / "pipe")
+        (share / "secret.txt").write_bytes(b"unreadable")
+        (share / "secret.txt").chmod(0o000)
+        self.addCleanup((share / "secret.txt").chmod, 0o600)
+        (share / "back-to-share").symlink_to("/mnt/mac")
+        (share / "latest").symlink_to("Projects/plan.md")
+        (self.source / "Work").symlink_to("/mnt/mac")
+        (self.source / "Work-copy").symlink_to("/mnt/mac/")
+        (self.source / "Notes").symlink_to("/mnt/mac/Projects")
+        return share
+
+    def test_unselected_shared_folder_stays_a_link_and_is_not_read(self):
+        share = self.make_share()
+        scanned = os.scandir
+
+        def guarded(value):
+            self.assertNotEqual(Path(f"/proc/self/fd/{value}").resolve() if isinstance(value, int) else Path(value), share)
+            return scanned(value)
+
+        with patch.object(collection.os, "scandir", side_effect=guarded), \
+                self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            self.assertEqual(self.entry(snapshot, "Work")["outcome"], "inert-link")
+            self.assertFalse(any(path.startswith("Work/") for path in snapshot.paths))
+
+    def test_selected_shared_folder_becomes_an_ordinary_directory(self):
+        share = self.make_share()
+        self.request["selected_mounts"] = ["mac-share"]
+        with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            self.assertTrue(snapshot.paths["Work"].is_dir())
+            self.assertEqual(snapshot.paths["Work/Projects/plan.md"].read_bytes(), b"plan\n")
+            # Home policy does not apply to the Mac's files inside the share.
+            self.assertEqual(snapshot.paths["Work/.ssh/config"].read_bytes(), b"Host mac-side\n")
+            self.assertEqual(snapshot.paths["Work/latest"].readlink(), Path("Projects/plan.md"))
+            work = self.entry(snapshot, "Work")
+            self.assertEqual((work["outcome"], work["reason"], work["mount"]), ("included", "mount-materialized", "mac-share"))
+            reasons = {item["archive"]: (item["outcome"], item["reason"]) for item in snapshot.report["entries"]
+                       if item["archive"].startswith("Work/")}
+            self.assertEqual(reasons["Work/open-dir"], ("unsupported", "unsafe-permissions"))
+            self.assertEqual(reasons["Work/pipe"], ("unsupported", "special-file"))
+            self.assertEqual(reasons["Work/a.txt"], ("unsupported", "multiply-linked-file"))
+            self.assertEqual(reasons["Work/secret.txt"], ("unsupported", "unreadable"))
+            self.assertEqual(reasons["Work/back-to-share"], ("inert-link", "mount-link"))
+            self.assertNotIn("Work/open-dir/x.txt", snapshot.paths)
+            self.assertEqual(self.entry(snapshot, "Work-copy")["reason"], "mount-already-materialized")
+            self.assertEqual(self.entry(snapshot, "Notes")["reason"], "mount-link")
+            self.assertNotIn("Notes/plan.md", snapshot.paths)
+            probe.validate_manifest(snapshot.manifest)
+
+    def test_nested_mount_inside_a_share_is_skipped_not_fatal(self):
+        share = self.make_share()
+        self.request["selected_mounts"] = ["mac-share"]
+        mount, inode = collection._mount, (share / "Projects").stat().st_ino
+
+        def different(fd):
+            value = mount(fd)
+            return value + 1 if os.fstat(fd).st_ino == inode else value
+
+        with patch.object(collection, "_mount", side_effect=different), \
+                self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            self.assertEqual(next(item for item in snapshot.report["entries"] if item["archive"] == "Work/Projects")["reason"],
+                             "other-filesystem")
+            self.assertNotIn("Work/Projects/plan.md", snapshot.paths)
+            self.assertIn("Work/photo.jpg", snapshot.paths)
+
+    def test_mount_selection_and_roots_are_validated(self):
+        share = self.make_share()
+        for mounts, roots in ((["unknown-share"], {"mac-share": str(share)}), (["mac-share", "mac-share"], None),
+                              ([True], None), (["mac-share"], {"mac-share": "relative/path"}),
+                              (["mac-share"], {"mac-share": str(share), "extra": str(share)})):
+            self.request["selected_mounts"] = mounts
+            with self.subTest(mounts=mounts, roots=roots), self.assertRaises(probe.Rejected):
+                with self.capture(share_roots=roots):
+                    self.fail("invalid share selection accepted")
+        self.assertEqual(list(self.parent.iterdir()), [])
+
     def test_encrypted_snapshot_roundtrip_survives_source_edits_preserves_metadata_and_holdouts(self):
         age = configured_age()
         if age is None:
@@ -566,7 +653,9 @@ class CollectionTests(unittest.TestCase):
         target.mkdir(mode=0o700)
         job.mkdir(mode=0o700)
         self.write(".config/app-flags.conf", b"--user-choice\n--vm-only\n")
-        with self.capture() as snapshot:
+        share = self.make_share()
+        self.request["selected_mounts"] = ["mac-share"]
+        with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
             manifest = copy.deepcopy(snapshot.manifest)
             report = copy.deepcopy(snapshot.report)
             for name in self.ordinary:
@@ -589,6 +678,9 @@ class CollectionTests(unittest.TestCase):
         self.assertTrue(set(self.protected).isdisjoint(entry["path"] for entry in manifest["entries"]))
         self.assertNotIn(b"FAKE-SSH-SECRET", ciphertext.read_bytes())
         self.assertEqual((target / ".config/app-flags.conf").read_bytes(), b"--user-choice\n")
+        self.assertTrue((target / "Work").is_dir() and not (target / "Work").is_symlink())
+        self.assertEqual((target / "Work/Projects/plan.md").read_bytes(), b"plan\n")
+        self.assertFalse(os.path.lexists(target / "Notes"))
 
 
 if __name__ == "__main__":

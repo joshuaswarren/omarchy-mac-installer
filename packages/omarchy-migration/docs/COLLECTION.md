@@ -8,10 +8,11 @@ The request chooses source roots, archive names, and explicitly selected synthet
 
 ```json
 {
-  "schema": "omarchy-migration-collection-request/1",
+  "schema": "omarchy-migration-collection-request/2",
   "request_id": "00000000-0000-4000-8000-000000000001",
   "selection": [{"source": "", "archive": ""}],
-  "selected_adapters": []
+  "selected_adapters": [],
+  "selected_mounts": []
 }
 ```
 
@@ -20,6 +21,12 @@ The caller separately supplies a trusted [`omarchy-migration/policy/1`](CONTRACT
 These are fake-store rules. Actual application locations, alternate paths/environment settings, supported source versions, and supported export modes still need qualification. The generic collector does not run adapters; the trusted capability set can enable a test-only byte-copy policy for a fake store. It must never be advertised as real SSH/browser/Codex support. Unsupported stores remain withheld under explicit selection.
 
 Requests use exact field sets and bounded normalized paths; the policy is validated by the contract. Unknown schemas/adapters, invalid policies (including overlapping store roots or a rule inside a store), duplicate selections/adapters, and conflicting source/archive selections reject. An empty source selects fixture-root contents; an empty archive is allowed only with that source. Nonempty archive roots have one path component in this slice; deeper mappings require a later ancestor-metadata contract. Depth is limited to 64 components, entry/report count to the existing probe limit, and captured bytes to the existing expanded-content limit.
+
+## Shared Mac folders
+
+The request's `selected_mounts` lists policy mounts whose contents should be copied, such as `mac-share` for `/mnt/mac`. Unselected mounts are never read. For a selected mount, only a home link whose target is exactly the mount root (the link Try generates, for example `~/Work`) is materialized: the archive gets an ordinary directory at the link's path holding the mount's contents, reported as `included` with reason `mount-materialized`. Further links to the same root stay inert (`mount-already-materialized`), and links deeper into a mount stay inert (`mount-link`), so nothing is copied twice. `share_roots` maps a mount id to the directory to read (the policy's mount path by default; tests use a fixture directory).
+
+Inside a shared folder the home policy does not apply, because its paths are the Mac's files rather than home paths. The walk uses the share's own pinned mount, never follows links, and skips rather than fails on entries the home walk would treat as fatal: a different mount (`other-filesystem`), a group- or world-writable directory (`unsafe-permissions`), an unreadable entry (`unreadable`), multiply linked files and special files. Ownership is not required to match. The Mac can change these files while Try exports, so a shared folder gets the per-entry before/after checks but not the home's final whole-tree recheck; a change detected inside a directory still aborts the export so it can be retried.
 
 ## Capture interface and isolation
 

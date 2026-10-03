@@ -136,7 +136,7 @@ class AcceptanceTests(unittest.TestCase):
 
     def export(self):
         request = {"schema": collection.REQUEST_SCHEMA, "request_id": str(uuid.uuid4()),
-                   "selection": [{"source": "", "archive": ""}], "selected_adapters": []}
+                   "selection": [{"source": "", "archive": ""}], "selected_adapters": [], "selected_mounts": []}
         ciphertext = self.root / "bundle.age"
         with collection.collect_fixture(self.home, request, POLICY, snapshot_parent=self.root / "snapshots") as snapshot:
             manifest = snapshot.manifest

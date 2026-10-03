@@ -19,7 +19,7 @@ from . import contract, policy as migration_policy
 from . import probe
 
 
-REQUEST_SCHEMA = "omarchy-migration-collection-request/1"
+REQUEST_SCHEMA = "omarchy-migration-collection-request/2"
 REPORT_SCHEMA = "omarchy-migration-collection-report/2"
 # Untouched copies of transformed files, restored as migration-owned files.
 ORIGINALS_ROOT = ".local/share/omarchy-migration/originals"
@@ -49,8 +49,17 @@ def _beneath(path, root):
     return not root or path == root or path.startswith(root + "/")
 
 
+class _Skip(Exception):
+    """An entry inside a shared folder that is reported and skipped, not fatal."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _contracts(request, document, supported):
-    if (not isinstance(request, dict) or set(request) != {"schema", "request_id", "selection", "selected_adapters"}
+    if (not isinstance(request, dict)
+            or set(request) != {"schema", "request_id", "selection", "selected_adapters", "selected_mounts"}
             or request["schema"] != REQUEST_SCHEMA):
         raise probe.Rejected("collection request fields/schema")
     try:
@@ -93,6 +102,10 @@ def _contracts(request, document, supported):
             or not isinstance(supported, (tuple, list, set, frozenset))
             or any(type(value) is not str for value in supported) or not set(supported) <= adapters):
         raise probe.Rejected("fixture adapter selection/capability")
+    mounts = request["selected_mounts"]
+    if (not isinstance(mounts, list) or any(type(value) is not str for value in mounts)
+            or len(set(mounts)) != len(mounts) or not set(mounts) <= {mount["id"] for mount in loaded.mounts}):
+        raise probe.Rejected("mount selection")
     for value in (request, document):
         if len(_json_bytes(value)) > probe.MAX_MANIFEST:
             raise probe.Rejected("collection contract size")
@@ -116,11 +129,15 @@ def _mount(fd):
 
 
 class _Snapshot:
-    def __init__(self, root_fd, root, directory, request, policy, supported):
+    def __init__(self, root_fd, root, directory, request, policy, supported, share_roots):
         self.root_fd, self.root, self.directory = root_fd, root, directory
         self.request, self.policy = request, policy
         self.supported = frozenset(supported)
         self.mount = _mount(root_fd)
+        self.share_roots = share_roots
+        # Set only while walking a selected shared folder's contents.
+        self.share = None
+        self.materialized = set()
         self.paths, self.metadata, self.history = {}, {}, {}
         self.originals = []
         self.items, self.total = [], 0
@@ -129,13 +146,21 @@ class _Snapshot:
 
     def _guard(self, fd):
         metadata = os.fstat(fd)
+        if self.share is not None:
+            # Shared folders hold the Mac's files: odd entries are skipped, not fatal.
+            if _mount(fd) != self.share["mount"]:
+                raise _Skip("other-filesystem")
+            if stat.S_ISDIR(metadata.st_mode) and metadata.st_mode & 0o022:
+                raise _Skip("unsafe-permissions")
+            return
         if _mount(fd) != self.mount or metadata.st_uid != os.geteuid():
             raise probe.Rejected("source owner or mount differs")
         if stat.S_ISDIR(metadata.st_mode) and metadata.st_mode & 0o022:
             raise probe.Rejected("unsafe source directory")
 
     def _match(self, path):
-        return self.policy.match(path) if path else None
+        # Home policy describes home paths; shared folder contents are not.
+        return self.policy.match(path) if path and self.share is None else None
 
     def _store(self, path):
         match = self._match(path)
@@ -188,10 +213,11 @@ class _Snapshot:
 
     def _directory(self, fd, source, archive, metadata):
         self._guard(fd)
-        if metadata.st_mode & 0o022:
+        if self.share is None and metadata.st_mode & 0o022:
             raise probe.Rejected("unsafe source directory")
         names = self._names(fd)
-        self.history[source] = _metadata(metadata)
+        if self.share is None:
+            self.history[source] = _metadata(metadata)
         for name in names:
             self._walk(fd, name, f"{source}/{name}" if source else name,
                        f"{archive}/{name}" if archive else name)
@@ -199,6 +225,16 @@ class _Snapshot:
             raise probe.Rejected("source directory changed during capture")
 
     def _walk(self, parent, name, source, archive):
+        if self.share is None:
+            return self._entry(parent, name, source, archive)
+        try:
+            self._entry(parent, name, source, archive)
+        except _Skip as skip:
+            self._report(source, archive, "unsupported", skip.reason, mount=self.share["id"])
+        except PermissionError:
+            self._report(source, archive, "unsupported", "unreadable", mount=self.share["id"])
+
+    def _entry(self, parent, name, source, archive):
         _path(source)
         _path(archive)
         excluded = self._store(source)
@@ -212,7 +248,7 @@ class _Snapshot:
             return
         rule_id = rule["id"] if rule else None
         before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        if before.st_uid != os.geteuid():
+        if self.share is None and before.st_uid != os.geteuid():
             raise probe.Rejected("source entry owner differs")
         destination = self.directory / str(len(self.paths))
         transform = rule if rule and rule["action"] == "transform" else None
@@ -224,6 +260,8 @@ class _Snapshot:
             try:
                 if _metadata(os.fstat(fd)) != _metadata(before):
                     raise probe.Rejected("source directory replaced")
+                # Check before registering, so a skipped directory leaves nothing behind.
+                self._guard(fd)
                 destination.mkdir(mode=0o700)
                 self.paths[archive], self.metadata[archive] = destination, before
                 self._report(source, archive, "included", "directory", rule=rule_id)
@@ -231,7 +269,7 @@ class _Snapshot:
             finally:
                 os.close(fd)
         elif stat.S_ISREG(before.st_mode):
-            if before.st_nlink != 1 or not before.st_mode & 0o400:
+            if before.st_nlink != 1 or (self.share is None and not before.st_mode & 0o400):
                 self._report(source, archive, "unsupported",
                              "multiply-linked-file" if before.st_nlink != 1 else "unreadable-owner-file",
                              rule=rule_id)
@@ -286,17 +324,30 @@ class _Snapshot:
             self.paths[archive], self.metadata[archive] = destination, before
             self._report(source, archive, outcome, reason, rule=rule_id)
         elif stat.S_ISLNK(before.st_mode):
+            target = os.readlink(name, dir_fd=parent)
+            if not target or "\0" in target or len(target.encode("utf-8")) > 4096:
+                raise probe.Rejected("source link target limit")
+            mount = self.policy.mount(target)
+            if (mount and self.share is None and mount["id"] in self.request["selected_mounts"]
+                    and self._is_mount_root(target, mount)):
+                if mount["id"] in self.materialized:
+                    # Kept as inert link text, like any other link into a mount.
+                    destination.symlink_to(target)
+                    self.paths[archive], self.metadata[archive] = destination, before
+                    self._report(source, archive, "inert-link", "mount-already-materialized", mount=mount["id"])
+                else:
+                    self._materialize(source, archive, mount)
+                after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if _metadata(after) != _metadata(before):
+                    raise probe.Rejected("source entry changed during capture")
+                return
             if any(item["source"] != item["archive"] for item in self.request["selection"]):
                 # V2 has no explicit inert-link flag. A renamed selection
                 # could make an old target accidentally refer to new data.
                 self._report(source, archive, "unsupported", "remapped-link")
                 return
-            target = os.readlink(name, dir_fd=parent)
-            if not target or "\0" in target or len(target.encode("utf-8")) > 4096:
-                raise probe.Rejected("source link target limit")
             destination.symlink_to(target)
             self.paths[archive], self.metadata[archive] = destination, before
-            mount = self.policy.mount(target)
             if mount:
                 # Recorded as inert metadata; mounted contents need their own selection.
                 self._report(source, archive, "inert-link", "mount-link", rule=rule_id, mount=mount["id"])
@@ -308,7 +359,34 @@ class _Snapshot:
         after = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if _metadata(after) != _metadata(before):
             raise probe.Rejected("source entry changed during capture")
-        self.history[source] = _metadata(before)
+        if self.share is None:
+            self.history[source] = _metadata(before)
+
+    @staticmethod
+    def _is_mount_root(target, mount):
+        parts = [part for part in target.split("/") if part not in ("", ".")]
+        return parts == [part for part in mount["path"].split("/") if part]
+
+    def _materialize(self, source, archive, mount):
+        """Copy a selected shared folder's contents in place of its home link."""
+        fd = os.open(self.share_roots[mount["id"]], DIRECTORY_FLAGS)
+        try:
+            metadata = os.fstat(fd)
+            self.share = {"id": mount["id"], "mount": _mount(fd)}
+            try:
+                self._guard(fd)
+            except _Skip as skip:
+                self._report(source, archive, "unsupported", skip.reason, mount=mount["id"])
+                return
+            destination = self.directory / str(len(self.paths))
+            destination.mkdir(mode=0o700)
+            self.paths[archive], self.metadata[archive] = destination, metadata
+            self._report(source, archive, "included", "mount-materialized", mount=mount["id"])
+            self._directory(fd, source, archive, metadata)
+            self.materialized.add(mount["id"])
+        finally:
+            self.share = None
+            os.close(fd)
 
     def originals_root(self):
         return f"{ORIGINALS_ROOT}/{self.request['request_id']}" if self.originals else None
@@ -419,9 +497,18 @@ class _Snapshot:
 
 
 @contextlib.contextmanager
-def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_parent):
-    """Capture only an explicitly supplied, caller-created synthetic source."""
+def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_parent, share_roots=None):
+    """Capture only an explicitly supplied, caller-created synthetic source.
+
+    `share_roots` maps a policy mount id to the directory holding its contents
+    (the policy's mount path by default); only mounts the request selects are read.
+    """
     loaded = _contracts(request, policy, supported_adapters)
+    roots = {mount["id"]: mount["path"] for mount in loaded.mounts}
+    roots.update(share_roots or {})
+    if set(roots) != {mount["id"] for mount in loaded.mounts} or any(
+            not isinstance(path, (str, os.PathLike)) or not os.path.isabs(path) for path in roots.values()):
+        raise probe.Rejected("shared folder roots")
     request = json.loads(_json_bytes(request))
     if os.geteuid() == 0:
         raise probe.Rejected("fixture collection requires an unprivileged owner")
@@ -442,7 +529,7 @@ def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_pa
                 directory = Path(temporary)
                 if directory.resolve().is_relative_to(root.resolve()) or root.resolve().is_relative_to(directory.resolve()):
                     raise probe.Rejected("snapshot and source must be separate")
-                snapshot = _Snapshot(root_fd, root, directory, request, loaded, supported_adapters)
+                snapshot = _Snapshot(root_fd, root, directory, request, loaded, supported_adapters, roots)
                 snapshot.capture()
                 yield snapshot
         finally:

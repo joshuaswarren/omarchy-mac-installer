@@ -120,7 +120,7 @@ def capabilities_document(policy):
 
 def collection_request(request_id, files, links, categories, adapters):
     return {"schema": collection.REQUEST_SCHEMA, "request_id": request_id,
-            "selection": roots(files, links, categories), "selected_adapters": sorted(adapters)}
+            "selection": roots(files, links, categories), "selected_adapters": sorted(adapters), "selected_mounts": []}
 
 
 def inventory_document(policy):
