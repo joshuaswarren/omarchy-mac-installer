@@ -233,7 +233,11 @@ class ReviewTests(unittest.TestCase):
         report = contract.parse(applied.stdout.encode())
         self.assertEqual(report["plan_id"], plan["plan_id"])
         outcomes = {item["id"]: (item["outcome"], item["restored"], item["conflicts"]) for item in report["categories"]}
-        self.assertEqual(outcomes["configuration"], ("restored", 5, 0))
+        decoded = probe.decode(self.age, fixture.SECRET, self.export / "bundle.age")
+        # Files and the directories that hold them both count as restored.
+        configuration = [entry for entry in decoded["entries"] if entry["path"].startswith(".")]
+        self.assertEqual(outcomes["configuration"], ("restored", len(configuration), 0))
+        self.assertEqual(sum(probe.entry_kind(entry) == "file" for entry in configuration), 5)
         self.assertEqual(outcomes["files-and-projects"][0], "restored")
         work = next(item for item in report["categories"] if item["id"] == "files-and-projects")
         self.assertEqual((work["omitted"], work["reasons"]), (1, ["link_not_restorable"]))
