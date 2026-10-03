@@ -148,6 +148,7 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(result.top_level[".local/share/zoxide"], 30)
         self.assertNotIn(".local/share/mise", result.top_level)
         self.assertEqual(result.top_level["Documents"], len(self.files["Documents/report.md"]))
+        self.assertFalse(any(key.startswith(".cache") for key in result.top_level))
 
     def test_refuses_a_home_owned_by_someone_else_and_bounds_entries(self):
         with patch.object(survey.os, "geteuid", return_value=os.geteuid() + 1):

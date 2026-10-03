@@ -39,11 +39,17 @@ class Action:
 
 
 class _VerifiedBundle:
-    def __init__(self, manifest, directory):
+    def __init__(self, manifest, directory, ciphertext_sha256):
         self._manifest = manifest
         self._directory = directory
         self._active = True
         self._digest = hashlib.sha256(_json_bytes(manifest)).hexdigest()
+        # Digest of the exact ciphertext bytes that age authenticated.
+        self.ciphertext_sha256 = ciphertext_sha256
+
+    @property
+    def export_id(self):
+        return self._manifest["export_id"]
 
     def _check(self):
         if not self._active:
@@ -64,12 +70,13 @@ def verified_bundle(age, secret, ciphertext):
             with os.fdopen(fd, "wb") as output:
                 yield output
 
+        digest = hashlib.sha256()
         manifest = probe._decode(
             age, secret, ciphertext,
             probe.MAX_TOTAL + probe.MAX_MANIFEST + 2 * 1024 * 1024,
-            objects=objects,
+            objects=objects, digest=digest,
         )
-        bundle = _VerifiedBundle(manifest, root)
+        bundle = _VerifiedBundle(manifest, root, digest.hexdigest())
         try:
             yield bundle
         finally:

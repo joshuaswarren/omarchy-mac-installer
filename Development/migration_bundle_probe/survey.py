@@ -136,7 +136,9 @@ class Survey:
                 return
             self.counts[kind]["files"] += 1
             self.counts[kind]["bytes"] += metadata.st_size
-            self.top_level[size_key(path)] += metadata.st_size
+            if DEFAULT_SELECTED[kind]:
+                # Unselected categories (caches) are shown only as a total.
+                self.top_level[size_key(path)] += metadata.st_size
             if match and match.item["action"] == "transform":
                 # Content is not read, so whether Try's additions are present is unknown.
                 self.note("transform", path, rule=match.item["id"])
@@ -223,7 +225,7 @@ def summary(survey, document):
             lines.append(f"  … and {bucket['count'] - len(bucket['examples'])} more")
     largest = survey.top_level.most_common(EXAMPLES)
     if largest:
-        lines += ["", "Largest entries (dot-folders shown three levels deep):"]
+        lines += ["", "Largest entries that would migrate by default (dot-folders shown three levels deep):"]
         lines += [f"  ~/{name:<30} {size(total):>11}" for name, total in largest]
     return "\n".join(lines)
 

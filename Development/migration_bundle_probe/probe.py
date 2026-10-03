@@ -451,7 +451,7 @@ def decode(age, secret, ciphertext, limit=MAX_TOTAL + MAX_MANIFEST + 2 * 1024 * 
     return _decode(age, secret, ciphertext, limit)
 
 
-def _decode(age, secret, ciphertext, limit, *, objects=None):
+def _decode(age, secret, ciphertext, limit, *, objects=None, digest=None):
     fd = os.open(ciphertext, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb", buffering=0) as source:
         metadata = os.fstat(fd)
@@ -467,12 +467,17 @@ def _decode(age, secret, ciphertext, limit, *, objects=None):
                     # Send the checked bytes, never let age reread a header
                     # another writer could replace with an expensive one.
                     child.process.stdin.write(header)
+                    if digest is not None:
+                        # Hash exactly the bytes age authenticates.
+                        digest.update(header)
                     count = len(header)
                     while data := source.read(CHUNK):
                         count += len(data)
                         if count > limit:
                             raise Rejected("ciphertext grew beyond its limit")
                         child.process.stdin.write(data)
+                        if digest is not None:
+                            digest.update(data)
                 except (OSError, Rejected) as error:
                     errors.append(error)
                 finally:
