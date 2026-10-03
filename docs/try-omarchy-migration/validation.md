@@ -1,5 +1,11 @@
 # Migration exploration validation
 
+## Try 82927e9 policy candidate, 2026-10-03 UTC
+
+Source candidate: `a9c2d51`, tree `66d50e1fbb9f046b73af5148a22d653a1c8865d4`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 139 bundle/fixture/restore/tree/replacement/collection/survey and 47 contract tests, `preclean-m1-test` and every installer shell fixture: **394 Python tests passed; one optional skip** (395 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
+
+The policy moved to `try-omarchy/82927e9/1`. It adds the decisions from the owner's first real survey on the Try VM (Firefox, Pi login and NSS stores; mise, voxtype, wireplumber and Omarchy clipboard, install-bookkeeping and transient-state exclusions) and excludes Try's new per-user settings desktop entry. `sync-try` detected the upstream menu change through evidence drift; evidence shows no drift at `82927e9`. The installed Try app remains `e1a0dbe`. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed.
+
 ## Read-only survey candidate, 2026-10-03 UTC
 
 Source candidate: `a3aedca`, tree `f5bfed533e8d3e3c587a78c95e142ab90472b3fc`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 138 bundle/fixture/restore/tree/replacement/collection/survey and 44 contract tests, `preclean-m1-test` and every installer shell fixture: **390 Python tests passed; one optional skip** (391 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entry.
