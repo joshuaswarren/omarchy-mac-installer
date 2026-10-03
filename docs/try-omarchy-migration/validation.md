@@ -1,5 +1,13 @@
 # Migration exploration validation
 
+## Policy collection and contract fixture candidate, 2026-10-03 UTC
+
+Source candidate: `bf1725b`, tree `d4ec61071442962dce4f7522483b8d698c1551d8`. One authoritative `./test/all` run on pancake, from a git bundle checked out at that commit, passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 132 bundle/fixture/restore/tree/replacement/collection and 44 contract tests, `preclean-m1-test` and every installer shell fixture: **384 Python tests passed; one optional skip** (385 run), exit 0. Encryption and QEMU socket cases were enabled.
+
+The slice moves the disposable collector onto the contract policy (exclusions never opened, including beneath a selected root; transforms on captured bytes that fail closed; inert mount links) and the runnable fixture onto contract documents, with a synthetic Try home collected through the real Try policy and restored end to end without Try integration content. One bounded read-only review found an exclusion bypass through a descendant selection, order-dependent nested rules, four transform fail-open or comment-loss cases and a silently dropped store selection; each was fixed with a regression test confirmed to fail on the earlier code. Iteration used a local Linux container (Python 3.13, tmpfs `/tmp`), which is not evidence.
+
+Runner: Linux aarch64 `7.1.12-2-11.5-sep-ARCH`, Python 3.14.7, Bash 5.3.20, `/usr/bin/core_perl` on `PATH`; age 1.3.2 `f28b1575…5b79053`, qemu-nbd 11.1.1 `4b42c1ba…e214d4` and libaio 0.3.113 `d22000af…ea7fabc` checked by digest before use, nothing installed system-wide. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed. macOS app builds/signing and physical installation are not claimed. The restorer still has no directory metadata or report provenance in the bundle; ticket 04 remains in progress.
+
 ## Contract v1 candidate, 2026-10-02 UTC
 
 Source candidate: `3e7ae4672c`, tree `2b30c6df216edd77e8ca3b9dfd0c1998d79e2490`. The exact `git archive` of that commit ran `./test/all` on pancake: compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 120 bundle/fixture/restore/tree/replacement/collection and 19 new contract tests passed, plus `preclean-m1-test`: **347 Python tests passed; one optional skip** (348 run). Encryption and QEMU socket cases were enabled. The archive has no `.git`, so `apple-installer-identity-test.sh` stopped at its tracked-file check and the remaining shell fixtures did not run there; all ten `test/shell.d/apple-installer-*-test.sh` files then passed on the M4 in a clean checkout at the same commit.
