@@ -1,5 +1,11 @@
 # Migration exploration validation
 
+## Reviewable plan and report candidate, 2026-10-03 UTC
+
+Source candidate: `02968cb`, tree `50b15d4bc3ce33e19a429904d2241add7943f8ed`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 156 bundle/fixture/restore/tree/replacement/collection/survey/review and 47 contract tests, `preclean-m1-test` and every installer shell fixture: **411 Python tests passed; one optional skip** (412 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
+
+[`review.py`](../../Development/migration_bundle_probe/REVIEW.md) emits `plan/1` and `report/1` from the restorer. The plan binds the digest of the exact ciphertext bytes age authenticated (hashed while feeding age), the destination account, the restorer's pinned job binding, the canonical receipt and every planned action; `apply` re-plans and refuses a different `plan_id` without writing. A bounded read-only review found the receipt's policy revision and the job directory outside the binding, unknown statuses counted as omitted, directory-only categories reported empty, an empty export crashing report construction, a passphrase off-by-one and two vacuous tests; each was fixed with tests confirmed to fail on the earlier code. The first pancake attempt on `401d7b9` failed one stale expectation (directories now count as restored) and is not evidence. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed.
+
 ## Try 82927e9 policy candidate, 2026-10-03 UTC
 
 Source candidate: `a9c2d51`, tree `66d50e1fbb9f046b73af5148a22d653a1c8865d4`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 139 bundle/fixture/restore/tree/replacement/collection/survey and 47 contract tests, `preclean-m1-test` and every installer shell fixture: **394 Python tests passed; one optional skip** (395 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
