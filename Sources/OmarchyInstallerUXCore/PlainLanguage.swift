@@ -110,6 +110,34 @@
     public static let authorizeRetryAction = "Authorize"
     public static let authorizeRejected =
       "The user name or password was incorrect."
+    /// Shown on the sheet when authorizing will install the helper.
+    public static let authorizeBackgroundItemNotice =
+      "macOS will show a notice that \(windowTitle) added a background item. That’s the installation service; it’s removed along with Omarchy."
+    public static let authorizeHelperCancelled =
+      "The installation service wasn’t set up, so nothing was changed. Try again, and approve the macOS password prompt if it appears."
+    public static let authorizeHelperSwitchedOff =
+      "The installation service is switched off in Login Items. Turn it back on here with your password, or switch it on in Login Items and try again."
+    /// Shown on the sheet when the person switched the helper off.
+    public static let authorizeHelperSwitchedOffNotice =
+      "You switched the installation service off in Login Items, and \(windowTitle) needs it to change your disk. Authorizing turns it back on with the password you enter here; it’s removed along with Omarchy. You can switch it on in Login Items yourself instead."
+    public static let authorizeTurnOnAndInstall = "Turn On & Install"
+    public static let authorizeTurnOnAndRetry = "Turn On & Authorize"
+    public static let openLoginItems = "Open Login Items"
+    /// System Settings → General → Login Items & Extensions.
+    public static let loginItemsSettingsURL = URL(
+      string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")!
+    public static let helperBeingReplacedHeadline = "The installation service is being updated"
+    public static let helperBeingReplacedDetail =
+      "Another copy of the installer is replacing the installation service, so this request didn't start and nothing was changed. Try again in a moment."
+    public static let helperRetiringHeadline = "The installation service was just removed"
+    public static let helperRetiringDetail =
+      "Omarchy's removal finished and its installation service is removing itself. Nothing was changed. Try again in a moment; the app sets the service up again with your password."
+    public static let authorizeNotAdministrator =
+      "This account isn’t a macOS administrator, and setting up the installation service needs one. Use an administrator account."
+    public static let authorizeHelperBusy =
+      "The installation service is busy with another request, so nothing was changed. Try again when it finishes. If it stays busy, an installation or removal may still be running, perhaps in another user’s session: let it finish, and don’t restart or shut down this Mac while it runs."
+    public static let authorizeHelperFailed =
+      "The installation service couldn’t be set up, so nothing was changed. Try again."
 
     // MARK: Confirmation dialogs (preserved verbatim)
 
@@ -480,8 +508,8 @@
 
     public static let retry = "Try again"
 
-    /// Shown when the pre-installed system daemon is missing. The remedy is to
-    /// run the installer package again — never to open Login Items.
+    /// Shown only by builds that cannot install the helper themselves, when
+    /// the installer package has not put it in place.
     public static let helperNotInstalled =
       "The installation service is missing. Run the downloaded \(installerPackage) again, then reopen this app."
 
@@ -546,7 +574,7 @@
             plainDetail:
               "The app couldn’t get a response from the installation service. Installation has not started.",
             technicalDetail: technical,
-            remedy: "Run the downloaded \(installerPackage) again, then reopen this app."
+            remedy: "Quit \(windowTitle), open it again, and try once more."
           )
         case .connectionFailed:
           return FailureDisplay(
@@ -560,6 +588,22 @@
         case .engineFailed(let notice):
           return engineFailure(notice, technicalDetail: technical)
         case .helperRejected(let domain, let code):
+          let replaced = ClosedEngineHelperError.beingReplaced as NSError
+          if domain == replaced.domain, code == replaced.code {
+            return FailureDisplay(
+              headline: PlainLanguage.helperBeingReplacedHeadline,
+              plainDetail: PlainLanguage.helperBeingReplacedDetail,
+              technicalDetail: technical
+            )
+          }
+          let retiring = ClosedEngineHelperError.retiring as NSError
+          if domain == retiring.domain, code == retiring.code {
+            return FailureDisplay(
+              headline: PlainLanguage.helperRetiringHeadline,
+              plainDetail: PlainLanguage.helperRetiringDetail,
+              technicalDetail: technical
+            )
+          }
           let busy = ClosedEngineHelperError.busy as NSError
           if domain == busy.domain, code == busy.code {
             return FailureDisplay(
@@ -591,6 +635,18 @@
 
       if let helper = error as? ClosedEngineHelperError {
         switch helper {
+        case .beingReplaced:
+          return FailureDisplay(
+            headline: PlainLanguage.helperBeingReplacedHeadline,
+            plainDetail: PlainLanguage.helperBeingReplacedDetail,
+            technicalDetail: technical
+          )
+        case .retiring:
+          return FailureDisplay(
+            headline: PlainLanguage.helperRetiringHeadline,
+            plainDetail: PlainLanguage.helperRetiringDetail,
+            technicalDetail: technical
+          )
         case .busy:
           return FailureDisplay(
             headline: "An installation may already be running",
@@ -692,7 +748,7 @@
               "This release requires installer \(minimum) or later. You’re using \(current).",
             technicalDetail: technical,
             remedy:
-              "Download and open the latest \(installerPackage), then reopen this app.",
+              "Download the latest \(windowTitle) and open it.",
             actionURL: downloadURL,
             actionTitle: downloadInstaller
           )

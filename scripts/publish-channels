@@ -11,7 +11,7 @@
 #
 #   channels/<channel>/catalog.signed.json
 #   channels/<channel>/channel.json
-#   installer/<channel>/<INSTALLER_FILE_STEM>.pkg
+#   installer/<channel>/<INSTALLER_FILE_STEM>.zip
 #   installer/<channel>/installer.json
 #
 # The catalog and its signature travel as one envelope so a channel update is a
@@ -34,8 +34,13 @@ STREAM_BASE="$PUBLIC_BASE/$STREAM_PATH"
 CHANNELS="stable rc edge"
 TRUST_ROOT="${OMARCHY_TRUST_ROOT:-$script_directory/../Release/trust-root.ed25519.pub}"
 SIGNING_TOOL="${OMARCHY_CATALOG_SIGNING_TOOL:-xcrun swift $script_directory/catalog-signing.swift}"
-PKG_FILE_NAME="$INSTALLER_FILE_STEM.pkg"
-PKG_DOWNLOAD_NAME="$INSTALLER_APP_NAME.pkg"
+# The download is the notarized app in a zip; the installer package is no
+# longer published.
+ZIP_FILE_NAME="$INSTALLER_FILE_STEM.zip"
+# installer.json from the package era records no build number; the last
+# package release, 2.0.10, was build 27, so nothing at or below it publishes.
+LEGACY_BUILD_FLOOR=27
+ZIP_DOWNLOAD_NAME="$INSTALLER_APP_NAME.zip"
 NO_CACHE="no-cache, max-age=0, must-revalidate"
 
 scratch_root=""
@@ -55,7 +60,7 @@ Usage:
   publish-channels envelope --catalog FILE --signature FILE --output FILE
   publish-channels empty-catalog --output FILE [--sequence N]
   publish-channels os-promote --tag TAG --to stable|rc|edge [--minimum-sequence N] [--no-prune]
-  publish-channels app-publish --pkg FILE --version X.Y.Z [--to stable|rc|edge]
+  publish-channels app-publish --zip FILE --version X.Y.Z [--to stable|rc|edge]
   publish-channels channel-status [--channel stable|rc|edge|all]
   publish-channels prune [--confirm]
 
@@ -92,7 +97,7 @@ mutable_key_allowed() {
   for channel in $CHANNELS; do
     case $1 in
       "channels/$channel/catalog.signed.json" | "channels/$channel/channel.json") return 0 ;;
-      "installer/$channel/$PKG_FILE_NAME" | "installer/$channel/installer.json") return 0 ;;
+      "installer/$channel/$ZIP_FILE_NAME" | "installer/$channel/installer.json") return 0 ;;
     esac
   done
   return 1
@@ -226,6 +231,22 @@ for model in catalog["models"]:
             print(record["sourceURL"], record["sizeBytes"])
 PY
   )
+}
+
+# Prints 200 only for a complete transfer and 404 for nothing there; anything
+# else, including a 200 whose body was cut short or reset, is printed as the
+# failure it was, so callers can't mistake it for either.
+fetch_status() {
+  local path=$1 output=$2 status rc=0
+  status=$(curl -sSL -H 'Cache-Control: no-cache' -o "$output" \
+    -w '%{http_code}' "$STREAM_BASE/$path" 2>/dev/null) || rc=$?
+  if [[ $status == 404 ]]; then
+    echo 404
+  elif (( rc == 0 )) && [[ $status == 200 ]]; then
+    echo 200
+  else
+    echo "HTTP ${status:-none}, curl exit $rc"
+  fi
 }
 
 fetch_public() {
@@ -397,44 +418,179 @@ PY
 }
 
 app_publish() {
-  local pkg="" version="" channel="stable"
+  local zip="" version="" channel="stable"
   while (( $# > 0 )); do
     case $1 in
-      --pkg) pkg=${2:-}; shift 2 ;;
+      --zip) zip=${2:-}; shift 2 ;;
+      --pkg) die "the installer package is no longer published; publish the app zip with --zip (Packaging/make-download-zip.sh)" ;;
       --version) version=${2:-}; shift 2 ;;
       --to) channel=${2:-}; shift 2 ;;
       *) channels_usage ;;
     esac
   done
-  [[ -n $pkg && -n $version ]] || channels_usage
-  require_file "$pkg"
+  [[ -n $zip && -n $version ]] || channels_usage
+  require_file "$zip"
+  [[ $zip == *.zip ]] || die "the download must be a .zip: $zip"
   validate_installer_version "$version"
   validate_channel "$channel"
   command -v aws >/dev/null || die "missing command: aws"
 
-  # A package that is not notarized and stapled would fail on the far side of
-  # a download, so it never reaches the bucket.
-  pkgutil --check-signature "$pkg" >/dev/null 2>&1 ||
-    die "pkg is not signed: $pkg"
-  xcrun stapler validate "$pkg" >/dev/null 2>&1 ||
-    die "pkg has no stapled notarization ticket: $pkg"
-
-  local work digest immutable_key
+  local work digest immutable_key entries
   work=$(make_scratch)
-  digest=$(file_digest "$pkg")
-  printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.pkg" >"$work/pkg.sha256"
-  immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.pkg"
 
-  python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$pkg")" \
-    "$STREAM_BASE/$immutable_key" <<'PY'
+  # The zip must hold exactly the app, and the app must be signed and carry a
+  # stapled notarization ticket, or it would fail on the far side of a
+  # download; otherwise nothing reaches the bucket.
+  entries=$(python3 -c '
+import sys, zipfile
+print("\n".join(sorted({name.split("/")[0] for name in zipfile.ZipFile(sys.argv[1]).namelist()})))
+' "$zip" 2>/dev/null) || die "not a readable zip: $zip"
+  [[ $entries == "$INSTALLER_APP_NAME.app" ]] ||
+    die "the zip must contain only $INSTALLER_APP_NAME.app: $zip"
+  ditto -x -k "$zip" "$work/unpacked" || die "the zip could not be unpacked: $zip"
+  codesign --verify --deep --strict "$work/unpacked/$INSTALLER_APP_NAME.app" >/dev/null 2>&1 ||
+    die "the app in the zip is not validly signed: $zip"
+  xcrun stapler validate "$work/unpacked/$INSTALLER_APP_NAME.app" >/dev/null 2>&1 ||
+    die "the app in the zip has no stapled notarization ticket: $zip"
+
+  # It must also be this team's app, the version being published, a newer
+  # build than the channel already serves, and able to install its own helper.
+  local app="$work/unpacked/$INSTALLER_APP_NAME.app" team_requirement build previous
+  team_requirement="anchor apple generic and identifier \"$INSTALLER_APP_IDENTIFIER\" and certificate leaf[subject.OU] = \"$INSTALLER_TEAM_ID\""
+  codesign --verify --strict -R="$team_requirement" "$app" >/dev/null 2>&1 ||
+    die "the app in the zip is not signed by team $INSTALLER_TEAM_ID: $zip"
+  local helper_requirement
+  helper_requirement="anchor apple generic and identifier \"$INSTALLER_HELPER_IDENTIFIER\" and certificate leaf[subject.OU] = \"$INSTALLER_TEAM_ID\""
+  codesign --verify --strict -R="$helper_requirement" \
+    "$app/Contents/Library/LaunchServices/$INSTALLER_HELPER_IDENTIFIER" >/dev/null 2>&1 ||
+    die "the app's helper is not signed as this team's helper: $zip"
+  build=$(python3 - "$app" "$version" "$INSTALLER_HELPER_IDENTIFIER" "$team_requirement" \
+    "$helper_requirement" 2>"$work/app-check.err" <<'PY'
+import os
+import plistlib
+import re
+import sys
+
+app, version, helper, app_requirement, helper_requirement = sys.argv[1:6]
+with open(os.path.join(app, "Contents/Info.plist"), "rb") as stream:
+    info = plistlib.load(stream)
+shipped = info.get("CFBundleShortVersionString")
+if shipped != version:
+    sys.exit(f"the app is version {shipped}, not {version}")
+build = str(info.get("CFBundleVersion", ""))
+if not build.isdigit():
+    sys.exit("the app has no numeric build number")
+declared = (info.get("SMPrivilegedExecutables") or {}).get(helper)
+if not declared:
+    sys.exit("the app does not declare its helper for SMJobBless, so it cannot install it")
+if declared != helper_requirement:
+    sys.exit("the app declares its helper with another signing requirement")
+path = os.path.join(app, "Contents/Library/LaunchServices", helper)
+if os.path.islink(path) or not os.path.isfile(path) or not os.access(path, os.X_OK):
+    sys.exit("the app has no helper where SMJobBless looks for it")
+with open(path, "rb") as stream:
+    binary = stream.read()
+# The helper's Info.plist and launchd job are XML property lists linked into
+# its __TEXT sections; read them straight from the bytes.
+embedded = []
+for block in re.findall(rb"<\?xml.*?</plist>", binary, re.S):
+    try:
+        embedded.append(plistlib.loads(block))
+    except Exception:
+        pass
+helper_info = next((d for d in embedded if d.get("CFBundleIdentifier") == helper), None)
+job = next((d for d in embedded if d.get("Label") == helper), None)
+if helper_info is None or job is None:
+    sys.exit("the app's helper carries no Info.plist and launchd job for SMJobBless")
+if str(helper_info.get("CFBundleVersion")) != build:
+    sys.exit(f"the app's helper is build {helper_info.get('CFBundleVersion')}, not {build}")
+if app_requirement not in (helper_info.get("SMAuthorizedClients") or []):
+    sys.exit("the app's helper does not authorize this app")
+if not (job.get("MachServices") or {}).get(helper):
+    sys.exit("the app's helper job does not publish its service")
+client = (job.get("EnvironmentVariables") or {}).get("OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT")
+if client != app_requirement:
+    sys.exit("the app's helper job does not require this app as its client")
+print(int(build))
+PY
+  ) || die "$(cat "$work/app-check.err"): $zip"
+
+  digest=$(file_digest "$zip")
+  # What the channel serves now, metadata and zip each on its own: the zip goes
+  # up first, so an interrupted publish can leave either without the other.
+  # Only a 404 means nothing is there; any other failure stops the publish.
+  local status zip_status served=""
+  status=$(fetch_status "installer/$channel/installer.json" "$work/previous.json")
+  case $status in
+    200) ;;
+    404) rm -f "$work/previous.json" ;;
+    *) die "could not read $channel's current installer.json ($status); the build check can't be skipped" ;;
+  esac
+  zip_status=$(fetch_status "installer/$channel/$ZIP_FILE_NAME" "$work/previous.zip")
+  case $zip_status in
+    200) served=$(file_digest "$work/previous.zip") ;;
+    404) ;;
+    *) die "could not read $channel's current zip ($zip_status); the build check can't be skipped" ;;
+  esac
+  if [[ $status == 200 || -n $served ]]; then
+    previous=$(python3 - "$work/previous.json" "$digest" "$served" "$work/previous.zip" \
+      "$INSTALLER_APP_NAME.app" "$LEGACY_BUILD_FLOOR" 2>"$work/previous.err" <<'PY'
+import json
+import os
+import plistlib
+import sys
+import zipfile
+
+document_path, digest, served, zip_path, app, floor = sys.argv[1:7]
+document = json.load(open(document_path)) if os.path.exists(document_path) else None
+recorded = None
+if document is not None:
+    # installer.json from before build numbers were recorded has none; the
+    # last such release was the 2.0.10 package, build 27, so that is the floor.
+    recorded = document.get("build_number", floor)
+    if isinstance(recorded, bool) or not str(recorded).isdigit():
+        sys.exit(f"the channel's installer.json has a malformed build_number: {recorded!r}")
+    recorded = int(recorded)
+    # The very same zip may be republished, as after a failed upload, but only
+    # if the channel does not already serve some other zip.
+    if document.get("sha256") == digest and served in ("", digest):
+        print("same")
+        sys.exit(0)
+if served == digest:
+    # This zip is already served, left by an interrupted run of this publish;
+    # it still has to beat whatever the metadata records.
+    print("same" if recorded is None else recorded)
+    sys.exit(0)
+builds = [] if recorded is None else [recorded]
+# The zip actually served counts too, so no build slips beneath it, whether
+# the metadata beside it is older or missing.
+if served:
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            info = plistlib.loads(archive.read(f"{app}/Contents/Info.plist"))
+        builds.append(int(str(info["CFBundleVersion"])))
+    except Exception as error:
+        sys.exit(f"the channel's current zip has no readable build number: {error}")
+print(max(builds))
+PY
+    ) || die "$(cat "$work/previous.err")"
+    [[ $previous == "same" ]] || (( 10#$build > 10#$previous )) ||
+      die "build $build is not above build $previous already published to $channel"
+  fi
+  printf '%s  %s\n' "$digest" "$INSTALLER_FILE_STEM-$version.zip" >"$work/zip.sha256"
+  immutable_key="installer/$version/$INSTALLER_FILE_STEM-$version.zip"
+
+  python3 - "$work/installer.json" "$version" "$digest" "$(file_size "$zip")" \
+    "$STREAM_BASE/$immutable_key" "$build" <<'PY'
 import datetime
 import json
 import sys
 
-output, version, sha256, size_bytes, source = sys.argv[1:6]
+output, version, sha256, size_bytes, source, build = sys.argv[1:7]
 document = {
     "schema_version": 1,
     "version": version,
+    "build_number": int(build),
     "sha256": sha256,
     "size_bytes": int(size_bytes),
     "published_at": datetime.datetime.now(datetime.timezone.utc)
@@ -449,14 +605,14 @@ PY
 
   r2_credentials
   confirm_publication "installer-v$version" "r2:$R2_BUCKET/$(bucket_key "installer/$channel")" \
-    "$PKG_FILE_NAME installer.json"
+    "$ZIP_FILE_NAME installer.json"
 
-  put_immutable "$pkg" "$immutable_key" --content-type application/octet-stream
-  put_immutable "$work/pkg.sha256" "$immutable_key.sha256" --content-type text/plain
-  put_mutable "$pkg" "installer/$channel/$PKG_FILE_NAME" application/octet-stream \
-    --content-disposition "attachment; filename=\"$PKG_DOWNLOAD_NAME\""
+  put_immutable "$zip" "$immutable_key" --content-type application/zip
+  put_immutable "$work/zip.sha256" "$immutable_key.sha256" --content-type text/plain
+  put_mutable "$zip" "installer/$channel/$ZIP_FILE_NAME" application/zip \
+    --content-disposition "attachment; filename=\"$ZIP_DOWNLOAD_NAME\""
   put_mutable "$work/installer.json" "installer/$channel/installer.json" application/json
-  verify_back "installer/$channel/$PKG_FILE_NAME" "$digest"
+  verify_back "installer/$channel/$ZIP_FILE_NAME" "$digest"
   verify_back "installer/$channel/installer.json" "$(file_digest "$work/installer.json")"
 
   echo "installer_version=$version"

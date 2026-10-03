@@ -1,9 +1,12 @@
 # Omarchy v8 — full end-to-end test runbook
 
 > Historical. This covers the v8 prototype distributed as a GitHub ZIP with the
-> old six-screen flow. The current installer is a signed `.pkg` (2.0.10) from
-> `https://downloads.aicodelabs.com.au/installer/stable/Omarchy-MX-Mac-Installer.pkg`;
-> see the [install guide](https://github.com/maralcbr/omarchy-mx-mac/blob/92a9054f4565b37739ac3bd4f0fb4fcf8bd48625/docs/site/content/02-install.md) and the
+> old six-screen flow. Installers up to 2.0.10 were a signed `.pkg` from
+> `https://downloads.aicodelabs.com.au/omarchy-mac/installer/stable/Omarchy-MX-Mac-Installer.pkg`.
+> The installer is moving back to a notarized app in a zip,
+> `…/omarchy-mac/installer/<channel>/Omarchy-MX-Mac-Installer.zip`, which installs its own helper the
+> first time the person authorizes; `scripts/cutover-wizard` stages 7 to 10 describe building,
+> publishing and checking it. See the [install guide](https://github.com/maralcbr/omarchy-mx-mac/blob/92a9054f4565b37739ac3bd4f0fb4fcf8bd48625/docs/site/content/02-install.md) and the
 > post-install checks in
 > [`apple-silicon-hardware-validation.md`](https://github.com/maralcbr/omarchy-mx-mac/blob/92a9054f4565b37739ac3bd4f0fb4fcf8bd48625/docs/apple-silicon-hardware-validation.md).
 

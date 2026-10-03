@@ -801,6 +801,115 @@
       XCTAssertEqual(disk.operations.count, 5)
     }
 
+    func testSuccessfulRemovalRetiresInstallJournalsSoTheSamePlanRunsAgain() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let journals = root.appendingPathComponent("execution-journals", isDirectory: true)
+      try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
+      let finished = Data(#"{"completion":"awaiting_recovery"}"#.utf8)
+      try finished.write(to: journals.appendingPathComponent("abc.jsonl"))
+      let service = server(root: root, disk: FakeRemovalDisk())
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(inspection.ticket)
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertTrue(result.completed, result.message)
+      XCTAssertEqual(
+        result.message,
+        "“Omarchy” and its data have been removed. The freed space is now part of macOS.")
+      XCTAssertFalse(FileManager.default.fileExists(atPath: journals.path))
+      let kept = root.appendingPathComponent(
+        "retired-execution-journals/\(ticket.id.uuidString)/abc.jsonl")
+      XCTAssertEqual(try Data(contentsOf: kept), finished)
+    }
+
+    func testOnlyACompletedRemovalUninstallsTheHelper() async throws {
+      for (failAt, uninstalls) in [(Int?.none, 1), (3, 0)] {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let uninstaller = RecordingSelfUninstaller()
+        let service = ClosedEngineHelperServer(
+          workingDirectory: root, executor: UnusedRemovalHandoffExecutor(),
+          credentialValidator: RemovalCredentials(reject: false),
+          removalDisks: failAt.map { FakeRemovalDisk(failAt: $0) } ?? FakeRemovalDisk(),
+          removalAdminValidator: { _ in }, selfUninstaller: uninstaller)
+        let inspection = try await service.removal(
+          ticketID: nil, confirmation: "", authorization: nil)
+        XCTAssertEqual(uninstaller.calls, 0, "inspecting never uninstalls")
+        let ticket = try XCTUnwrap(inspection.ticket)
+        let result = try await service.removal(
+          ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+        XCTAssertEqual(result.completed, uninstalls == 1, result.message)
+        XCTAssertEqual(uninstaller.calls, uninstalls, "failAt \(String(describing: failAt))")
+      }
+    }
+
+    func testACompletedRemovalRetiresTheHelperBeforeItTakesMoreWork() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let service = ClosedEngineHelperServer(
+        workingDirectory: root, executor: UnusedRemovalHandoffExecutor(),
+        credentialValidator: RemovalCredentials(reject: false), removalDisks: FakeRemovalDisk(),
+        removalAdminValidator: { _ in }, selfUninstaller: RecordingSelfUninstaller())
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: service, version: "28")
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let ticket = try XCTUnwrap(inspection.ticket)
+      let before = await withCheckedContinuation { c in endpoint.ping { c.resume(returning: $0) } }
+      XCTAssertTrue(before)
+
+      let result = try await service.removal(
+        ticketID: ticket.id, confirmation: ticket.confirmation, authorization: authorization())
+      XCTAssertTrue(result.completed, result.message)
+
+      let retiring = await service.isRetiring
+      XCTAssertTrue(retiring)
+      do {
+        _ = try await service.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("a retiring helper must refuse new work")
+      } catch let error as ClosedEngineHelperError {
+        XCTAssertEqual(error, .retiring)
+      }
+      let ping = await withCheckedContinuation { c in endpoint.ping { c.resume(returning: $0) } }
+      let version = await withCheckedContinuation { c in
+        endpoint.helperVersion { c.resume(returning: $0) }
+      }
+      XCTAssertFalse(ping, "a retiring helper reads as gone, so the app sets up a fresh one")
+      XCTAssertEqual(version, "")
+    }
+
+    func testHelperErrorCodesKeepTheirValuesAcrossVersions() {
+      // XPC carries these as NSError codes between app and helper builds. Swift
+      // numbers cases with a value first, then the rest in order; new cases
+      // go last so none of these ever changes.
+      let codes: [(ClosedEngineHelperError, Int)] = [
+        (.unsupportedDevice("x"), 0), (.busy, 1), (.invalidOperation, 2),
+        (.invalidMachineOwnerCredentials, 3), (.invalidClientRequirement, 4),
+        (.transcriptDeviceMismatch, 5), (.transcriptIncomplete, 6), (.transcriptPlanMismatch, 7),
+        (.installConfPlanIncomplete, 8), (.installConfTargetMismatch, 9),
+        (.installConfReplay, 10), (.retiring, 11), (.beingReplaced, 12),
+      ]
+      for (error, code) in codes {
+        XCTAssertEqual((error as NSError).code, code, "\(error)")
+      }
+    }
+
+    func testFailedRemovalKeepsInstallJournals() async throws {
+      let root = try temporaryDirectory()
+      defer { try? FileManager.default.removeItem(at: root) }
+      let journals = root.appendingPathComponent("execution-journals", isDirectory: true)
+      try FileManager.default.createDirectory(at: journals, withIntermediateDirectories: false)
+      let service = server(root: root, disk: FakeRemovalDisk(failAt: 3))
+      let inspection = try await service.removal(
+        ticketID: nil, confirmation: "", authorization: nil)
+      let result = try await service.removal(
+        ticketID: XCTUnwrap(inspection.ticket).id, confirmation: OmarchyRemovalTicket.confirmation,
+        authorization: authorization())
+      XCTAssertFalse(result.completed)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: journals.path))
+    }
+
     func testServerFreeSpaceNeedsItsOwnPhraseAndNeverClaimsRemoval() async throws {
       let root = try temporaryDirectory()
       defer { try? FileManager.default.removeItem(at: root) }
@@ -1118,5 +1227,12 @@
     func growContainer(_ macOS: RemovalPartition, disk: String) throws {
       try self.disk.growContainer(macOS, disk: disk)
     }
+  }
+
+  private final class RecordingSelfUninstaller: HelperSelfUninstalling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var calls: Int { lock.withLock { count } }
+    func uninstallAfterRemoval() { lock.withLock { count += 1 } }
   }
 #endif

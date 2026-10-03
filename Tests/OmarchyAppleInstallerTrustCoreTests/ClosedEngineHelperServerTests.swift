@@ -7,6 +7,180 @@
   @testable import OmarchyAppleInstallerTrustCore
 
   final class ClosedEngineHelperServerTests: XCTestCase {
+    func testEndpointReportsItsHelperVersionAndEmptyWhenItHasNone() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      for (endpoint, expected) in [
+        (ClosedEngineXPCServiceEndpoint(server: server, version: "28"), "28"),
+        (ClosedEngineXPCServiceEndpoint(server: server), ""),
+      ] {
+        let reported = await withCheckedContinuation { continuation in
+          endpoint.helperVersion { continuation.resume(returning: $0) }
+        }
+        XCTAssertEqual(reported, expected)
+      }
+    }
+
+    func testPingAndVersionAnswerWithoutWaitingOnTheServer() throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server, version: "28")
+      // Both reply before returning: no hop onto the actor, which a long job
+      // keeps busy.
+      final class Replies: @unchecked Sendable {
+        let lock = NSLock()
+        var pinged: Bool?
+        var version: String?
+      }
+      let replies = Replies()
+      endpoint.ping { value in replies.lock.withLock { replies.pinged = value } }
+      endpoint.helperVersion { value in replies.lock.withLock { replies.version = value } }
+      replies.lock.withLock {
+        XCTAssertEqual(replies.pinged, true)
+        XCTAssertEqual(replies.version, "28")
+      }
+    }
+
+    func testAHelperOutsidePrivilegedHelperToolsLeavesThePackageAppAlone() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      // The test runner is not in PrivilegedHelperTools, so the default holds.
+      XCTAssertFalse(ClosedEngineXPCServiceEndpoint.runsFromPrivilegedHelperTools())
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      let summary = await withCheckedContinuation { continuation in
+        endpoint.retirePackageInstalledApps { continuation.resume(returning: $0) }
+      }
+      XCTAssertEqual(summary, "not installed by SMJobBless; nothing changed")
+    }
+
+    func testWorkAndReplacementNeverBothGoAhead() throws {
+      let work = HelperWorkState()
+      try work.beginJob()
+      XCTAssertFalse(work.beginReplacement(token: "A"), "a running job is never cut short")
+      XCTAssertThrowsError(try work.beginJob()) {
+        XCTAssertEqual($0 as? ClosedEngineHelperError, .busy)
+      }
+      work.endJob()
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      XCTAssertThrowsError(try work.beginJob(), "no job starts once replacement is agreed") {
+        XCTAssertEqual($0 as? ClosedEngineHelperError, .beingReplaced)
+      }
+      work.cancelReplacement(token: "A")
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testOnlyOneAppHoldsTheReplacementAtATime() throws {
+      // Third review: A waits in a password dialog; B must not get the helper
+      // meanwhile, replace it and start work for A to cut short later.
+      let work = HelperWorkState()
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      XCTAssertFalse(work.beginReplacement(token: "B"))
+      XCTAssertTrue(work.beginReplacement(token: "A"), "the holder renews")
+      work.cancelReplacement(token: "B")
+      XCTAssertThrowsError(try work.beginJob(), "only the holder releases it")
+      work.cancelReplacement(token: "A")
+      XCTAssertTrue(work.beginReplacement(token: "B"))
+    }
+
+    func testAHeldReplacementDoesNotLapseEarly() throws {
+      let work = HelperWorkState(replacementLapse: 60)
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      XCTAssertFalse(work.beginReplacement(token: "B"), "still held on the monotonic clock")
+    }
+
+    func testAnUnrenewedHoldLapsesForOthers() throws {
+      let work = HelperWorkState(replacementLapse: 0)
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      Thread.sleep(forTimeInterval: 0.01)
+      XCTAssertTrue(work.beginReplacement(token: "B"))
+    }
+
+    func testAReplacementThatNeverHappensLapses() throws {
+      let work = HelperWorkState(replacementLapse: 0)
+      XCTAssertTrue(work.beginReplacement(token: "A"))
+      Thread.sleep(forTimeInterval: 0.01)
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testTheEndpointAgreesToReplacementOnlyWhenIdle() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let work = HelperWorkState()
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator(),
+        removalDisks: UnusedRemovalDisks(), removalAdminValidator: { _ in },
+        work: work)
+      let endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      func prepare() async -> Bool {
+        await withCheckedContinuation { c in
+          endpoint.prepareForReplacement(token: "A") { c.resume(returning: $0) }
+        }
+      }
+      try work.beginJob()
+      let whileWorking = await prepare()
+      XCTAssertFalse(whileWorking)
+      work.endJob()
+      let whenIdle = await prepare()
+      XCTAssertTrue(whenIdle)
+      do {
+        _ = try await server.removal(ticketID: nil, confirmation: "", authorization: nil)
+        XCTFail("a helper being replaced takes no new work")
+      } catch let error as ClosedEngineHelperError {
+        XCTAssertEqual(error, .beingReplaced)
+      }
+      await withCheckedContinuation { c in endpoint.cancelReplacement(token: "A") { c.resume() } }
+      XCTAssertNoThrow(try work.beginJob())
+    }
+
+    func testEndpointRetiresPackageInstalledAppsAndSummarizes() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let applications = fixture.root.appendingPathComponent("Applications", isDirectory: true)
+      let contents = applications.appendingPathComponent("Current.app/Contents", isDirectory: true)
+      try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+      try PropertyListSerialization.data(
+        fromPropertyList: ["CFBundleIdentifier": "com.example.installer"], format: .xml, options: 0
+      ).write(to: contents.appendingPathComponent("Info.plist"))
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination,
+        executor: RecordingHandoffExecutor(result: fixture.transcript),
+        credentialValidator: AcceptingMachineOwnerCredentialValidator()
+      )
+      let endpoint = ClosedEngineXPCServiceEndpoint(
+        server: server,
+        retirement: PackageInstalledAppRetirement(
+          applicationsDirectory: applications,
+          privateDirectory: fixture.root.appendingPathComponent("aside", isDirectory: true),
+          appNames: ["Current", "Legacy"],
+          bundleIdentifier: "com.example.installer", packageOwner: getuid(),
+          runningExecutablePaths: { [] }),
+        mayRetirePackageApps: true)
+
+      let summary = await withCheckedContinuation { continuation in
+        endpoint.retirePackageInstalledApps { continuation.resume(returning: $0) }
+      }
+
+      XCTAssertEqual(summary, "Current.app: removed; Legacy.app: absent")
+      XCTAssertFalse(FileManager.default.fileExists(atPath: contents.path))
+    }
+
     func testValidPackageExecutesAndImportedCopyIsRemoved() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }

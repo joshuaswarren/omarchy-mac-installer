@@ -9,6 +9,24 @@
     /// seconds instead of leaving a request queued forever.
     func ping(reply: @escaping @Sendable (Bool) -> Void)
 
+    /// The helper's build version, or an empty string when it carries none.
+    /// Helpers installed by the installer package predate this call and never
+    /// answer it.
+    func helperVersion(reply: @escaping @Sendable (String) -> Void)
+
+    /// Removes the installer app the installer package left in
+    /// /Applications, when that is safe; replies with a summary for logs.
+    /// See `PackageInstalledAppRetirement`.
+    func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void)
+
+    /// Yes if no job runs and no other app holds the replacement; the helper
+    /// then refuses new jobs until it is replaced, the hold is released, or
+    /// it lapses. The same token renews the hold. Helpers older than this
+    /// call never answer it.
+    func prepareForReplacement(token: String, reply: @escaping @Sendable (Bool) -> Void)
+
+    func cancelReplacement(token: String, reply: @escaping @Sendable () -> Void)
+
     func removal(
       ticket: String, confirmation: String, machineOwner: String, password: Data,
       reply: @escaping @Sendable (Data?, NSError?) -> Void
@@ -49,6 +67,9 @@
     /// nothing in it may decide trust, and the summary is untrusted text.
     case engineFailed(EngineFailureNotice)
     case emptyResponse
+    /// The request was never handed to the helper: it didn't answer before
+    /// sending, or no connection could be made. Nothing started.
+    case notSubmitted
   }
 
   public struct AuthenticatedEngineXPCSubmitter:
@@ -132,11 +153,192 @@
       }
     }
 
+    /// How a ping went, for deciding what to do with an installed helper.
+    public enum PingResult: Equatable, Sendable {
+      /// The helper answered yes.
+      case answered
+      /// The connection ended before the timeout without a yes: nothing is
+      /// listening, or the helper refused this app, as a helper from another
+      /// build does, or it is uninstalling itself.
+      case refused
+      /// No answer within the timeout: the helper may just be busy with a long
+      /// job, so it must not be treated as broken or replaced on that alone.
+      case noAnswer
+    }
+
+    public func pingResult(timeout: Duration = .seconds(8)) async -> PingResult {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timedOut = EngineXPCFlag()
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        timedOut.set()
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let answered: Bool? = await withCheckedContinuation { continuation in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.ping { answer in
+          gate.resume(returning: answer)
+          connectionHandle.invalidate()
+        }
+      }
+      if answered == true {
+        return .answered
+      }
+      return timedOut.isSet ? .noAnswer : .refused
+    }
+
+    /// Nil when the helper doesn't answer in time, as helpers older than the
+    /// call never do.
+    public func prepareForReplacement(
+      token: String, timeout: Duration = .seconds(3)
+    ) async -> Bool? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      return await withCheckedContinuation { continuation in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.prepareForReplacement(token: token) { granted in
+          gate.resume(returning: granted)
+          connectionHandle.invalidate()
+        }
+      }
+    }
+
+    public func cancelReplacement(token: String, timeout: Duration = .seconds(3)) async {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      _ = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+        let gate = EngineXPCOptionalBoolGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: nil) }
+        connection.invalidationHandler = { gate.resume(returning: nil) }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: nil)
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: nil)
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.cancelReplacement(token: token) {
+          gate.resume(returning: true)
+          connectionHandle.invalidate()
+        }
+      }
+    }
+
+    /// Asks the helper to remove the installer app the package left behind.
+    /// Returns the helper's summary, or nil when it does not answer in time.
+    public func retirePackageInstalledApps(timeout: Duration = .seconds(10)) async -> String? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let summary: String = await withCheckedContinuation { continuation in
+        let gate = EngineXPCStringGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: "") }
+        connection.invalidationHandler = { gate.resume(returning: "") }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: "")
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: "")
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.retirePackageInstalledApps { reported in
+          gate.resume(returning: reported)
+          connectionHandle.invalidate()
+        }
+      }
+      return summary.isEmpty ? nil : summary
+    }
+
+    /// The build version the running helper reports, or nil when it reports
+    /// none, does not answer in time, or cannot be reached. An older helper
+    /// that lacks the call simply never replies, so the timeout is short.
+    public func helperVersion(timeout: Duration = .seconds(3)) async -> String? {
+      let connection = makeConnection()
+      let connectionHandle = SendableXPCConnection(connection)
+      let timer = Task {
+        try await Task.sleep(for: timeout)
+        connectionHandle.invalidate()
+      }
+      defer { timer.cancel() }
+      let version: String = await withCheckedContinuation { continuation in
+        let gate = EngineXPCStringGate(continuation: continuation)
+        connection.interruptionHandler = { gate.resume(returning: "") }
+        connection.invalidationHandler = { gate.resume(returning: "") }
+        connection.activate()
+        guard
+          let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            gate.resume(returning: "")
+          }) as? ClosedEngineXPCService
+        else {
+          gate.resume(returning: "")
+          connectionHandle.invalidate()
+          return
+        }
+        proxy.helperVersion { reported in
+          gate.resume(returning: reported)
+          connectionHandle.invalidate()
+        }
+      }
+      return version.isEmpty ? nil : version
+    }
+
     public func removal(
       ticket: OmarchyRemovalTicket? = nil, confirmation: String = "",
       authorization: MachineOwnerAuthorization? = nil
     ) async throws -> OmarchyRemovalReply {
-      try await ping()
+      // Failures before the request is handed over mean nothing started, and
+      // are told apart from a reply lost after sending.
+      do {
+        try await ping()
+      } catch {
+        throw EngineXPCSubmissionError.notSubmitted
+      }
       let connection = makeConnection()
       let handle = SendableXPCConnection(connection)
       let data: Data = try await withCheckedThrowingContinuation { continuation in
@@ -154,7 +356,7 @@
             handle.invalidate()
           }) as? ClosedEngineXPCService
         else {
-          gate.resume(throwing: EngineXPCSubmissionError.connectionFailed)
+          gate.resume(throwing: EngineXPCSubmissionError.notSubmitted)
           handle.invalidate()
           return
         }
@@ -523,6 +725,47 @@
       let candidate = continuation
       continuation = nil
       return candidate
+    }
+  }
+
+  private final class EngineXPCFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+  }
+
+  private final class EngineXPCOptionalBoolGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool?, Never>?
+
+    init(continuation: CheckedContinuation<Bool?, Never>) {
+      self.continuation = continuation
+    }
+
+    func resume(returning value: Bool?) {
+      lock.lock()
+      let candidate = continuation
+      continuation = nil
+      lock.unlock()
+      candidate?.resume(returning: value)
+    }
+  }
+
+  private final class EngineXPCStringGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String, Never>?
+
+    init(continuation: CheckedContinuation<String, Never>) {
+      self.continuation = continuation
+    }
+
+    func resume(returning value: String) {
+      lock.lock()
+      let candidate = continuation
+      continuation = nil
+      lock.unlock()
+      candidate?.resume(returning: value)
     }
   }
 

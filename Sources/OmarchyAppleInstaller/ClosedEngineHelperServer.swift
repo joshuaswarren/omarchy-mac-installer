@@ -27,6 +27,93 @@
     case installConfPlanIncomplete
     case installConfTargetMismatch
     case installConfReplay
+    /// A removal completed and the helper is uninstalling itself; it takes
+    /// no more work. The app sets up a fresh helper for the next action.
+    /// Last, so the bridged error codes of the earlier cases never change.
+    case retiring
+    /// An app from another build is replacing this helper; it takes no new
+    /// work meanwhile, so replacing it can never cut a job short.
+    case beingReplaced
+  }
+
+  /// Whether the helper is idle, working on a job, or held for replacement by
+  /// one app. One lock decides it, so "may it be replaced?" and "may this job
+  /// start?" never both say yes, and only one app at a time holds it.
+  final class HelperWorkState: @unchecked Sendable {
+    private enum Phase {
+      case idle
+      case working
+      case replacing(token: String, since: ContinuousClock.Instant)
+    }
+
+    private let lock = NSLock()
+    private var phase = Phase.idle
+    /// A hold that is neither renewed nor released (a crashed app) stops
+    /// blocking work after this long. The holder renews it immediately before
+    /// it replaces the helper, so a lapse never lets it replace a working one.
+    private let replacementLapse: TimeInterval
+
+    init(replacementLapse: TimeInterval = 120) {
+      self.replacementLapse = replacementLapse
+    }
+
+    /// Measured on a monotonic clock, so a change to the system time never
+    /// shortens or stretches a hold.
+    private func lapsed(_ since: ContinuousClock.Instant) -> Bool {
+      ContinuousClock.now - since > .seconds(replacementLapse)
+    }
+
+    func beginJob() throws {
+      try lock.withLock {
+        switch phase {
+        case .idle:
+          phase = .working
+        case .working:
+          throw ClosedEngineHelperError.busy
+        case .replacing(_, let since):
+          guard lapsed(since) else { throw ClosedEngineHelperError.beingReplaced }
+          phase = .working
+        }
+      }
+    }
+
+    func endJob() {
+      lock.withLock {
+        if case .working = phase { phase = .idle }
+      }
+    }
+
+    /// True when no job runs and no other app holds the replacement. The
+    /// same token renews its hold; from then on no job starts until it is
+    /// released or lapses.
+    func beginReplacement(token: String) -> Bool {
+      lock.withLock {
+        switch phase {
+        case .working:
+          return false
+        case .replacing(let holder, let since) where holder != token && !lapsed(since):
+          return false
+        case .idle, .replacing:
+          phase = .replacing(token: token, since: ContinuousClock.now)
+          return true
+        }
+      }
+    }
+
+    /// Releases the hold, only for the app that holds it.
+    func cancelReplacement(token: String) {
+      lock.withLock {
+        if case .replacing(let holder, _) = phase, holder == token { phase = .idle }
+      }
+    }
+  }
+
+  /// A flag set once and read from any thread.
+  final class HelperRetirementFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
   }
 
   public actor ClosedEngineHelperServer {
@@ -39,7 +126,14 @@
     private let removalDisks: any RemovalDiskOperating
     private let removalAdminValidator: @Sendable (MachineOwnerAuthorization) throws -> Void
     private let espDisks: any InstallConfESPDiskOperating
-    private var isExecuting = false
+    private let selfUninstaller: any HelperSelfUninstalling
+    /// Jobs and replacement share this state; see `HelperWorkState`.
+    nonisolated let work: HelperWorkState
+    /// Set once a removal completes: the helper is uninstalling itself. Kept
+    /// outside the actor so ping and the version check can read it at once,
+    /// even while the actor is busy verifying a payload for a long job.
+    private nonisolated let retirement = HelperRetirementFlag()
+    public nonisolated var isRetiring: Bool { retirement.isSet }
     private var completedInstallPlan: CompletedEngineInstallPlan?
     private var installConfConsumed = false
     private var removalPlan:
@@ -49,15 +143,18 @@
       workingDirectory: URL,
       executor: any ImportedEngineHandoffExecuting,
       credentialValidator: any MachineOwnerCredentialValidating =
-        OpenDirectoryMachineOwnerCredentialValidator()
+        OpenDirectoryMachineOwnerCredentialValidator(),
+      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall()
     ) {
       self.workingDirectory = workingDirectory
       self.executor = executor
       self.credentialValidator = credentialValidator
+      work = HelperWorkState()
       importer = EngineHandoffPackageImporter()
       removalDisks = MacRemovalDiskOperator()
       removalAdminValidator = requireRemovalAdministrator
       espDisks = DiskutilInstallConfESPOperator()
+      self.selfUninstaller = selfUninstaller
     }
 
     init(
@@ -65,24 +162,28 @@
       credentialValidator: any MachineOwnerCredentialValidating,
       removalDisks: any RemovalDiskOperating,
       removalAdminValidator: @escaping @Sendable (MachineOwnerAuthorization) throws -> Void,
-      espDisks: any InstallConfESPDiskOperating = DiskutilInstallConfESPOperator()
+      espDisks: any InstallConfESPDiskOperating = DiskutilInstallConfESPOperator(),
+      selfUninstaller: any HelperSelfUninstalling = NoHelperSelfUninstall(),
+      work: HelperWorkState = HelperWorkState()
     ) {
       self.workingDirectory = workingDirectory
       self.executor = executor
       self.credentialValidator = credentialValidator
+      self.work = work
       importer = EngineHandoffPackageImporter()
       self.removalDisks = removalDisks
       self.removalAdminValidator = removalAdminValidator
       self.espDisks = espDisks
+      self.selfUninstaller = selfUninstaller
     }
 
     public func removal(
       ticketID: UUID?, confirmation: String, authorization: MachineOwnerAuthorization?
     ) async throws -> OmarchyRemovalReply {
-      guard !isExecuting else { throw ClosedEngineHelperError.busy }
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
+      try work.beginJob()
+      defer { work.endJob() }
       try requireNoInterruptedRemoval()
-      isExecuting = true
-      defer { isExecuting = false }
       let disks = removalDisks
       let validateAdministrator = removalAdminValidator
       if ticketID == nil {
@@ -109,7 +210,7 @@
       let workingDirectory = self.workingDirectory
       let journalURL = workingDirectory.appendingPathComponent(
         "removal-\(approved.ticket.id.uuidString).json")
-      return await Task.detached {
+      let reply = await Task.detached {
         var phase = "checking"
         do {
           do { try validator.validate(authorization) } catch {
@@ -135,11 +236,17 @@
             phase = next
           }
           let name = approved.plan.installation?.name
-          return OmarchyRemovalReply(
-            completed: true,
-            message: name.map {
+          var message =
+            name.map {
               "“\($0)” and its data have been removed. The freed space is now part of macOS."
-            } ?? "The free space is now part of macOS.")
+            } ?? "The free space is now part of macOS."
+          do {
+            try retireExecutionJournals(in: workingDirectory, removal: approved.ticket.id)
+          } catch {
+            message +=
+              " The installer couldn’t clear its record of the earlier installation, so installing again at the same size may not work."
+          }
+          return OmarchyRemovalReply(completed: true, message: message)
         } catch {
           let detail = (error as? RemovalFailure)?.message ?? "macOS could not complete removal."
           let message: String
@@ -160,6 +267,13 @@
           return OmarchyRemovalReply(requiresReview: phase != "checking", message: message)
         }
       }.value
+      if reply.completed {
+        // Nothing of Omarchy is left, so the helper goes too. It takes no more
+        // work from here on, before this reply even leaves.
+        retirement.set()
+        selfUninstaller.uninstallAfterRemoval()
+      }
+      return reply
     }
 
     private func requireNoInterruptedRemoval() throws {
@@ -190,12 +304,10 @@
       operation: EngineHandoffOperation = .install,
       progress: (any EngineJournalProgressSink)? = nil
     ) async throws -> Data {
-      guard !isExecuting else {
-        throw ClosedEngineHelperError.busy
-      }
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
+      try work.beginJob()
+      defer { work.endJob() }
       try requireNoInterruptedRemoval()
-      isExecuting = true
-      defer { isExecuting = false }
 
       do {
         try InstallerPerformance.measure("credential_validation") {
@@ -297,7 +409,9 @@
       lengthBytes: UInt64,
       authorization: MachineOwnerAuthorization
     ) async throws {
-      guard !isExecuting else { throw ClosedEngineHelperError.busy }
+      guard !isRetiring else { throw ClosedEngineHelperError.retiring }
+      try work.beginJob()
+      defer { work.endJob() }
       do {
         try credentialValidator.validate(authorization)
       } catch {
@@ -315,8 +429,6 @@
       else {
         throw ClosedEngineHelperError.installConfTargetMismatch
       }
-      isExecuting = true
-      defer { isExecuting = false }
       let conf = try InstallConf.parse(document)
       let disks = espDisks
       let workingDirectory = self.workingDirectory
@@ -364,13 +476,70 @@
     NSObject, ClosedEngineXPCService
   {
     private let server: ClosedEngineHelperServer
+    private let version: String
+    private let retirement: PackageInstalledAppRetirement
+    private let mayRetirePackageApps: Bool
 
-    public init(server: ClosedEngineHelperServer) {
+    /// - Parameter version: the helper's build version, or empty when it
+    ///   carries none.
+    /// - Parameter mayRetirePackageApps: only a helper SMJobBless installed,
+    ///   running from PrivilegedHelperTools, removes the package's app. An
+    ///   ad hoc build's helper runs from inside that app and accepts any
+    ///   client with the app's identifier, so it leaves it alone.
+    public init(
+      server: ClosedEngineHelperServer, version: String = "",
+      retirement: PackageInstalledAppRetirement = PackageInstalledAppRetirement(),
+      mayRetirePackageApps: Bool = ClosedEngineXPCServiceEndpoint.runsFromPrivilegedHelperTools()
+    ) {
       self.server = server
+      self.version = version
+      self.retirement = retirement
+      self.mayRetirePackageApps = mayRetirePackageApps
     }
 
+    public static func runsFromPrivilegedHelperTools() -> Bool {
+      let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+      return executable.path.hasPrefix("/Library/PrivilegedHelperTools/")
+    }
+
+    /// A retiring helper answers no, so the app treats it as gone and sets up
+    /// a fresh one rather than sending it work.
+    /// Answers at once, never waiting on the server's actor, so a helper
+    /// busy with a long job still answers and is not mistaken for broken.
     public func ping(reply: @escaping @Sendable (Bool) -> Void) {
-      reply(true)
+      reply(!server.isRetiring)
+    }
+
+    public func helperVersion(reply: @escaping @Sendable (String) -> Void) {
+      reply(server.isRetiring ? "" : version)
+    }
+
+    /// Answers at once: yes if no job runs and no other app holds the
+    /// replacement; from then on no job starts, so the caller can replace
+    /// this helper without cutting a job short.
+    public func prepareForReplacement(
+      token: String, reply: @escaping @Sendable (Bool) -> Void
+    ) {
+      reply(!token.isEmpty && server.work.beginReplacement(token: token))
+    }
+
+    public func cancelReplacement(token: String, reply: @escaping @Sendable () -> Void) {
+      server.work.cancelReplacement(token: token)
+      reply()
+    }
+
+    public func retirePackageInstalledApps(reply: @escaping @Sendable (String) -> Void) {
+      let server = server
+      let retirement = retirement
+      guard mayRetirePackageApps else {
+        return reply("not installed by SMJobBless; nothing changed")
+      }
+      Task.detached {
+        guard !server.isRetiring else {
+          return reply("helper is retiring; nothing changed")
+        }
+        reply(PackageInstalledAppRetirement.summary(retirement.run()))
+      }
     }
 
     public func removal(
@@ -476,15 +645,39 @@
     }
   }
 
+  /// Install journals are named by the plan's binding digest, and removal
+  /// returns the disk to the layout that plan was made from. Left in place,
+  /// a reinstall at the same size finds its earlier journal complete and
+  /// reports success without writing anything. They are kept for diagnosis
+  /// under `retired-execution-journals/<removal ticket>`.
+  func retireExecutionJournals(in workingDirectory: URL, removal: UUID) throws {
+    let journals = workingDirectory.appendingPathComponent(
+      "execution-journals", isDirectory: true)
+    guard FileManager.default.fileExists(atPath: journals.path) else { return }
+    let retired = workingDirectory.appendingPathComponent(
+      "retired-execution-journals", isDirectory: true)
+    if !FileManager.default.fileExists(atPath: retired.path) {
+      try FileManager.default.createDirectory(
+        at: retired, withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700])
+    }
+    try FileManager.default.moveItem(
+      at: journals,
+      to: retired.appendingPathComponent(removal.uuidString, isDirectory: true))
+  }
+
   public final class AuthenticatedEngineXPCListenerDelegate:
     NSObject, NSXPCListenerDelegate
   {
     private let clientCodeSigningRequirement: String
     private let endpoint: ClosedEngineXPCServiceEndpoint
 
+    /// - Parameter helperVersion: the build version the helper reports; by
+    ///   default the `CFBundleVersion` of its embedded Info.plist, or empty.
     public init(
       clientCodeSigningRequirement: String,
-      server: ClosedEngineHelperServer
+      server: ClosedEngineHelperServer,
+      helperVersion: String = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
     ) throws {
       guard
         EngineCodeSigningRequirement.isValid(
@@ -494,7 +687,7 @@
         throw ClosedEngineHelperError.invalidClientRequirement
       }
       self.clientCodeSigningRequirement = clientCodeSigningRequirement
-      endpoint = ClosedEngineXPCServiceEndpoint(server: server)
+      endpoint = ClosedEngineXPCServiceEndpoint(server: server, version: helperVersion)
     }
 
     public func listener(

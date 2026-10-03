@@ -32,10 +32,16 @@
     }
 
     var helperStatus: HelperDisplay {
-      HelperDisplay(status: .enabled)
+      HelperDisplay(status: .current)
     }
 
     func refreshHelperStatus() -> HelperDisplay { helperStatus }
+
+    func probeHelperStatus() async -> HelperDisplay { helperStatus }
+
+    func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws {}
 
     func inspect() async throws -> HostDisplay {
       try? await Task.sleep(for: .milliseconds(700))

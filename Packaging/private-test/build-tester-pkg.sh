@@ -17,7 +17,7 @@ fi
 [[ $(/usr/bin/plutil -extract OmarchyPrivateExactBuild raw -o - "$app/Contents/Info.plist") == "true" ]] || exit 1
 /usr/bin/codesign --verify --deep --strict "$app"
 app_requirement=$(private_code_requirement "$app" "$INSTALLER_APP_IDENTIFIER")
-helper="$app/Contents/Resources/omarchy-apple-installer-helper"
+helper="$app/Contents/Library/LaunchServices/$INSTALLER_HELPER_IDENTIFIER"
 [[ $(/usr/bin/lipo -archs "$helper") == "arm64" ]] || exit 1
 [[ $(/usr/bin/lipo -archs "$app/Contents/MacOS/OmarchyAppleInstallerApp") == "arm64" ]] || exit 1
 helper_requirement=$(private_code_requirement "$helper" "$INSTALLER_HELPER_IDENTIFIER")
