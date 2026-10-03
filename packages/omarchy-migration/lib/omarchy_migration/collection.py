@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import posixpath
+import shutil
 import stat
 import tempfile
 import types
@@ -227,12 +229,27 @@ class _Snapshot:
     def _walk(self, parent, name, source, archive):
         if self.share is None:
             return self._entry(parent, name, source, archive)
+        mark = (len(self.items), set(self.paths), self.total)
         try:
             self._entry(parent, name, source, archive)
-        except _Skip as skip:
-            self._report(source, archive, "unsupported", skip.reason, mount=self.share["id"])
-        except PermissionError:
-            self._report(source, archive, "unsupported", "unreadable", mount=self.share["id"])
+        except (_Skip, PermissionError) as error:
+            self._rollback(*mark)
+            reason = error.reason if isinstance(error, _Skip) else "unreadable"
+            self._report(source, archive, "unsupported", reason, mount=self.share["id"])
+
+    def _rollback(self, items, paths, total):
+        """Forget everything a skipped shared-folder entry registered or wrote."""
+        del self.items[items:]
+        self.total = total
+        for key in set(self.paths) - paths:
+            del self.paths[key], self.metadata[key]
+        kept = {path.name for path in self.paths.values()}
+        for path in self.directory.iterdir():
+            if path.name.isdigit() and path.name not in kept:
+                if path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
 
     def _entry(self, parent, name, source, archive):
         _path(source)
@@ -306,10 +323,10 @@ class _Snapshot:
                     # Withhold rather than export a file the policy cannot clean.
                     self._report(source, archive, "unsupported", f"transform-{result.status}", rule=rule_id)
                     return
+                if len(captured) + len(result.data) > probe.MAX_TOTAL - self.total:
+                    raise probe.Rejected("collection byte limit")
                 if result.status == "applied":
                     outcome, reason = "transformed", transform["reason"]
-                    if len(captured) > probe.MAX_TOTAL - self.total:
-                        raise probe.Rejected("collection byte limit")
                     original = self.directory / f"original-{len(self.originals)}"
                     original_fd = os.open(original, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                     with os.fdopen(original_fd, "wb") as output:
@@ -341,6 +358,13 @@ class _Snapshot:
                 if _metadata(after) != _metadata(before):
                     raise probe.Rejected("source entry changed during capture")
                 return
+            if self.share is not None and not target.startswith("/"):
+                # The share was renamed to its link's path: a relative link
+                # leaving it would point at home files instead of the Mac's.
+                root = self.share["archive"]
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(archive), target))
+                if resolved != root and not resolved.startswith(root + "/"):
+                    raise _Skip("share-escape")
             if any(item["source"] != item["archive"] for item in self.request["selection"]):
                 # V2 has no explicit inert-link flag. A renamed selection
                 # could make an old target accidentally refer to new data.
@@ -364,6 +388,8 @@ class _Snapshot:
 
     @staticmethod
     def _is_mount_root(target, mount):
+        if not target.startswith("/"):
+            return False
         parts = [part for part in target.split("/") if part not in ("", ".")]
         return parts == [part for part in mount["path"].split("/") if part]
 
@@ -372,7 +398,7 @@ class _Snapshot:
         fd = os.open(self.share_roots[mount["id"]], DIRECTORY_FLAGS)
         try:
             metadata = os.fstat(fd)
-            self.share = {"id": mount["id"], "mount": _mount(fd)}
+            self.share = {"id": mount["id"], "mount": _mount(fd), "archive": archive}
             try:
                 self._guard(fd)
             except _Skip as skip:
@@ -396,12 +422,15 @@ class _Snapshot:
         root = self.originals_root()
         if root is None:
             return
+        withheld = {item["archive"] for item in self.items if item["outcome"] != "included"}
         for source, archive, original, mtime_ns in self.originals:
             path = f"{root}/{archive}"
             _path(path)
             parts = path.split("/")
             for depth in range(1, len(parts)):
                 ancestor = "/".join(parts[:depth])
+                if ancestor in withheld:
+                    raise probe.Rejected("originals location is withheld by policy or selection")
                 if ancestor in self.paths:
                     if not self.paths[ancestor].is_dir() or self.paths[ancestor].is_symlink():
                         raise probe.Rejected("originals location collides with a captured entry")
@@ -509,6 +538,14 @@ def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_pa
     if set(roots) != {mount["id"] for mount in loaded.mounts} or any(
             not isinstance(path, (str, os.PathLike)) or not os.path.isabs(path) for path in roots.values()):
         raise probe.Rejected("shared folder roots")
+    # Resolve trusted mount paths once; the walk then opens them without following links.
+    roots = {key: os.path.realpath(path) for key, path in roots.items()}
+    home, scratch = os.path.realpath(root), os.path.realpath(snapshot_parent)
+    for key in request["selected_mounts"]:
+        share = roots[key]
+        for other in (home, scratch):
+            if os.path.commonpath([share, other]) in (share, other):
+                raise probe.Rejected("shared folder overlaps the home or snapshot location")
     request = json.loads(_json_bytes(request))
     if os.geteuid() == 0:
         raise probe.Rejected("fixture collection requires an unprivileged owner")

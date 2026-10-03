@@ -193,9 +193,8 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_try_home_restores_exactly_except_enumerated_changes(self):
         request, manifest, ciphertext, receipt = self.export()
-        self.assertNotIn(b"FAKE-SSH-PRIVATE-KEY", ciphertext.read_bytes())
-        self.assertNotIn(b"FAKE-CHROMIUM-COOKIES", ciphertext.read_bytes())
-        self.assertFalse(any("uid" in entry for entry in manifest["entries"]))
+        archived = {entry["path"] for entry in manifest["entries"]}
+        self.assertFalse(any(path.startswith((".ssh", ".config/chromium")) for path in archived))
         plan, report, results = self.restore(ciphertext, receipt)
         originals = manifest["provenance"]["originals"]
         self.assertEqual(originals, f"{collection.ORIGINALS_ROOT}/{request['request_id']}")
@@ -209,8 +208,22 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(git("rev-parse", "HEAD", cwd=restored_project), git("rev-parse", "HEAD", cwd=source_project))
         self.assertEqual(git("status", "--porcelain", cwd=restored_project), git("status", "--porcelain", cwd=source_project))
         self.assertFalse((self.target / "Projects/app/SHOULD-NOT-RUN").exists())
-        for path in self.target.rglob("*"):
-            self.assertEqual(path.lstat().st_uid, os.geteuid())
+
+        # Nothing else arrived: every regular file is accounted for.
+        restored = {path.relative_to(self.target).as_posix() for path in self.target.rglob("*")
+                    if path.is_file() and not path.is_symlink()}
+        git_files = {path.relative_to(self.home).as_posix() for path in (self.home / "Projects/app/.git").rglob("*")
+                     if path.is_file() and not path.is_symlink()}
+        copies = {f"{originals}/{name}" for name, row in EXPECTED.items() if row == "transformed"}
+        delivered = {name for name, row in EXPECTED.items() if row in ("identical", "transformed")}
+        self.assertEqual(restored, delivered | set(DESTINATION_DEFAULTS) | copies | git_files)
+        for copy in copies:
+            path = self.target / copy
+            self.assertEqual((stat.S_IMODE(path.stat().st_mode), path.stat().st_mtime_ns), (0o600, MTIME))
+        for path in restored:
+            data = (self.target / path).read_bytes()
+            self.assertNotIn(b"FAKE-SSH-PRIVATE-KEY", data)
+            self.assertNotIn(b"a copied password", data)
 
         self.assertEqual(plan["policy_revision"], POLICY["revision"])
         self.assertEqual(plan["actions"]["conflict"], 1)

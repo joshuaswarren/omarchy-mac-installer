@@ -575,6 +575,8 @@ class CollectionTests(unittest.TestCase):
         self.addCleanup((share / "secret.txt").chmod, 0o600)
         (share / "back-to-share").symlink_to("/mnt/mac")
         (share / "latest").symlink_to("Projects/plan.md")
+        (share / "escape").symlink_to("../.bashrc")
+        (share / "Projects/up").symlink_to("../photo.jpg")
         (self.source / "Work").symlink_to("/mnt/mac")
         (self.source / "Work-copy").symlink_to("/mnt/mac/")
         (self.source / "Notes").symlink_to("/mnt/mac/Projects")
@@ -611,6 +613,10 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(reasons["Work/a.txt"], ("unsupported", "multiply-linked-file"))
             self.assertEqual(reasons["Work/secret.txt"], ("unsupported", "unreadable"))
             self.assertEqual(reasons["Work/back-to-share"], ("inert-link", "mount-link"))
+            # The share is renamed to Work: links must not escape into home files.
+            self.assertEqual(reasons["Work/escape"], ("unsupported", "share-escape"))
+            self.assertNotIn("Work/escape", snapshot.paths)
+            self.assertEqual(reasons["Work/Projects/up"], ("included", "link-metadata"))
             self.assertNotIn("Work/open-dir/x.txt", snapshot.paths)
             self.assertEqual(self.entry(snapshot, "Work-copy")["reason"], "mount-already-materialized")
             self.assertEqual(self.entry(snapshot, "Notes")["reason"], "mount-link")
@@ -632,6 +638,44 @@ class CollectionTests(unittest.TestCase):
                              "other-filesystem")
             self.assertNotIn("Work/Projects/plan.md", snapshot.paths)
             self.assertIn("Work/photo.jpg", snapshot.paths)
+
+    def test_unlistable_share_directory_is_rolled_back_and_skipped(self):
+        share = self.make_share()
+        self.request["selected_mounts"] = ["mac-share"]
+        projects = (share / "Projects").stat().st_ino
+        scanned = os.scandir
+
+        def refuse_projects(value):
+            if isinstance(value, int) and os.fstat(value).st_ino == projects:
+                raise PermissionError("protected by macOS privacy controls")
+            return scanned(value)
+
+        with patch.object(collection.os, "scandir", side_effect=refuse_projects), \
+                self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            items = [item for item in snapshot.report["entries"] if item["archive"] == "Work/Projects"]
+            self.assertEqual([(item["outcome"], item["reason"]) for item in items], [("unsupported", "unreadable")])
+            self.assertFalse(any(path.startswith("Work/Projects") for path in snapshot.paths))
+            self.assertIn("Work/photo.jpg", snapshot.paths)
+            numbered = {path.name for path in snapshot.directory.iterdir() if path.name.isdigit()}
+            self.assertEqual(numbered, {path.name for path in snapshot.paths.values() if path.name.isdigit()})
+            probe.validate_manifest(snapshot.manifest)
+
+    def test_share_root_cannot_overlap_the_home_or_snapshot_location(self):
+        self.make_share()
+        self.request["selected_mounts"] = ["mac-share"]
+        for root in (self.source, self.source / "Projects", self.root, self.parent):
+            with self.subTest(root=root), self.assertRaisesRegex(probe.Rejected, "overlaps"):
+                with self.capture(share_roots={"mac-share": str(root)}):
+                    self.fail("overlapping share root accepted")
+
+    def test_originals_are_refused_under_a_withheld_location(self):
+        self.policy["rules"].append({"id": "no-local-share", "path": ".local/share", "match": "tree", "action": "exclude",
+                                     "reason": "vm_integration", "evidence": {"path": "synthetic"}})
+        self.write(".config/omarchy/extensions/omarchy-menu.jsonc", b'{"setup.vm": {}, "launch.x": {}}\n')
+        with self.assertRaisesRegex(probe.Rejected, "withheld"):
+            with self.capture():
+                self.fail("originals placed under an excluded path")
+        self.assertEqual(list(self.parent.iterdir()), [])
 
     def test_mount_selection_and_roots_are_validated(self):
         share = self.make_share()
