@@ -445,6 +445,14 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual((entry["bytes"], entry["mode"], entry["mtime_ns"]), (len(data), 0o640, MTIME))
             self.assertEqual(snapshot.report["counts"]["transformed"], 2)
             self.assert_private(snapshot)
+            root = f"{collection.ORIGINALS_ROOT}/{self.request['request_id']}"
+            self.assertEqual(snapshot.manifest["provenance"]["originals"], root)
+            original = snapshot.paths[f"{root}/{path}"]
+            self.assertEqual(original.read_bytes(), menu)
+            entry = next(entry for entry in snapshot.manifest["entries"] if entry["path"] == f"{root}/{path}")
+            self.assertEqual((entry["mode"], entry["mtime_ns"]), (0o600, MTIME))
+            self.assertEqual(snapshot.paths[f"{root}/.config/app-flags.conf"].read_bytes(), b"--user-choice\n--vm-only\n")
+            self.assertEqual(self.entry(snapshot, f"{root}/{path}")["reason"], "original-copy")
 
     def test_transform_without_provider_content_exports_the_file_unchanged(self):
         self.write(".config/app-flags.conf", b"--user-choice\n")
@@ -452,6 +460,9 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(snapshot.paths[".config/app-flags.conf"].read_bytes(), b"--user-choice\n")
             item = self.entry(snapshot, ".config/app-flags.conf")
             self.assertEqual((item["outcome"], item["reason"], item["rule"]), ("included", "regular-file", "vm-flags"))
+            # Nothing changed, so nothing needs an original copy.
+            self.assertIsNone(snapshot.manifest["provenance"]["originals"])
+            self.assertFalse(any(path.startswith(collection.ORIGINALS_ROOT) for path in snapshot.paths))
 
     def test_untransformable_files_are_withheld_and_reported(self):
         self.write(".config/omarchy/extensions/omarchy-menu.jsonc", b'{"setup.vm": {}')

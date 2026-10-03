@@ -1,6 +1,8 @@
 """Plans and reports describe the exact authenticated bundle and restore job."""
 
 import ast
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 from omarchy_migration import fixture, probe, restore, review
@@ -269,6 +272,25 @@ class ReviewTests(unittest.TestCase):
         retried = contract.parse(self.command("apply", "--plan-id", again["plan_id"]).stdout.encode())
         self.assertEqual(retried["job_id"], report["job_id"])
         self.assertEqual(again["actions"]["create"], 0)
+
+    def test_apply_refuses_without_enough_free_space_and_writes_nothing(self):
+        plan = contract.parse(self.command("plan").stdout.encode())
+        read, write = os.pipe()
+        os.write(write, fixture.SECRET + b"\n")
+        os.close(write)
+        arguments = ["apply", "--plan-id", plan["plan_id"], "--bundle", str(self.export / "bundle.age"),
+                     "--receipt", str(self.export / "receipt.json"), "--target", str(self.target),
+                     "--job", str(self.job), "--passphrase-fd", str(read)]
+        errors = io.StringIO()
+        try:
+            with patch.object(review, "available_bytes", return_value=plan["required_bytes"]), \
+                    contextlib.redirect_stderr(errors):
+                self.assertEqual(review.main(arguments), 1)
+        finally:
+            os.close(read)
+        self.assertEqual(json.loads(errors.getvalue())["error"], "insufficient_space")
+        self.assertEqual(list(self.target.iterdir()), [])
+        self.assertEqual(review.space_shortfall({"required_bytes": 10}, self.target), 0)
 
     def test_wrong_passphrase_and_bad_passphrase_input_write_nothing_or_leak(self):
         wrong = b"not-the-transfer-passphrase"

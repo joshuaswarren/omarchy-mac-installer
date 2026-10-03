@@ -255,6 +255,7 @@ class ProvenanceTests(unittest.TestCase):
     def manifest(self, **changes):
         provenance = {
             "policy_revision": "try-omarchy/82927e9/1", "policy_sha256": "a" * 64, "request_sha256": "b" * 64,
+            "originals": None,
             "collection": {"counts": {"included": 2, "transformed": 1, "held-out": 1, "excluded": 1,
                                       "unsupported": 0, "inert-link": 0},
                            "exceptions": [
@@ -285,6 +286,7 @@ class ProvenanceTests(unittest.TestCase):
         probe.validate_manifest(self.manifest())
         probe.validate_manifest(self.manifest(provenance=KeyError))
         probe.validate_manifest(self.manifest(**{"provenance.collection.exceptions.1.archive": ""}))
+        probe.validate_manifest(self.manifest(**{"provenance.originals": ".local/share/omarchy-migration/originals/x"}))
 
     def test_malformed_provenance_is_rejected(self):
         for change in ({"schema": probe.SCHEMA}, {"provenance.policy_revision": "Not A Label"},
@@ -295,6 +297,8 @@ class ProvenanceTests(unittest.TestCase):
                        {"provenance.collection.exceptions.2.rule": "Bad Rule"},
                        {"provenance.collection.exceptions.0.mount": 7},
                        {"provenance.policy_revision": "Try-Omarchy/82927e9/1"},
+                       {"provenance.originals": "../elsewhere"}, {"provenance.originals": ""},
+                       {"provenance.originals": KeyError},
                        {"provenance.collection.exceptions.1.store": "SSH"},
                        {"provenance.collection.exceptions.2.reason": "Display_Configuration"},
                        {"provenance.collection.counts.included": 3},

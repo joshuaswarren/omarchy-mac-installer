@@ -196,8 +196,11 @@ def _relative(value):
 
 def validate_provenance(provenance):
     """Authenticated export provenance: policy, request and collection exceptions."""
-    if not isinstance(provenance, dict) or set(provenance) != {"policy_revision", "policy_sha256", "request_sha256", "collection"}:
+    if not isinstance(provenance, dict) or set(provenance) != {"policy_revision", "policy_sha256", "request_sha256",
+                                                               "originals", "collection"}:
         raise Rejected("provenance fields")
+    if provenance["originals"] is not None and (not _relative(provenance["originals"]) or provenance["originals"] == ""):
+        raise Rejected("provenance originals root")
     if not _label(provenance["policy_revision"]):
         raise Rejected("provenance policy revision")
     for key in ("policy_sha256", "request_sha256"):

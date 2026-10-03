@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import select
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -137,7 +138,10 @@ class ExportFixtureTests(unittest.TestCase):
         self.assertEqual((receipt["request_id"], receipt["policy_revision"]),
                          (self.request["request_id"], self.request["policy_revision"]))
         files, decoded = self.decoded_files()
-        self.assertEqual(files, EXPORTED_FILES)
+        originals = decoded["provenance"]["originals"]
+        self.assertEqual({path for path in files if not path.startswith(originals + "/")}, EXPORTED_FILES)
+        self.assertEqual({path[len(originals) + 1:] for path in files if path.startswith(originals + "/")},
+                         {".config/hypr/input.lua", ".config/chromium-flags.conf", ".config/omarchy/extensions/omarchy-menu.jsonc"})
         self.assertEqual(decoded["schema"], contract.BUNDLE)
         self.assertEqual(decoded["provenance"]["policy_revision"], receipt["policy_revision"])
         excluded = {item["source"] for item in decoded["provenance"]["collection"]["exceptions"] if item["outcome"] == "excluded"}
@@ -161,6 +165,9 @@ class ExportFixtureTests(unittest.TestCase):
             with restore.Restorer(bundle, target, job) as importer:
                 importer.apply(importer.plan())
         self.assertEqual((target / ".config/hypr/input.lua").read_bytes(), b"input {\n  kb_layout = us\n}\n")
+        originals = target / fixture.collection.ORIGINALS_ROOT / self.request["request_id"]
+        self.assertIn(b"try-omarchy/pinch-input.lua", (originals / ".config/hypr/input.lua").read_bytes())
+        self.assertEqual(stat.S_IMODE((originals / ".config/hypr/input.lua").stat().st_mode), 0o600)
         self.assertEqual((target / ".config/chromium-flags.conf").read_bytes(), b"--ozone-platform=wayland\n")
         menu = (target / ".config/omarchy/extensions/omarchy-menu.jsonc").read_bytes()
         self.assertEqual(json.loads(menu), {"launch.notes": {"label": "Notes", "action": "obsidian"}})
@@ -173,6 +180,7 @@ class ExportFixtureTests(unittest.TestCase):
         self.request_path.write_text(json.dumps(self.request))
         self.assertEqual(self.execute()[0], 0)
         files, _ = self.decoded_files()
+        files = {path for path in files if not path.startswith(fixture.collection.ORIGINALS_ROOT + "/")}
         self.assertEqual(files, EXPORTED_FILES | {".ssh/id_example", ".config/BraveSoftware/Brave-Origin/Default/example"})
 
     def test_category_selection_limits_the_export(self):

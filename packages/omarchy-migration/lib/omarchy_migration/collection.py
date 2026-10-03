@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import types
 import uuid
 
 from . import contract, policy as migration_policy
@@ -20,6 +21,8 @@ from . import probe
 
 REQUEST_SCHEMA = "omarchy-migration-collection-request/1"
 REPORT_SCHEMA = "omarchy-migration-collection-report/2"
+# Untouched copies of transformed files, restored as migration-owned files.
+ORIGINALS_ROOT = ".local/share/omarchy-migration/originals"
 MAX_DEPTH = 64
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -119,6 +122,7 @@ class _Snapshot:
         self.supported = frozenset(supported)
         self.mount = _mount(root_fd)
         self.paths, self.metadata, self.history = {}, {}, {}
+        self.originals = []
         self.items, self.total = [], 0
         self.report = None
         self.manifest = None
@@ -266,6 +270,14 @@ class _Snapshot:
                     return
                 if result.status == "applied":
                     outcome, reason = "transformed", transform["reason"]
+                    if len(captured) > probe.MAX_TOTAL - self.total:
+                        raise probe.Rejected("collection byte limit")
+                    original = self.directory / f"original-{len(self.originals)}"
+                    original_fd = os.open(original, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(original_fd, "wb") as output:
+                        output.write(captured)
+                    self.total += len(captured)
+                    self.originals.append((source, archive, original, before.st_mtime_ns))
                 output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(output_fd, "wb") as output:
                     output.write(result.data)
@@ -297,6 +309,36 @@ class _Snapshot:
         if _metadata(after) != _metadata(before):
             raise probe.Rejected("source entry changed during capture")
         self.history[source] = _metadata(before)
+
+    def originals_root(self):
+        return f"{ORIGINALS_ROOT}/{self.request['request_id']}" if self.originals else None
+
+    def _add_originals(self):
+        """Place untouched copies under the migration-owned originals root."""
+        root = self.originals_root()
+        if root is None:
+            return
+        for source, archive, original, mtime_ns in self.originals:
+            path = f"{root}/{archive}"
+            _path(path)
+            parts = path.split("/")
+            for depth in range(1, len(parts)):
+                ancestor = "/".join(parts[:depth])
+                if ancestor in self.paths:
+                    if not self.paths[ancestor].is_dir() or self.paths[ancestor].is_symlink():
+                        raise probe.Rejected("originals location collides with a captured entry")
+                    continue
+                directory = self.directory / f"originals-directory-{len(self.paths)}"
+                directory.mkdir(mode=0o700)
+                self.paths[ancestor] = directory
+                self.metadata[ancestor] = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_mtime_ns=mtime_ns)
+                self._report(ancestor, ancestor, "included", "directory")
+            if path in self.paths:
+                raise probe.Rejected("originals location collides with a captured entry")
+            self.paths[path] = original
+            # Private copies, whatever the original's mode.
+            self.metadata[path] = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_mtime_ns=mtime_ns)
+            self._report(source, path, "included", "original-copy")
 
     def capture(self):
         self._guard(self.root_fd)
@@ -338,6 +380,7 @@ class _Snapshot:
                 raise probe.Rejected("source root changed before completion")
         finally:
             os.close(reopened)
+        self._add_originals()
         self.manifest = probe.make_tree_manifest(self.paths)
         by_path = {entry["path"]: entry for entry in self.manifest["entries"]}
         for entry in self.manifest["entries"]:
@@ -366,6 +409,7 @@ class _Snapshot:
             "policy_revision": self.policy.revision,
             "policy_sha256": self.report["policy_sha256"],
             "request_sha256": self.report["request_sha256"],
+            "originals": self.originals_root(),
             "collection": {"counts": dict(self.report["counts"]),
                            "exceptions": [dict(item) for item in self.items if item["outcome"] != "included"]},
         }

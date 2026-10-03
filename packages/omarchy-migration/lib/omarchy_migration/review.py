@@ -21,6 +21,8 @@ from .dependency import configured_age
 
 PLAN_NAMESPACE = uuid.UUID("b6a0f7d2-31c4-4e65-8f0e-6d9a2c41e8b3")
 MAX_PASSPHRASE = 1024
+# Headroom for the journal, job copies and filesystem overhead.
+SPACE_MARGIN = 64 * 1024 * 1024
 
 # Stable codes for the restorer's reasons. The test suite fails if the
 # restorer gains a reason without a code here.
@@ -156,6 +158,16 @@ def report_document(plan, results, job_id, bundle):
     return document
 
 
+def available_bytes(target):
+    status = os.statvfs(target)
+    return status.f_bavail * status.f_frsize
+
+
+def space_shortfall(plan, target):
+    """Bytes missing for the plan plus margin, or 0 when it fits."""
+    return max(0, plan["required_bytes"] + SPACE_MARGIN - available_bytes(target))
+
+
 def job_identity(binding):
     """A stable id for one restore job, so retries report as the same job.
 
@@ -206,11 +218,16 @@ def main(argv=None):
             with restore.Restorer(bundle, arguments.target, arguments.job) as importer:
                 actions = importer.plan()
                 plan = plan_document(bundle, actions, receipt, account_uid, importer._binding)
+                shortfall = space_shortfall(plan, arguments.target)
                 if arguments.operation == "plan":
                     print(json.dumps(plan, indent=2, sort_keys=True))
+                    if shortfall:
+                        print(json.dumps({"warning": "insufficient_space", "missing_bytes": shortfall}), file=sys.stderr)
                     return 0
                 if plan["plan_id"] != arguments.plan_id:
                     raise ReviewError("plan_changed")
+                if shortfall:
+                    raise ReviewError("insufficient_space")
                 results = importer.apply(actions)
                 print(json.dumps(report_document(plan, results, job_identity(importer._binding), bundle),
                                  indent=2, sort_keys=True))

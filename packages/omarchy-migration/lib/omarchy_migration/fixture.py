@@ -135,7 +135,8 @@ def inventory_document(policy):
         with collection.collect_fixture(home, request, policy, supported_adapters=SUPPORTED_ADAPTERS,
                                         snapshot_parent=parent) as snapshot:
             for entry in snapshot.manifest["entries"]:
-                if probe.entry_kind(entry) == "file":
+                # Inventory counts the user's files, not migration-owned copies.
+                if probe.entry_kind(entry) == "file" and not entry["path"].startswith(collection.ORIGINALS_ROOT + "/"):
                     counts[category(entry["path"])]["files"] += 1
                     counts[category(entry["path"])]["bytes"] += entry["bytes"]
         present = {store["id"] for store in policy["credential_stores"]
