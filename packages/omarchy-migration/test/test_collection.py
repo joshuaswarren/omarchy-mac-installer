@@ -10,8 +10,8 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from Development.migration_bundle_probe import collection, probe, restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import collection, probe, restore
+from omarchy_migration.dependency import configured_age
 
 
 SECRET = b"synthetic-only-otter-maple-window-cobalt"
@@ -498,7 +498,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(self.entry(snapshot, ".local/state/toggles/hypr/flags.lua")["outcome"], "included")
 
     def test_try_policy_drives_collection_of_a_synthetic_try_home(self):
-        document = json.loads((Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-82927e9.json").read_text())
+        document = json.loads((Path(__file__).resolve().parent / "policies/try-omarchy-82927e9.json").read_text())
         block = next(rule for rule in document["rules"] if rule["id"] == "try-hypr-input-overrides")["transform"]["block"]
         home = {
             ".config/hypr/input.lua": b"input { kb_layout = us }\n" + block.encode(),

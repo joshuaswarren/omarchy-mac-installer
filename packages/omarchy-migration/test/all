@@ -1,0 +1,29 @@
+#!/bin/bash
+# Run omarchy-migration's tests from a copy of this directory alone.
+# Collection, survey and restore cases need Linux; encryption cases need
+# OMARCHY_TEST_AGE and OMARCHY_TEST_AGE_SHA256 (see docs/PROBE.md).
+set -euo pipefail
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$here/lib" PYTHONDONTWRITEBYTECODE=1
+
+python3 - "$here" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+for path in sorted([*root.glob("lib/omarchy_migration/*.py"), *root.glob("test/*.py")]):
+    compile(path.read_text(), str(path), "exec")
+print("omarchy-migration: compilation passed")
+PY
+bash -n "$here/install" "$here/bin/omarchy-migration" "$here/test/all"
+
+python3 -W error::ResourceWarning -m unittest discover -s "$here/test" -t "$here/test" -p 'test_*.py'
+
+# The staged command must run from the staged root alone.
+staging="$(mktemp -d)"
+trap 'rm -rf "$staging"' EXIT
+"$here/install" "$staging/root"
+env -u PYTHONPATH "$staging/root/usr/bin/omarchy-migration" validate \
+  "$staging/root/usr/lib/omarchy-migration/omarchy_migration/policies/"*.json >/dev/null
+echo "omarchy-migration: staged command passed"

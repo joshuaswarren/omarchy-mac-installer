@@ -46,10 +46,10 @@ The destination namespace must remain quiescent during each operation, as in the
 
 ## Verification and limits
 
-With the [verified age dependency](README.md#run-checks) configured and Git available:
+With the [verified age dependency](PROBE.md#run-checks) configured and Git available:
 
 ```bash
-python3 -W error::ResourceWarning -m unittest Development.migration_bundle_probe.test_tree -v
+PYTHONPATH=lib python3 -W error::ResourceWarning -m unittest discover -s test -t test -p test_tree.py -v
 ```
 
 The tests cover typed manifests and rejected TAR link records, explicit/empty directories, original link text, absolute/escaping/dangling/chained/cyclic links retained inertly, component-wise `..` handling, changed destination dependencies, unsafe target links, interrupted/racing directory creation, preservation of later deletions, and recovery after an actual SIGKILL immediately after symlink publication.

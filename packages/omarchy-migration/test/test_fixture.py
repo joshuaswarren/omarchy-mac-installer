@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from Development.migration_bundle_probe import fixture, probe, restore
-from Development.migration_bundle_probe.dependency import configured_age
-from Development.migration_contract import contract
+from omarchy_migration import fixture, probe, restore
+from omarchy_migration.dependency import configured_age
+from omarchy_migration import contract
 
 
-COMMAND = [sys.executable, "-m", "Development.migration_bundle_probe.fixture"]
+COMMAND = [sys.executable, "-m", "omarchy_migration.fixture"]
 SAMPLE = Path(__file__).resolve().parent / "fixture-request.json"
 EXPORTED_FILES = {
     "Projects/demo/changed.txt", "Projects/demo/untracked.txt",
@@ -45,7 +45,7 @@ class RequestTests(unittest.TestCase):
             for raw, error in ((b"{", "invalid_request"),
                                (duplicate.encode(), "invalid_request"),
                                (json.dumps({**request, "passphrase": "x"}).encode(), "invalid_request"),
-                               (json.dumps(json.loads((Path(__file__).parents[1] / "migration_contract/fixtures/valid/plan.json").read_text())).encode(),
+                               (json.dumps(json.loads((Path(__file__).resolve().parent / "fixtures/valid/plan.json").read_text())).encode(),
                                 "unsupported_request"),
                                (b" " * 8193, "oversized_request")):
                 source.write_bytes(raw)

@@ -43,4 +43,4 @@ The injected interruption was a caught exception in one guest process, not a VM 
 
 The guest had the whole synthetic target. This run did not exercise the bounded QEMU broker or GPT selection; their separate source tests do not establish combined VM isolation. No root shrink, LUKS conversion, native owner/default initialization, real data capture, application restore, or physical installation was performed. M4 VM evidence does not change native hardware eligibility.
 
-This is an additional step toward the native staging gate, not completion of it. A [runnable integration fixture](../../Development/migration_bundle_probe/FIXTURE.md) is now available separately. Remaining work includes the production shared export/restore interface, exact-image native boot/encryption qualification, and durable controller recovery.
+This is an additional step toward the native staging gate, not completion of it. A [runnable integration fixture](../../packages/omarchy-migration/docs/FIXTURE.md) is now available separately. Remaining work includes the production shared export/restore interface, exact-image native boot/encryption qualification, and durable controller recovery.

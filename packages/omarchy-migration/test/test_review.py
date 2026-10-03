@@ -10,12 +10,12 @@ import tempfile
 import unittest
 import uuid
 
-from Development.migration_bundle_probe import fixture, probe, restore, review
-from Development.migration_bundle_probe.dependency import configured_age
-from Development.migration_contract import contract
+from omarchy_migration import fixture, probe, restore, review
+from omarchy_migration.dependency import configured_age
+from omarchy_migration import contract
 
-COMMAND = [sys.executable, "-m", "Development.migration_bundle_probe.review"]
-VALID = Path(__file__).resolve().parents[1] / "migration_contract/fixtures/valid"
+COMMAND = [sys.executable, "-m", "omarchy_migration.review"]
+VALID = Path(__file__).resolve().parent / "fixtures/valid"
 STATUSES = {"create", "present", "restored", "replace", "replaced", "conflict", "inert", "directory"}
 
 

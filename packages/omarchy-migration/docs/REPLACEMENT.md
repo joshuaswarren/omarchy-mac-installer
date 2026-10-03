@@ -45,7 +45,7 @@ If preparation fails normally before replacement intent, remove only the backup 
 With the verified age dependency configured, run:
 
 ```bash
-python3 -W error::ResourceWarning -m unittest Development.migration_bundle_probe.test_replacement -v
+PYTHONPATH=lib python3 -W error::ResourceWarning -m unittest discover -s test -t test -p test_replacement.py -v
 ```
 
 The cases cover explicit/default approval, v1/v2 bundles, matching-file retention, independent backups despite original hardlinks, parent/leaf changes, backup/preparation/intent/completion failures, both post-rename directory-sync failures, backup tampering, conservative retries, and actual SIGKILL immediately after replacement. Process interruption is not filesystem power-loss qualification. Directory/link/extended-metadata replacement is unsupported. Source capture, credential-aware collection, Try transformations, production contracts/packaging, app consent, native provisioning, and physical qualification remain separate work in tickets 04–05 and later gates.

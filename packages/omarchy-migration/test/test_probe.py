@@ -12,8 +12,8 @@ import tracemalloc
 import unittest
 from unittest.mock import patch
 
-from Development.migration_bundle_probe import probe
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import probe
+from omarchy_migration.dependency import configured_age
 
 
 AGE = Path(os.environ["OMARCHY_TEST_AGE"]) if os.environ.get("OMARCHY_TEST_AGE") else None

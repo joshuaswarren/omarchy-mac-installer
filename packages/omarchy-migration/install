@@ -1,0 +1,19 @@
+#!/bin/bash
+# Stage omarchy-migration into an absolute root. Enables and starts nothing.
+set -euo pipefail
+
+destdir=${1:-}
+if [[ -z $destdir || $destdir != /* ]]; then
+  echo "usage: install DESTDIR  (an absolute path)" >&2
+  exit 2
+fi
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+lib="$destdir/usr/lib/omarchy-migration/omarchy_migration"
+docs="$destdir/usr/share/doc/omarchy-migration"
+
+install -d -m 0755 "$lib/policies" "$destdir/usr/bin" "$docs" "$destdir/usr/share/licenses/omarchy-migration"
+install -m 0644 "$here"/lib/omarchy_migration/*.py "$lib/"
+install -m 0644 "$here"/lib/omarchy_migration/policies/*.json "$lib/policies/"
+install -m 0755 "$here/bin/omarchy-migration" "$destdir/usr/bin/omarchy-migration"
+install -m 0644 "$here/README.md" "$here"/docs/*.md "$docs/"
+install -m 0644 "$here/LICENSE" "$destdir/usr/share/licenses/omarchy-migration/LICENSE"

@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from Development.migration_bundle_probe import probe, restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import probe, restore
+from omarchy_migration.dependency import configured_age
 
 
 SECRET = b"synthetic-only-otter-maple-window-cobalt"
@@ -216,8 +216,8 @@ class RestoreTests(unittest.TestCase):
 import os, signal, sys
 from pathlib import Path
 from unittest.mock import patch
-from Development.migration_bundle_probe import restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import restore
+from omarchy_migration.dependency import configured_age
 link = os.link
 def crash(*args, **kwargs):
     link(*args, **kwargs)

@@ -11,12 +11,12 @@ The [M4 HVF experiment](m4-hvf-experiment.md) additionally demonstrates syntheti
 | Path | Purpose |
 | --- | --- |
 | [Collaboration plan](collaboration-plan.md) | Try guest delivery, stable capture/lifecycle, local export, authenticated app coordination, and acceptance criteria. |
-| [Bundle probe](../../Development/migration_bundle_probe/README.md) | Experimental encrypted archive, validation, synthetic credential selection, and 18 behavioral tests. |
-| [Runnable export fixture](../../Development/migration_bundle_probe/FIXTURE.md) | Generated test data, versioned requests, JSON progress/results, cooperative cancellation, and completed-job reuse. |
-| [Additive restore experiment](../../Development/migration_bundle_probe/RESTORE.md) | Authentication before destination writes, regular-file restoration, preservation of conflicts, and journaled retry after interruption. |
-| [Directories and links](../../Development/migration_bundle_probe/TREE.md) | Explicit/empty directories, verified relative links, inert unsupported links, and a real synthetic Git workspace roundtrip. |
-| [Approved replacements](../../Development/migration_bundle_probe/REPLACEMENT.md) | Explicit regular-file approvals, independent private backups, and conservative recovery after replacement interruption. |
-| [Disposable collection](../../Development/migration_bundle_probe/COLLECTION.md) | Early synthetic credential holdouts, descriptor traversal, alias checks, private snapshots, and export isolation from later source edits. |
+| [Bundle probe](../../packages/omarchy-migration/docs/PROBE.md) | Experimental encrypted archive, validation, synthetic credential selection, and 18 behavioral tests. |
+| [Runnable export fixture](../../packages/omarchy-migration/docs/FIXTURE.md) | Generated test data, versioned requests, JSON progress/results, cooperative cancellation, and completed-job reuse. |
+| [Additive restore experiment](../../packages/omarchy-migration/docs/RESTORE.md) | Authentication before destination writes, regular-file restoration, preservation of conflicts, and journaled retry after interruption. |
+| [Directories and links](../../packages/omarchy-migration/docs/TREE.md) | Explicit/empty directories, verified relative links, inert unsupported links, and a real synthetic Git workspace roundtrip. |
+| [Approved replacements](../../packages/omarchy-migration/docs/REPLACEMENT.md) | Explicit regular-file approvals, independent private backups, and conservative recovery after replacement interruption. |
+| [Disposable collection](../../packages/omarchy-migration/docs/COLLECTION.md) | Early synthetic credential holdouts, descriptor traversal, alias checks, private snapshots, and export isolation from later source edits. |
 | [Staging components](../../Development/migration_staging/README.md) | GPT identity/bounds, a regular-fixture-only QEMU range broker, capacity arithmetic, and resumable ciphertext publication with 44 tests. |
 
 ## Run and interpret the checks

@@ -51,10 +51,10 @@ Normal context exit and exceptions remove verified plaintext scratch. SIGKILL or
 
 ## Checks and next work
 
-With the [verified age dependency](README.md#run-checks) configured, run:
+With the [verified age dependency](PROBE.md#run-checks) configured, run:
 
 ```bash
-python3 -W error::ResourceWarning -m unittest Development.migration_bundle_probe.test_restore -v
+PYTHONPATH=lib python3 -W error::ResourceWarning -m unittest discover -s test -t test -p test_restore.py -v
 ```
 
 The cases cover byte/metadata roundtrip, no destination writes before authentication, private scratch cleanup, existing files/links/FIFOs, nested parent replacement, changed plans, wrong job/target/manifest binding, duplicate jobs, post-import edits/deletions, publication races, interrupted hardlinks, journal synchronization failures, and recovery by a fresh process after an actual SIGKILL immediately after publication. That process test does not simulate filesystem or host power loss. The shared crypto tests remain necessary because restoration reuses their validator.

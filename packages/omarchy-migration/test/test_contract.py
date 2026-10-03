@@ -9,11 +9,13 @@ import subprocess
 import tempfile
 import unittest
 
-from . import contract, evidence
+import sys
+
+from omarchy_migration import contract, evidence, survey
 
 HERE = Path(__file__).resolve().parent
 VALID = HERE / "fixtures/valid"
-POLICY = HERE / "policy/try-omarchy-82927e9.json"
+POLICY = survey.POLICY_PATH
 
 
 def base(name):
@@ -183,8 +185,8 @@ class CommandTests(unittest.TestCase):
 
     def test_module_entry_point_runs(self):
         result = subprocess.run(
-            ["python3", "-m", "Development.migration_contract.contract", "validate", str(VALID / "plan.json")],
-            cwd=HERE.parents[1], capture_output=True, text=True, check=False)
+            [sys.executable, "-m", "omarchy_migration.contract", "validate", str(VALID / "plan.json")],
+            capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
 

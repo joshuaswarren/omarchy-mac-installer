@@ -1,6 +1,6 @@
 # Disposable encrypted-bundle probe
 
-This synthetic experiment exercises an encrypted archive using age 1.3.2. It is not a shipped exporter, home scanner, or home-directory importer. See the [collaboration plan](../../docs/try-omarchy-migration/collaboration-plan.md) for the intended product and work split.
+This synthetic experiment exercises an encrypted archive using age 1.3.2. It is not a shipped exporter, home scanner, or home-directory importer. See the [collaboration plan](../../../docs/try-omarchy-migration/collaboration-plan.md) for the intended product and work split.
 
 The [runnable integration fixture](FIXTURE.md) now exposes synthetic capabilities, inventory, export progress, cancellation, and completed-job reuse through a development command.
 
@@ -12,7 +12,7 @@ The [approved replacement extension](REPLACEMENT.md) backs up selected differing
 
 ## What the experiment covers
 
-The [credential-aware collection extension](COLLECTION.md) captures caller-created disposable fixture trees into a private snapshot, applies the trusted [contract policy](../migration_contract/CONTRACT.md#policy) (store holdouts, exclusions, transforms and mounts) before traversal, and supplies copied objects to the existing v2 exporter. This is separate from real-home and application-adapter support.
+The [credential-aware collection extension](COLLECTION.md) captures caller-created disposable fixture trees into a private snapshot, applies the trusted [contract policy](CONTRACT.md#policy) (store holdouts, exclusions, transforms and mounts) before traversal, and supplies copied objects to the existing v2 exporter. This is separate from real-home and application-adapter support.
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
 - Streaming content-digest, mode, and timestamp validation for numbered regular-file objects.
@@ -31,7 +31,7 @@ From the repository root, configure the absolute executable path and its SHA-256
 export OMARCHY_TEST_AGE=/absolute/path/to/verified/age
 export OMARCHY_TEST_AGE_SHA256=the_64_character_lowercase_sha256_of_that_executable
 python3 -W error::ResourceWarning -m unittest discover \
-  -s Development/migration_bundle_probe -t . -p 'test_*.py'
+  -s test -t test -p 'test_*.py'
 ```
 
 The suite fails on a missing/mismatched digest or an age version other than 1.3.2. Without `OMARCHY_TEST_AGE`, the suite explicitly skips; a skipped run is not encryption-test evidence. `./test/all` includes this discovery with the same environment contract. Different architectures can use their own independently verified age 1.3.2 binaries and corresponding hashes; no binary is included in this repository.
@@ -46,6 +46,6 @@ Direct probe mappings still stat/hash inputs and later reopen them. The disposab
 
 The header admission policy deliberately accepts only the pinned passphrase profile with scrypt logN 18. It is not a general age decoder. The maintained age implementation performs cryptographic authentication. The PTY/subprocess adapter, its 60-second deadline, and `preexec_fn` are experimental and are not a supported multithreaded GUI integration API. Production process/memory bounds and long-running export progress remain unfinished.
 
-The probe synchronizes ciphertext before non-overwriting publication but does not synchronize the output directory. Its tests establish cancellation/non-overwrite behavior, not crash-durable export completion. Production finalization requires its own durability contract. The separate [staging publisher](../migration_staging/README.md) exercises target-copy durability, not source-export durability.
+The probe synchronizes ciphertext before non-overwriting publication but does not synchronize the output directory. Its tests establish cancellation/non-overwrite behavior, not crash-durable export completion. Production finalization requires its own durability contract. The separate [staging publisher](../../../Development/migration_staging/README.md) exercises target-copy durability, not source-export durability.
 
 No real personal data, application store, credential, VM disk, or native target is accessed by these tests. No installer/Try app connection, application sign-in continuity, reboot survival, or native hardware support is established.

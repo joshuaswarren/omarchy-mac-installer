@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 import uuid
 
-from ..migration_contract import contract
+from . import contract
 from . import probe, restore
 from .categories import category
 from .dependency import configured_age

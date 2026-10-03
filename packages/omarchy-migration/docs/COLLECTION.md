@@ -15,7 +15,7 @@ The request chooses source roots, archive names, and explicitly selected synthet
 }
 ```
 
-The caller separately supplies a trusted [`omarchy-migration/policy/1`](../migration_contract/CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../migration_contract/policy/try-omarchy-82927e9.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
+The caller separately supplies a trusted [`omarchy-migration/policy/1`](CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../lib/omarchy_migration/policies/try-omarchy-82927e9.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
 
 These are fake-store rules. Actual application locations, alternate paths/environment settings, supported source versions, and supported export modes still need qualification. The generic collector does not run adapters; the trusted capability set can enable a test-only byte-copy policy for a fake store. It must never be advertised as real SSH/browser/Codex support. Unsupported stores remain withheld under explicit selection.
 
@@ -52,7 +52,7 @@ The context owns snapshot lifetime and removes it on normal exit or exception. I
 ## Verification and next work
 
 ```bash
-python3 -W error::ResourceWarning -m unittest Development.migration_bundle_probe.test_collection -v
+PYTHONPATH=lib python3 -W error::ResourceWarning -m unittest discover -s test -t test -p test_collection.py -v
 ```
 
 Most cases require only Linux/Python and temporary files. The encrypted roundtrip additionally requires the verified age dependency. Tests prove held-out descendants are neither opened nor listed, default/alternate roots behave consistently, source remapping cannot bypass policy, symlink/hardlink aliases do not copy fake secrets, supported fake opt-in does not enable unavailable adapters, changed sources and resource limits fail before completion, and encrypted restoration retains captured settings/project bytes after later source edits. Policy cases prove excluded paths are never opened, transforms keep only user content with original mode and mtime, untransformable files are withheld, mount links stay inert, and the Try policy cleans a synthetic Try home. Authenticated report provenance in the bundle, original retention and the fixture CLI's move to contract documents are next; live capture and production runtime integration remain separate gates.

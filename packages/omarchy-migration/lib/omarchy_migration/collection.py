@@ -14,7 +14,7 @@ import stat
 import tempfile
 import uuid
 
-from ..migration_contract import contract, policy as migration_policy
+from . import contract, policy as migration_policy
 from . import probe
 
 

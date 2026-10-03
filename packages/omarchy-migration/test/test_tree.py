@@ -15,8 +15,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from Development.migration_bundle_probe import probe, restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import probe, restore
+from omarchy_migration.dependency import configured_age
 
 
 SECRET = b"synthetic-only-otter-maple-window-cobalt"
@@ -368,8 +368,8 @@ class TreeRestoreTests(unittest.TestCase):
 import os, signal, stat, sys
 from pathlib import Path
 from unittest.mock import patch
-from Development.migration_bundle_probe import restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import restore
+from omarchy_migration.dependency import configured_age
 link = os.link
 def crash_on_symlink(source, destination, **kwargs):
     link(source, destination, **kwargs)

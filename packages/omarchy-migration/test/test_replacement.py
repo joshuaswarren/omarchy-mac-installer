@@ -13,8 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from Development.migration_bundle_probe import probe, restore
-from Development.migration_bundle_probe.dependency import configured_age
+from omarchy_migration import probe, restore
+from omarchy_migration.dependency import configured_age
 
 
 SECRET = b"synthetic-only-otter-maple-window-cobalt"
@@ -326,7 +326,7 @@ class ReplacementTests(unittest.TestCase):
         script = """
 import os, signal, sys
 from unittest.mock import patch
-from Development.migration_bundle_probe import restore
+from omarchy_migration import restore
 replace = os.replace
 def kill(source, destination, **kwargs):
     replace(source, destination, **kwargs)

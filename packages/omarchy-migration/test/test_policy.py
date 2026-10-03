@@ -3,10 +3,10 @@ import json
 from pathlib import Path
 import unittest
 
-from . import contract, policy
+from omarchy_migration import contract, policy, survey
 
 HERE = Path(__file__).resolve().parent
-DOCUMENT = json.loads((HERE / "policy/try-omarchy-82927e9.json").read_text())
+DOCUMENT = json.loads(survey.POLICY_PATH.read_text())
 
 # Try's seeded file at e1a0dbe (guest/native-overlay/etc/skel/...).
 SEEDED_MENU = b'''{

@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from Development.migration_bundle_probe import collection, survey
-from Development.migration_contract import contract, policy as migration_policy
+from omarchy_migration import collection, survey
+from omarchy_migration import contract, policy as migration_policy
 
 DOCUMENT = json.loads(survey.POLICY_PATH.read_bytes())
 
