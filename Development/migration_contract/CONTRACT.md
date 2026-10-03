@@ -76,8 +76,10 @@ Validation codes: `not_an_object`, `missing_field`, `unknown_field`, `not_an_int
 - One policy replaces the probe's prefix list (`probe.HOLDOUTS`) and the fixture-only collection layout, adding Chromium and GNOME Keyring stores.
 - The request selects categories and stores by id instead of a single `include_credentials` flag.
 
-## Open questions
+## Decisions
 
-- Time zone: Try records a manual time zone choice in `/var/lib/try-omarchy/timezone.json`, outside the home directory. Decide whether a manual choice is offered as a portable setting.
-- `.config/chromium-flags.conf`: Try appends `--enable-wayland-ime`. The policy strips it; confirm native Omarchy does not need the same flag.
-- `.config/hypr/monitors.lua` holds both Try's display fragment and the user's scaling choice. The policy excludes the whole file as display configuration.
+Recorded 2026-10-02 with Scott.
+
+- Time zone is chosen in the installer, so it is never migrated. Try's `/var/lib/try-omarchy/timezone.json` is outside the home directory and outside the export.
+- `.config/chromium-flags.conf` loses Try's `--enable-wayland-ime` block. If native Omarchy needs the flag, its own installation provides it; restore is additive and never replaces a destination default without an approved conflict resolution.
+- `.config/hypr/monitors.lua` is excluded as a whole. It describes the Mac host display through Try, including scaling, and does not carry over to native hardware.
