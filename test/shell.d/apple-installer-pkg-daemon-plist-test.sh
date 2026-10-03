@@ -13,7 +13,7 @@ pkg_dir=$ROOT/Packaging/pkg
 derive=$pkg_dir/derive-daemon-plist
 
 make_app() {
-  local app=$1 bundle_program=$2 helper=${3:-Contents/Resources/omarchy-apple-installer-helper}
+  local app=$1 bundle_program=$2 helper=${3:-Contents/Library/LaunchServices/$helper_id}
   mkdir -p "$app/Contents/Library/LaunchDaemons" "$app/$(dirname "$helper")"
   printf '#!/bin/sh\n' >"$app/$helper"
   python3 - "$app/Contents/Library/LaunchDaemons/$helper_id.plist" "$bundle_program" "$helper_id" <<'PY'
@@ -34,13 +34,13 @@ read_plist() {
 }
 
 app="$test_tmp/$INSTALLER_APP_NAME.app"
-make_app "$app" Contents/Resources/omarchy-apple-installer-helper
+make_app "$app" Contents/Library/LaunchServices/$helper_id
 out=$test_tmp/daemon.plist
 program=$("$derive" "$app" "$out" /Applications)
-[[ $program == "/Applications/$INSTALLER_APP_NAME.app/Contents/Resources/omarchy-apple-installer-helper" ]] ||
+[[ $program == "/Applications/$INSTALLER_APP_NAME.app/Contents/Library/LaunchServices/$helper_id" ]] ||
   fail "the derived daemon Program is the helper's absolute path under /Applications"
 derived=$(read_plist "$out")
-grep -Fq "\"Program\": \"/Applications/$INSTALLER_APP_NAME.app/Contents/Resources/omarchy-apple-installer-helper\"" <<<"$derived" ||
+grep -Fq "\"Program\": \"/Applications/$INSTALLER_APP_NAME.app/Contents/Library/LaunchServices/$helper_id\"" <<<"$derived" ||
   fail "the derived plist records the absolute Program"
 ! grep -Fq '"BundleProgram"' <<<"$derived" || fail "the derived plist drops the bundle-relative BundleProgram"
 grep -Fq "\"Label\": \"$helper_id\"" <<<"$derived" || fail "the derived plist keeps the Label"
@@ -50,8 +50,8 @@ grep -Fq 'OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT' <<<"$derived" || fail "the de
 pass "the system daemon plist is derived with an absolute Program inside the installed app"
 
 app_missing="$test_tmp/Missing.app"
-make_app "$app_missing" Contents/Resources/omarchy-apple-installer-helper
-rm "$app_missing/Contents/Resources/omarchy-apple-installer-helper"
+make_app "$app_missing" Contents/Library/LaunchServices/$helper_id
+rm "$app_missing/Contents/Library/LaunchServices/$helper_id"
 if "$derive" "$app_missing" "$test_tmp/missing.plist" /Applications >/dev/null 2>&1; then
   fail "derivation rejects a helper that is missing inside the app"
 fi

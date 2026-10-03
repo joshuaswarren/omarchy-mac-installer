@@ -90,4 +90,38 @@
       }
     }
   }
+
+  /// Whether an account may install the privileged helper: macOS only lets
+  /// administrators do that. Asked only when the helper actually needs
+  /// installing, so a standard account can still use a helper already there.
+  public protocol HelperAdministratorChecking: Sendable {
+    func isAdministrator(_ username: String) -> Bool
+  }
+
+  public struct OpenDirectoryAdministratorMembership: HelperAdministratorChecking {
+    public init() {}
+
+    public func isAdministrator(_ username: String) -> Bool {
+      do {
+        let node = try ODNode(
+          session: ODSession.default(),
+          type: ODNodeType(kODNodeTypeLocalNodes)
+        )
+        let user = try node.record(
+          withRecordType: kODRecordTypeUsers,
+          name: username,
+          attributes: nil
+        )
+        let admin = try node.record(
+          withRecordType: kODRecordTypeGroups,
+          name: "admin",
+          attributes: nil
+        )
+        try admin.isMemberRecord(user)
+        return true
+      } catch {
+        return false
+      }
+    }
+  }
 #endif

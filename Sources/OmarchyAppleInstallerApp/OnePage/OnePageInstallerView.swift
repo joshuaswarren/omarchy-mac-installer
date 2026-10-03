@@ -16,6 +16,9 @@ struct OnePageInstallerView: View {
   /// The last host seen, so the header stays on the page through the phases
   /// that no longer carry it.
   @State private var host: HostDisplay?
+  /// The size the owner chose for Omarchy, kept through installation so the
+  /// header names it instead of the most Omarchy could take.
+  @State private var chosenOmarchyBytes: UInt64?
   @State private var contentHeight: CGFloat = 400
   /// Which channel this Mac reads. Owned by the scene so the banner always
   /// names the channel the next preparation will actually fetch; `nil` when
@@ -101,7 +104,8 @@ struct OnePageInstallerView: View {
           onCancel: { session.dismissCredentials() },
           onSubmit: { authorization in
             Task { await session.submit(authorization) }
-          }
+          },
+          onCheckHelper: { await session.checkWhetherHelperIsSwitchedOff() }
         )
       }
     }
@@ -143,7 +147,7 @@ struct OnePageInstallerView: View {
   private var header: some View {
     if let host {
       HStack(spacing: 12) {
-        Text(host.chipAndSpace)
+        Text(host.header(chosenOmarchyBytes: chosenOmarchyBytes))
           .font(OmarchyTheme.eyebrow)
           .textCase(.uppercase)
           .foregroundStyle(OmarchyTheme.accent)
@@ -211,6 +215,7 @@ struct OnePageInstallerView: View {
         editable: plan.isResizable,
         isBusy: session.isBusy,
         onSizeChosen: { bytes in
+          chosenOmarchyBytes = bytes
           session.setAcknowledged(false)
           Task { await session.replan(omarchyBytes: bytes) }
         },
@@ -252,7 +257,7 @@ struct OnePageInstallerView: View {
         Text("Private M3 test: Linux will be installed without disk encryption.")
           .font(OmarchyTheme.body).foregroundStyle(OmarchyTheme.caution)
       }
-      if !helper.isEnabled {
+      if !helper.isReady {
         helperNote
       }
 
@@ -551,12 +556,21 @@ struct OnePageInstallerView: View {
     switch phase {
     case .welcome(let seen):
       host = seen
+      chosenOmarchyBytes = nil
     case .existingInstallRefused(let seen):
       host = seen
+      chosenOmarchyBytes = nil
     case .unsupported(let failure):
       host = failure.device
+      chosenOmarchyBytes = nil
     case .inspecting:
       host = nil
+      chosenOmarchyBytes = nil
+    case .planReview(let plan, _) where chosenOmarchyBytes != nil:
+      // The engine may round a chosen size; name the size it planned.
+      chosenOmarchyBytes = plan.omarchyBytes
+    case .awaitingInstall(let plan, _, _):
+      chosenOmarchyBytes = plan.omarchyBytes
     default:
       break
     }

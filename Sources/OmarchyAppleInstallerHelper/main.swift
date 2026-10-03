@@ -54,7 +54,8 @@ do {
   let workingDirectory = try prepareWorkingDirectory()
   let server = ClosedEngineHelperServer(
     workingDirectory: workingDirectory,
-    executor: PinnedAsahiEngineExecutor()
+    executor: PinnedAsahiEngineExecutor(),
+    selfUninstaller: LaunchdHelperSelfUninstaller(workingDirectory: workingDirectory)
   )
   let delegate = try AuthenticatedEngineXPCListenerDelegate(
     clientCodeSigningRequirement: clientRequirement,

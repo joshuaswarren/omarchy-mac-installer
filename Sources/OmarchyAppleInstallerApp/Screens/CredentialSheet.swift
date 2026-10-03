@@ -17,6 +17,8 @@ struct CredentialSheet: View {
   let approvedSize: String?
   let onCancel: () -> Void
   let onSubmit: (MachineOwnerAuthorization) -> Void
+  /// Asks whether the helper is switched off, as the sheet appears.
+  var onCheckHelper: () async -> Void = {}
 
   @State private var input = CredentialInput(username: "")
   @FocusState private var focus: Field?
@@ -52,6 +54,22 @@ struct CredentialSheet: View {
       .padding(12)
       .background(OmarchyTheme.card, in: RoundedRectangle(cornerRadius: 4))
 
+      if context.helperSwitchedOff && !isSimulation {
+        HStack(alignment: .top, spacing: 8) {
+          Image(systemName: "switch.2")
+          Text(PlainLanguage.authorizeHelperSwitchedOffNotice)
+        }
+        .font(OmarchyTheme.detail)
+        .foregroundStyle(OmarchyTheme.caution)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+      } else if context.mentionsBackgroundItem && !isSimulation {
+        Text(PlainLanguage.authorizeBackgroundItemNotice)
+          .font(OmarchyTheme.detail)
+          .foregroundStyle(OmarchyTheme.secondaryText)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
       field(label: PlainLanguage.authorizeUsernameLabel, reason: input.usernameReason) {
         TextField("", text: isSimulation ? .constant("simulation") : $input.username)
           .textFieldStyle(.roundedBorder)
@@ -73,15 +91,15 @@ struct CredentialSheet: View {
           .disabled(isSimulation)
       }
 
-      if context.isVerifying || context.error == .credentialsRejected {
+      if context.isVerifying || context.error != nil {
         HStack(alignment: .top, spacing: 8) {
           if context.isVerifying {
             ProgressView().controlSize(.small)
             Text(
               showsLongWait ? PlainLanguage.authorizeStillWorking : PlainLanguage.authorizeChecking)
-          } else if context.error == .credentialsRejected {
+          } else if let message = errorMessage {
             Image(systemName: "exclamationmark.triangle")
-            Text(PlainLanguage.authorizeRejected).foregroundStyle(OmarchyTheme.danger)
+            Text(message).foregroundStyle(OmarchyTheme.danger)
           }
         }
         .font(OmarchyTheme.detail)
@@ -93,13 +111,21 @@ struct CredentialSheet: View {
       }
 
       HStack(spacing: 12) {
+        if context.helperSwitchedOff && !isSimulation {
+          Button(PlainLanguage.openLoginItems) {
+            NSWorkspace.shared.open(PlainLanguage.loginItemsSettingsURL)
+          }
+          .omarchySecondaryButton()
+          .fixedSize()
+          .focusEffectDisabled()
+        }
         Spacer(minLength: 0)
         Button(PlainLanguage.authorizeCancel, action: cancel)
           .omarchySecondaryButton()
           .fixedSize()
           .keyboardShortcut(.cancelAction)
           .focusEffectDisabled()
-        Button(isRetry ? "Authorize Recovery" : "Authorize & install", action: submit)
+        Button(primaryTitle, action: submit)
           .omarchyPrimaryButton()
           .fixedSize()
           .keyboardShortcut(.defaultAction)
@@ -134,6 +160,7 @@ struct CredentialSheet: View {
         if !isSimulation { focus = .password }
       }
     }
+    .task { await onCheckHelper() }
     .onDisappear {
       input.clearPassword()
     }
@@ -141,6 +168,26 @@ struct CredentialSheet: View {
 
   private var isRetry: Bool {
     context.kind == .retryRecoveryAuthorization
+  }
+
+  private var primaryTitle: String {
+    if context.helperSwitchedOff && !isSimulation {
+      return isRetry
+        ? PlainLanguage.authorizeTurnOnAndRetry : PlainLanguage.authorizeTurnOnAndInstall
+    }
+    return isRetry ? "Authorize Recovery" : "Authorize & install"
+  }
+
+  private var errorMessage: String? {
+    switch context.error {
+    case .credentialsRejected: PlainLanguage.authorizeRejected
+    case .helperSetupCancelled: PlainLanguage.authorizeHelperCancelled
+    case .helperSwitchedOff: PlainLanguage.authorizeHelperSwitchedOff
+    case .helperSetupFailed: PlainLanguage.authorizeHelperFailed
+    case .helperBusy: PlainLanguage.authorizeHelperBusy
+    case .notAdministrator: PlainLanguage.authorizeNotAdministrator
+    case nil: nil
+    }
   }
 
   private func field<Content: View>(

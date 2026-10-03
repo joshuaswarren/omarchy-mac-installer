@@ -12,9 +12,6 @@ import OmarchyInstallerUXCore
 /// model, and no credential is ever stored here.
 final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
   private let lock = NSLock()
-  private let helperService =
-    InstallerHelperServiceManager.preinstalledSystemDaemon()
-
   private var hostInspection: AppleSiliconHostInspection?
   private var engineInspection: ValidatedEngineTranscript?
   private var engineInspectionTranscript: Data?
@@ -60,7 +57,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   }
 
   var helperStatus: HelperDisplay {
-    HelperDisplay(status: helperService.status)
+    InstallerHelperSetup.display
   }
 
   // MARK: Inspection
@@ -383,6 +380,17 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     helperStatus
   }
 
+  func probeHelperStatus() async -> HelperDisplay {
+    await InstallerHelperSetup.probeDisplay()
+  }
+
+  func ensureHelper(
+    _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+  ) async throws {
+    try await InstallerHelperSetup.ensure(
+      authorization, reenablingSwitchedOff: reenablingSwitchedOff)
+  }
+
   // MARK: Shutdown
 
   /// The graceful route: the same Apple Event the Apple menu sends. Apps with
@@ -567,14 +575,16 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
     let existing = Self.existingInstalls(in: engine)
     let space = existing.isEmpty ? Self.spaceCheck(engine: engine, host: host) : nil
-    var chipAndSpace =
+    let chipAndFreeSpace =
       "\(host.identity.chip) · \(PlainLanguage.bytes(host.storage.containerFreeBytes)) free"
+    var chipAndSpace = chipAndFreeSpace
     if case .fits(let maximumBytes) = space {
       chipAndSpace += " · up to \(PlainLanguage.bytes(maximumBytes)) for Omarchy"
     }
 
     return HostDisplay(
       chipAndSpace: chipAndSpace,
+      chipAndFreeSpace: chipAndFreeSpace,
       supported: !blocked && engine?.support == .supported,
       blockingReason: blockingReason(host: host, engineFailure: engineFailure),
       existingInstalls: existing,

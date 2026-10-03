@@ -8,6 +8,9 @@
   public struct HostDisplay: Equatable, Sendable {
     /// The header line: chip and free space, e.g. "Apple M1 Pro · 464 GB free".
     public let chipAndSpace: String
+    /// The header's chip and free space alone, without what Omarchy could
+    /// take, so the page can name the size the owner chose instead.
+    public let chipAndFreeSpace: String
     public let supported: Bool
     /// Why this Mac cannot install right now, when `supported` is false.
     public let blockingReason: String?
@@ -26,6 +29,7 @@
 
     public init(
       chipAndSpace: String,
+      chipAndFreeSpace: String? = nil,
       supported: Bool,
       blockingReason: String? = nil,
       existingInstalls: [ExistingInstallDisplay] = [],
@@ -33,11 +37,19 @@
       unsupportedModel: UnsupportedModelDisplay? = nil
     ) {
       self.chipAndSpace = chipAndSpace
+      self.chipAndFreeSpace = chipAndFreeSpace ?? chipAndSpace
       self.supported = supported
       self.blockingReason = blockingReason
       self.existingInstalls = existingInstalls
       self.spaceShortfall = spaceShortfall
       self.unsupportedModel = unsupportedModel
+    }
+
+    /// The header line. Before the owner chooses a size it says the most
+    /// Omarchy could take; afterwards it names the size they chose.
+    public func header(chosenOmarchyBytes: UInt64?) -> String {
+      guard let chosenOmarchyBytes else { return chipAndSpace }
+      return "\(chipAndFreeSpace) · \(PlainLanguage.bytes(chosenOmarchyBytes)) for Omarchy"
     }
   }
 
@@ -141,14 +153,47 @@
   }
 
   public struct HelperDisplay: Equatable, Sendable {
-    public let status: InstallerHelperServiceStatus
+    public let status: InstallerHelperStatus
+    /// This build can install the helper itself when the person authorizes.
+    /// Builds without it rely on the installer package having done so.
+    public let canInstall: Bool
 
-    /// The pre-installed system daemon is reachable, so installation may run.
-    public var isEnabled: Bool { status == .enabled }
+    /// The privileged helper is in place.
+    public var isCurrent: Bool { status == .current }
 
-    public init(status: InstallerHelperServiceStatus) {
+    /// Installation may be authorized: the helper is in place, or it will be
+    /// installed with the credentials the person types.
+    public var isReady: Bool { isCurrent || canInstall }
+
+    /// Authorizing will install the helper, so macOS will show a background
+    /// item notice.
+    public var willInstall: Bool { canInstall && !isCurrent }
+
+    /// The person switched the helper off in Login Items, and this build can
+    /// turn it back on if they choose to.
+    public var canTurnBackOn: Bool { canInstall && status == .disabled }
+
+    public init(status: InstallerHelperStatus, canInstall: Bool = false) {
       self.status = status
+      self.canInstall = canInstall
     }
+  }
+
+  /// Why the helper could not be made ready for the action the person
+  /// authorized. Nothing touched the disk.
+  public enum InstallerHelperSetupError: Error, Equatable, Sendable {
+    /// The person cancelled macOS's administrator dialog, or macOS refused.
+    case cancelled
+    /// The helper is switched off in Login Items.
+    case switchedOff
+    /// The helper is busy with another job, for example another user's.
+    case busy
+    /// The account is not an administrator, and the helper needs installing.
+    case notAdministrator
+    /// This build cannot install the helper, and none is in place.
+    case unavailable
+    /// The message is for diagnostics only.
+    case failed(String)
   }
 
   /// One artifact row on the preparing screen, fed by
@@ -373,6 +418,11 @@
 
   public enum CredentialSheetError: String, Equatable, Sendable {
     case credentialsRejected
+    case helperSetupCancelled
+    case helperSwitchedOff
+    case helperSetupFailed
+    case helperBusy
+    case notAdministrator
   }
 
   public struct CredentialSheetContext: Equatable, Sendable {
@@ -383,22 +433,49 @@
     /// stays up (fields locked) so a rejection appears in place instead of the
     /// sheet closing, the screen flipping, and the sheet coming back.
     public let isVerifying: Bool
+    /// Authorizing will install the helper, so the sheet says macOS will show
+    /// a background item notice.
+    public let mentionsBackgroundItem: Bool
+    /// The helper is switched off in Login Items. The sheet says so, and
+    /// authorizing from it turns the helper back on with the typed password;
+    /// the person can open Login Items instead.
+    public let helperSwitchedOff: Bool
 
     public init(
       kind: InstallOperationKind,
       bindingDigest: String,
       error: CredentialSheetError? = nil,
-      isVerifying: Bool = false
+      isVerifying: Bool = false,
+      mentionsBackgroundItem: Bool = false,
+      helperSwitchedOff: Bool = false
     ) {
       self.kind = kind
       self.bindingDigest = bindingDigest
       self.error = error
       self.isVerifying = isVerifying
+      self.mentionsBackgroundItem = mentionsBackgroundItem
+      self.helperSwitchedOff = helperSwitchedOff
     }
 
     public func verifying() -> CredentialSheetContext {
       CredentialSheetContext(
-        kind: kind, bindingDigest: bindingDigest, error: nil, isVerifying: true)
+        kind: kind, bindingDigest: bindingDigest, error: nil, isVerifying: true,
+        mentionsBackgroundItem: mentionsBackgroundItem, helperSwitchedOff: helperSwitchedOff)
+    }
+
+    /// The same sheet, reopened with an error.
+    public func failed(_ error: CredentialSheetError) -> CredentialSheetContext {
+      CredentialSheetContext(
+        kind: kind, bindingDigest: bindingDigest, error: error, isVerifying: false,
+        mentionsBackgroundItem: mentionsBackgroundItem,
+        helperSwitchedOff: helperSwitchedOff || error == .helperSwitchedOff)
+    }
+
+    /// The same sheet, now knowing the helper is switched off.
+    public func withHelperSwitchedOff() -> CredentialSheetContext {
+      CredentialSheetContext(
+        kind: kind, bindingDigest: bindingDigest, error: error, isVerifying: isVerifying,
+        mentionsBackgroundItem: true, helperSwitchedOff: true)
     }
   }
 
@@ -430,9 +507,22 @@
     ) async throws -> PlanPreparationDisplay
     func approve() throws
     func discardApproval()
-    /// Re-reads whether the pre-installed system daemon is present. There is no
-    /// registration or approval step — the package installs the helper.
+    /// Re-reads whether the helper is registered and whether this build can
+    /// install it.
     func refreshHelperStatus() -> HelperDisplay
+    /// Asks the helper itself, so a helper switched off in Login Items shows
+    /// as `.disabled`. Quick: a switched-off helper is not registered, so the
+    /// connection fails at once.
+    func probeHelperStatus() async -> HelperDisplay
+    /// Makes the privileged helper ready for the action just authorized,
+    /// installing or replacing it with these credentials when needed, and
+    /// turning a switched-off helper back on only when the person chose to.
+    /// Called before `execute`; it keeps no credential. Throws
+    /// `EngineXPCSubmissionError.machineOwnerCredentialsRejected` when the
+    /// credentials are wrong, and `InstallerHelperSetupError` otherwise.
+    func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws
     func execute(
       operation: InstallOperationKind,
       authorization: MachineOwnerAuthorization,
