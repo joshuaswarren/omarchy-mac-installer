@@ -47,7 +47,7 @@ Private documents never cross an app boundary in plaintext: the bundle manifest,
 
 ## Policy
 
-A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/e1a0dbe/1`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
+A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/82927e9/1`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
 
 - **credential_stores** `{id, category, roots, adapter}` are matched first, before traversal, stat or open. A store is exported only when explicitly selected and only through an available adapter. Roots may not overlap each other or any rule.
 - **mounts** `{id, path, reason, evidence}` are absolute guest mount points such as the Mac share at `/mnt/mac`. Links into a mount are recorded as inert and never traversed; shared contents need an explicit selection.

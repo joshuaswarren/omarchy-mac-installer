@@ -13,7 +13,7 @@ from . import contract, evidence
 
 HERE = Path(__file__).resolve().parent
 VALID = HERE / "fixtures/valid"
-POLICY = HERE / "policy/try-omarchy-e1a0dbe.json"
+POLICY = HERE / "policy/try-omarchy-82927e9.json"
 
 
 def base(name):

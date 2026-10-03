@@ -28,7 +28,7 @@ MODULE_VERSION = "0.0.0-fixture"
 OMARCHY_VERSION = "4.0.4"
 # The fixture has no real account; contract identities need a person's UID.
 SYNTHETIC_UID = 1000
-POLICY_PATH = Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-e1a0dbe.json"
+POLICY_PATH = Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-82927e9.json"
 FIXTURE_ADAPTERS = {"ssh": "fixture-ssh-bytes/1", "brave": "fixture-browser/1"}
 SUPPORTED_ADAPTERS = tuple(sorted(FIXTURE_ADAPTERS.values()))
 INVENTORY_NAMESPACE = uuid.UUID("5a0e2c1e-7f43-4d1b-9a8e-6c0d3b2f4e17")

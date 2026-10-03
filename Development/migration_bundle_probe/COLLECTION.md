@@ -15,7 +15,7 @@ The request chooses source roots, archive names, and explicitly selected synthet
 }
 ```
 
-The caller separately supplies a trusted [`omarchy-migration/policy/1`](../migration_contract/CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../migration_contract/policy/try-omarchy-e1a0dbe.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
+The caller separately supplies a trusted [`omarchy-migration/policy/1`](../migration_contract/CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../migration_contract/policy/try-omarchy-82927e9.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
 
 These are fake-store rules. Actual application locations, alternate paths/environment settings, supported source versions, and supported export modes still need qualification. The generic collector does not run adapters; the trusted capability set can enable a test-only byte-copy policy for a fake store. It must never be advertised as real SSH/browser/Codex support. Unsupported stores remain withheld under explicit selection.
 

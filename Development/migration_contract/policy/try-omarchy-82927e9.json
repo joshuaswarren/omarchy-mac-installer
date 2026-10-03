@@ -92,7 +92,7 @@
       "reason": "mac_shared_folder"
     }
   ],
-  "revision": "try-omarchy/e1a0dbe/2",
+  "revision": "try-omarchy/82927e9/1",
   "rules": [
     {
       "action": "exclude",
@@ -150,7 +150,7 @@
       "action": "transform",
       "evidence": {
         "path": "guest/native-overlay/etc/skel/.config/omarchy/extensions/omarchy-menu.jsonc",
-        "sha256": "db08438034a03df0afbc11122239c640333f81a16d84179de69758d2e71f5684"
+        "sha256": "612b9dc603549f13fb0673af35f2323731c20a2400c341fd58d0ad83115be600"
       },
       "id": "try-menu-entries",
       "match": "exact",
@@ -319,11 +319,22 @@
       "match": "tree",
       "path": ".local/state/omarchy/indicators",
       "reason": "transient_state"
+    },
+    {
+      "action": "exclude",
+      "evidence": {
+        "path": "guest/scripts/install-settings-integration.py",
+        "sha256": "d1d5d60964acb177a172d923dadf1464436c42e1104d0e7392ef59d63f7fb9c6"
+      },
+      "id": "try-settings-desktop-override",
+      "match": "exact",
+      "path": ".local/share/applications/try-omarchy-settings.desktop",
+      "reason": "vm_integration"
     }
   ],
   "schema": "omarchy-migration/policy/1",
   "source": {
-    "commit": "e1a0dbe9820a8f7554ac3b930c2f13e1f41b25a1",
+    "commit": "82927e98078a452ace33e527a328ef0b12a0af07",
     "provider": "try-omarchy",
     "repository": "https://github.com/omacom/try-omarchy"
   }

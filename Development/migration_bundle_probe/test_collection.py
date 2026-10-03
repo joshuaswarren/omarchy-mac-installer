@@ -498,7 +498,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(self.entry(snapshot, ".local/state/toggles/hypr/flags.lua")["outcome"], "included")
 
     def test_try_policy_drives_collection_of_a_synthetic_try_home(self):
-        document = json.loads((Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-e1a0dbe.json").read_text())
+        document = json.loads((Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-82927e9.json").read_text())
         block = next(rule for rule in document["rules"] if rule["id"] == "try-hypr-input-overrides")["transform"]["block"]
         home = {
             ".config/hypr/input.lua": b"input { kb_layout = us }\n" + block.encode(),
@@ -529,7 +529,7 @@ class CollectionTests(unittest.TestCase):
                            ".local/share/omarchy", ".config/chromium/Default/Cookies", ".local/share/keyrings/login.keyring"):
                 self.assertNotIn(absent, snapshot.paths)
             self.assertEqual(self.entry(snapshot, "Work")["mount"], "mac-share")
-            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/e1a0dbe/2")
+            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/82927e9/1")
             self.assertEqual(snapshot.report["counts"]["held-out"], 2)
             self.assertEqual(snapshot.report["counts"]["excluded"], 3)
             self.assertEqual(snapshot.report["counts"]["transformed"], 3)

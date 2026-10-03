@@ -6,7 +6,7 @@ import unittest
 from . import contract, policy
 
 HERE = Path(__file__).resolve().parent
-DOCUMENT = json.loads((HERE / "policy/try-omarchy-e1a0dbe.json").read_text())
+DOCUMENT = json.loads((HERE / "policy/try-omarchy-82927e9.json").read_text())
 
 # Try's seeded file at e1a0dbe (guest/native-overlay/etc/skel/...).
 SEEDED_MENU = b'''{
@@ -81,6 +81,15 @@ class MatchTests(unittest.TestCase):
                      ".local/share/applications/chatgpt.desktop", ".local/share/zoxide/db.zo"):
             self.assertIsNone(self.policy.match(path), path)
         self.assertEqual(self.policy.match(".local/state/omarchy/toggles/hypr/flags.lua").item["action"], "preserve")
+
+    def test_try_settings_desktop_override_is_excluded_but_other_entries_migrate(self):
+        match = self.policy.match(".local/share/applications/try-omarchy-settings.desktop")
+        self.assertEqual((match.item["id"], match.item["action"]), ("try-settings-desktop-override", "exclude"))
+        self.assertIsNone(self.policy.match(".local/share/applications/try-omarchy-settings.desktop.bak"))
+
+    def test_menu_removal_handles_the_current_try_entry(self):
+        current = b'{\n  "setup.try-omarchy": {\n    "icon": "x",\n    "iconFont": "omarchy",\n    "label": "Try Omarchy Settings"\n  }\n}\n'
+        self.assertEqual(json.loads(self.policy.transform(rule("try-menu-entries"), current).data), {})
 
     def test_unknown_personal_paths_are_not_matched(self):
         for path in ("Documents/report.md", ".config/nvim/init.lua", ".bashrc", ".sshconfig"):
