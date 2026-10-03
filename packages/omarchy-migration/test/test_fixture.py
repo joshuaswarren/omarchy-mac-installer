@@ -18,7 +18,7 @@ from omarchy_migration import contract
 
 
 COMMAND = [sys.executable, "-m", "omarchy_migration.fixture"]
-SAMPLE = Path(__file__).resolve().parent / "fixture-request.json"
+SAMPLE = Path(__file__).resolve().parent / "fixtures/fixture-request.json"
 EXPORTED_FILES = {
     "Projects/demo/changed.txt", "Projects/demo/untracked.txt",
     ".config/example-theme/selected", ".config/unfamiliar-example/settings",
