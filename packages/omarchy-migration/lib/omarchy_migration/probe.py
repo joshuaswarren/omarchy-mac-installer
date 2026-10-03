@@ -26,7 +26,8 @@ import uuid
 
 
 SCHEMA = "omarchy-migration-probe/1"
-TREE_SCHEMA = "omarchy-migration-probe/2"
+TREE_SCHEMA = "omarchy-migration/bundle/2"
+PROVENANCE_OUTCOMES = ("included", "transformed", "held-out", "excluded", "unsupported", "inert-link")
 MAX_MANIFEST = 1024 * 1024
 MAX_ENTRIES = 1024
 MAX_TOTAL = 1024 * 1024 * 1024
@@ -167,12 +168,62 @@ def link_target(entry, entries):
     return final, tuple(sorted(directories))
 
 
+def _label(value, limit=128):
+    return (type(value) is str and 0 < len(value.encode("utf-8")) <= limit and value.isascii()
+            and value[0].isalnum() and all(char.isalnum() or char in "._/-_" for char in value))
+
+
+def _relative(value):
+    """An archive or source path inside the home; empty means the home itself."""
+    return (type(value) is str and len(value.encode("utf-8")) <= 4096 and "\0" not in value
+            and (value == "" or all(part not in ("", ".", "..") for part in value.split("/"))))
+
+
+def validate_provenance(provenance):
+    """Authenticated export provenance: policy, request and collection exceptions."""
+    if not isinstance(provenance, dict) or set(provenance) != {"policy_revision", "policy_sha256", "request_sha256", "collection"}:
+        raise Rejected("provenance fields")
+    if not _label(provenance["policy_revision"]):
+        raise Rejected("provenance policy revision")
+    for key in ("policy_sha256", "request_sha256"):
+        value = provenance[key]
+        if type(value) is not str or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise Rejected("provenance digest")
+    collection = provenance["collection"]
+    if not isinstance(collection, dict) or set(collection) != {"counts", "exceptions"}:
+        raise Rejected("provenance collection fields")
+    counts = collection["counts"]
+    if (not isinstance(counts, dict) or set(counts) != set(PROVENANCE_OUTCOMES)
+            or any(type(value) is not int or not 0 <= value <= MAX_ENTRIES for value in counts.values())):
+        raise Rejected("provenance counts")
+    exceptions = collection["exceptions"]
+    if not isinstance(exceptions, list) or len(exceptions) > MAX_ENTRIES:
+        raise Rejected("provenance exception count")
+    for item in exceptions:
+        if (not isinstance(item, dict) or set(item) != {"source", "archive", "outcome", "reason", "store", "rule", "mount"}
+                or not _relative(item["source"]) or not _relative(item["archive"])
+                or item["outcome"] not in PROVENANCE_OUTCOMES or item["outcome"] == "included"
+                or not _label(item["reason"])
+                or any(item[key] is not None and not _label(item[key]) for key in ("store", "rule", "mount"))):
+            raise Rejected("provenance exception")
+    tally = {outcome: 0 for outcome in PROVENANCE_OUTCOMES}
+    for item in exceptions:
+        tally[item["outcome"]] += 1
+    if any(tally[outcome] != counts[outcome] for outcome in PROVENANCE_OUTCOMES if outcome != "included"):
+        raise Rejected("provenance counts disagree with exceptions")
+
+
 def validate_manifest(manifest):
-    if not isinstance(manifest, dict) or set(manifest) != {"schema", "export_id", "entries"}:
+    if not isinstance(manifest, dict) or not {"schema", "export_id", "entries"} <= set(manifest):
         raise Rejected("manifest fields")
     if manifest["schema"] not in (SCHEMA, TREE_SCHEMA):
         raise Rejected("unsupported schema")
     tree = manifest["schema"] == TREE_SCHEMA
+    # Only tree bundles may carry provenance; v1 stays exactly three fields.
+    if set(manifest) - {"schema", "export_id", "entries"} - ({"provenance"} if tree else set()):
+        raise Rejected("manifest fields")
+    if "provenance" in manifest:
+        validate_provenance(manifest["provenance"])
     if not isinstance(manifest["export_id"], str):
         raise Rejected("export identity")
     try:

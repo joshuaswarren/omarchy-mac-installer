@@ -533,6 +533,17 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(snapshot.report["counts"]["held-out"], 2)
             self.assertEqual(snapshot.report["counts"]["excluded"], 3)
             self.assertEqual(snapshot.report["counts"]["transformed"], 3)
+            provenance = snapshot.manifest["provenance"]
+            self.assertEqual((provenance["policy_revision"], provenance["policy_sha256"]),
+                             ("try-omarchy/82927e9/1", snapshot.report["policy_sha256"]))
+            self.assertEqual(provenance["collection"]["counts"], snapshot.report["counts"])
+            exceptions = {item["source"]: (item["outcome"], item["rule"] or item["store"] or item["mount"])
+                          for item in provenance["collection"]["exceptions"]}
+            self.assertEqual(exceptions[".config/hypr/monitors.lua"], ("excluded", "try-hypr-monitors"))
+            self.assertEqual(exceptions[".config/hypr/input.lua"], ("transformed", "try-hypr-input-overrides"))
+            self.assertEqual(exceptions[".config/chromium"], ("held-out", "chromium"))
+            self.assertEqual(exceptions["Work"], ("inert-link", "mac-share"))
+            self.assertNotIn("Documents/notes.md", exceptions)
 
     def test_encrypted_snapshot_roundtrip_survives_source_edits_preserves_metadata_and_holdouts(self):
         age = configured_age()

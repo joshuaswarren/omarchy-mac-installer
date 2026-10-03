@@ -89,7 +89,10 @@ def check_receipt(bundle, receipt):
             raise ReviewError("receipt_invalid")
     except contract.ContractError:
         raise ReviewError("receipt_invalid") from None
-    if receipt["export_id"] != bundle.export_id or receipt["bundle"]["sha256"] != bundle.ciphertext_sha256:
+    provenance = bundle._manifest.get("provenance") or {}
+    if (receipt["export_id"] != bundle.export_id or receipt["bundle"]["sha256"] != bundle.ciphertext_sha256
+            or receipt["policy_revision"] != provenance.get("policy_revision", receipt["policy_revision"])):
+        # The authenticated manifest, not the public receipt, decides the policy revision.
         raise ReviewError("receipt_mismatch")
 
 
@@ -98,6 +101,9 @@ def plan_document(bundle, actions, receipt, account_uid, binding):
     if not actions:
         # report/1 needs at least one category; an empty export has nothing to review.
         raise ReviewError("empty_bundle")
+    provenance = bundle._manifest.get("provenance")
+    if provenance is None:
+        raise ReviewError("provenance_missing")
     entries = _entries(bundle)
     counts = dict.fromkeys(("create", "present", "replace", "conflict", "omit", "inert"), 0)
     required = 0
@@ -109,7 +115,7 @@ def plan_document(bundle, actions, receipt, account_uid, binding):
     document = {
         "schema": contract.PLAN, "plan_id": plan_id(bundle, actions, account_uid, binding, receipt),
         "export_id": bundle.export_id, "bundle_sha256": bundle.ciphertext_sha256,
-        "policy_revision": receipt["policy_revision"], "destination": {"account_uid": account_uid},
+        "policy_revision": provenance["policy_revision"], "destination": {"account_uid": account_uid},
         "actions": counts, "packages": {"reinstall": 0, "manual": 0}, "required_bytes": required,
     }
     contract.validate(document)

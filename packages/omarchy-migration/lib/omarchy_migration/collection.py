@@ -350,7 +350,7 @@ class _Snapshot:
             entry = by_path.get(item["archive"])
             if item["reason"] == "link-metadata" and probe.link_target(entry, by_path) is None:
                 item.update(outcome="inert-link", reason="target-unavailable")
-        outcomes = ("included", "transformed", "held-out", "excluded", "unsupported", "inert-link")
+        outcomes = probe.PROVENANCE_OUTCOMES
         self.report = {
             "schema": REPORT_SCHEMA, "request_id": self.request["request_id"],
             "request_sha256": hashlib.sha256(_json_bytes(self.request)).hexdigest(),
@@ -361,6 +361,15 @@ class _Snapshot:
             "entries": self.items, "counts": {outcome: sum(item["outcome"] == outcome for item in self.items)
                                                for outcome in outcomes},
         }
+        # Bind what was withheld or changed into the authenticated manifest.
+        self.manifest["provenance"] = {
+            "policy_revision": self.policy.revision,
+            "policy_sha256": self.report["policy_sha256"],
+            "request_sha256": self.report["request_sha256"],
+            "collection": {"counts": dict(self.report["counts"]),
+                           "exceptions": [dict(item) for item in self.items if item["outcome"] != "included"]},
+        }
+        probe.validate_manifest(self.manifest)
 
 
 @contextlib.contextmanager

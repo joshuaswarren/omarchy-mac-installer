@@ -138,6 +138,10 @@ class ExportFixtureTests(unittest.TestCase):
                          (self.request["request_id"], self.request["policy_revision"]))
         files, decoded = self.decoded_files()
         self.assertEqual(files, EXPORTED_FILES)
+        self.assertEqual(decoded["schema"], contract.BUNDLE)
+        self.assertEqual(decoded["provenance"]["policy_revision"], receipt["policy_revision"])
+        excluded = {item["source"] for item in decoded["provenance"]["collection"]["exceptions"] if item["outcome"] == "excluded"}
+        self.assertEqual(excluded, {".config/hypr/monitors.lua"})
         self.assertEqual(receipt["estimates"]["entries"], len(decoded["entries"]))
         self.assertEqual(receipt["bundle"]["bytes"], (self.output / "bundle.age").stat().st_size)
         before = (self.output / "bundle.age").stat()

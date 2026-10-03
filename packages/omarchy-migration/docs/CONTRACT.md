@@ -16,7 +16,7 @@ Every document is a UTF-8 JSON object whose `schema` names exactly one document 
 | `omarchy-migration/plan/1` | public | native module → installer UI | Reviewable summary of an import plan |
 | `omarchy-migration/report/1` | public | native module → app | Per-category outcome with reason codes |
 | `omarchy-migration/policy/1` | trusted input | shipped with the module | Credential stores, mounts and provider rules for one source build |
-| `omarchy-migration/bundle/2` | private | inside the ciphertext | Manifest and TAR objects; the probe's `omarchy-migration-probe/2` tree format |
+| `omarchy-migration/bundle/2` | private | inside the ciphertext | Manifest with authenticated provenance, and TAR objects |
 
 Private documents never cross an app boundary in plaintext: the bundle manifest, restore journal, collection report and per-file results stay inside the ciphertext or the owner's 0700 job directory.
 
@@ -59,7 +59,7 @@ Unknown personal configuration that matches no rule is preserved. Display, graph
 
 ## Bundle and encryption
 
-The bundle is an age v1 file with exactly one scrypt recipient at work factor 18, a four-line header no longer than 80 bytes per line, and no other stanza. The checked header bytes are what the decoder passes to age. The plaintext is a USTAR stream whose first member is the canonical manifest (`omarchy-migration/bundle/2`, currently written as the probe's `omarchy-migration-probe/2`), followed by one regular member per file entry in manifest order. See the probe's `TREE.md` and `README.md` for entry, link and size rules. A bundle is published only after authenticated EOF; truncated, tampered or wrong-passphrase bundles never produce output.
+The bundle is an age v1 file with exactly one scrypt recipient at work factor 18, a four-line header no longer than 80 bytes per line, and no other stanza. The checked header bytes are what the decoder passes to age. The plaintext is a USTAR stream whose first member is the canonical manifest (`omarchy-migration/bundle/2`), followed by one regular member per file entry in manifest order. The manifest's `provenance` records the policy revision and digests of the policy and collection request, plus every collection exception (held out, excluded, transformed, unsupported or inert link, with its store, rule or mount) and outcome counts that must agree with them. Because it is inside the authenticated archive, an importer takes the policy revision from it: a receipt naming another revision is refused, and bundles without provenance cannot be planned. See the probe's `TREE.md` and `README.md` for entry, link and size rules. A bundle is published only after authenticated EOF; truncated, tampered or wrong-passphrase bundles never produce output.
 
 ## Error codes
 

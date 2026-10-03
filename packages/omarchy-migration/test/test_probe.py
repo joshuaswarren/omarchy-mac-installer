@@ -10,6 +10,7 @@ import tarfile
 import tempfile
 import tracemalloc
 import unittest
+import uuid
 from unittest.mock import patch
 
 from omarchy_migration import probe
@@ -248,6 +249,49 @@ class BundleProbe(unittest.TestCase):
         self.assertLess(peak, 4 * 1024 * 1024)
         print(f"probe_stream_bytes={source.stat().st_size} python_peak_bytes={peak}")
 
+
+
+class ProvenanceTests(unittest.TestCase):
+    def manifest(self, **changes):
+        provenance = {
+            "policy_revision": "try-omarchy/82927e9/1", "policy_sha256": "a" * 64, "request_sha256": "b" * 64,
+            "collection": {"counts": {"included": 3, "transformed": 1, "held-out": 1, "excluded": 1,
+                                      "unsupported": 0, "inert-link": 0},
+                           "exceptions": [
+                               {"source": ".config/hypr/input.lua", "archive": ".config/hypr/input.lua", "outcome": "transformed",
+                                "reason": "try_appended_fragment", "store": None, "rule": "try-hypr-input-overrides", "mount": None},
+                               {"source": ".ssh", "archive": ".ssh", "outcome": "held-out", "reason": "adapter-unavailable",
+                                "store": "ssh", "rule": None, "mount": None},
+                               {"source": ".config/hypr/monitors.lua", "archive": ".config/hypr/monitors.lua", "outcome": "excluded",
+                                "reason": "display_configuration", "store": None, "rule": "try-hypr-monitors", "mount": None}]}}
+        manifest = {"schema": probe.TREE_SCHEMA, "export_id": str(uuid.uuid4()), "entries": [], "provenance": provenance}
+        for path, value in changes.items():
+            target = manifest
+            keys = path.split(".")
+            for key in keys[:-1]:
+                target = target[int(key)] if key.isdigit() else target[key]
+            if value is KeyError:
+                del target[keys[-1]]
+            else:
+                target[int(keys[-1]) if keys[-1].isdigit() else keys[-1]] = value
+        return manifest
+
+    def test_tree_bundle_schema_is_the_contract_name_and_accepts_provenance(self):
+        self.assertEqual(probe.TREE_SCHEMA, "omarchy-migration/bundle/2")
+        probe.validate_manifest(self.manifest())
+        probe.validate_manifest(self.manifest(provenance=KeyError))
+
+    def test_malformed_provenance_is_rejected(self):
+        for change in ({"schema": probe.SCHEMA}, {"provenance.policy_revision": "Not A Label"},
+                       {"provenance.policy_sha256": "A" * 64}, {"provenance.extra": 1},
+                       {"provenance.collection.counts.excluded": 2},
+                       {"provenance.collection.exceptions.0.outcome": "included"},
+                       {"provenance.collection.exceptions.1.source": "../.ssh"},
+                       {"provenance.collection.exceptions.2.rule": "Bad Rule"},
+                       {"provenance.collection.exceptions.0.mount": 7},
+                       {"unexpected": True}):
+            with self.subTest(change=change), self.assertRaises(probe.Rejected):
+                probe.validate_manifest(self.manifest(**change))
 
 if __name__ == "__main__":
     unittest.main()

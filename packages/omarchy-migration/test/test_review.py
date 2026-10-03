@@ -23,7 +23,8 @@ class FakeBundle:
     def __init__(self, receipt):
         self.export_id = receipt["export_id"]
         self.ciphertext_sha256 = receipt["bundle"]["sha256"]
-        self._manifest = {"export_id": self.export_id, "entries": []}
+        self._manifest = {"export_id": self.export_id, "entries": [],
+                          "provenance": {"policy_revision": receipt["policy_revision"]}}
 
 
 class ReasonTableTests(unittest.TestCase):
@@ -82,6 +83,16 @@ class DocumentTests(unittest.TestCase):
     def test_empty_bundle_cannot_be_planned(self):
         with self.assertRaisesRegex(review.ReviewError, "empty_bundle"):
             review.plan_document(self.bundle, (), self.receipt, 1000, {"job": [1, 2]})
+
+    def test_bundle_without_provenance_cannot_be_planned(self):
+        del self.bundle._manifest["provenance"]
+        with self.assertRaisesRegex(review.ReviewError, "provenance_missing"):
+            review.plan_document(self.bundle, (restore.Action("Documents/a", "create", "new file"),), self.receipt, 1000, {})
+
+    def test_receipt_revision_must_match_the_authenticated_provenance(self):
+        receipt = dict(self.receipt, policy_revision="try-omarchy/other/1")
+        with self.assertRaisesRegex(review.ReviewError, "receipt_mismatch"):
+            review.check_receipt(self.bundle, receipt)
 
     def test_plan_id_covers_receipt_binding_and_actions(self):
         actions = (restore.Action("Documents/a", "create", "new file"),)
@@ -193,14 +204,15 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual((refused.returncode, json.loads(refused.stderr)["error"]), (1, "plan_changed"))
         self.assertEqual(list(other.iterdir()), [])
 
-    def test_edited_receipt_revision_changes_the_plan_and_blocks_the_reviewed_id(self):
+    def test_receipt_with_another_policy_revision_is_refused(self):
         plan = contract.parse(self.command("plan").stdout.encode())
+        self.assertEqual(plan["policy_revision"], self.receipt["policy_revision"])
         edited = self.root / "edited-receipt.json"
         edited.write_text(json.dumps(dict(self.receipt, policy_revision="try-omarchy/82927e9/9")))
-        replanned = contract.parse(self.command("plan", receipt=edited).stdout.encode())
-        self.assertNotEqual(replanned["plan_id"], plan["plan_id"])
-        refused = self.command("apply", "--plan-id", plan["plan_id"], receipt=edited)
-        self.assertEqual((refused.returncode, json.loads(refused.stderr)["error"]), (1, "plan_changed"))
+        for operation, extra in (("plan", ()), ("apply", ("--plan-id", plan["plan_id"]))):
+            refused = self.command(operation, *extra, receipt=edited)
+            with self.subTest(operation=operation):
+                self.assertEqual((refused.returncode, json.loads(refused.stderr)["error"]), (1, "receipt_mismatch"))
         self.assertEqual(list(self.target.iterdir()), [])
 
     def test_plan_id_option_is_only_for_apply(self):

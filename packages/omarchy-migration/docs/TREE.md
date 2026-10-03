@@ -4,7 +4,7 @@ This extends the [authenticated restoration experiment](RESTORE.md) to explicit 
 
 ## Experimental manifest v2
 
-The original `omarchy-migration-probe/1` file-only format remains readable. `omarchy-migration-probe/2` adds a required `kind` to each entry. The top-level fields remain `schema`, canonical UUID `export_id`, and `entries`. Entries retain an index-derived `objects/00000000` identity even when they have no payload object.
+The original `omarchy-migration-probe/1` file-only format remains readable. `omarchy-migration/bundle/2` (formerly `omarchy-migration-probe/2`) adds a required `kind` to each entry. The top-level fields are `schema`, canonical UUID `export_id`, `entries` and, for collected exports, `provenance` (see [CONTRACT.md](CONTRACT.md#bundle-and-encryption)). Entries retain an index-derived `objects/00000000` identity even when they have no payload object.
 
 | Kind | Exact entry fields | Archive payload |
 | --- | --- | --- |
