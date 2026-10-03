@@ -12,11 +12,11 @@ The [approved replacement extension](REPLACEMENT.md) backs up selected differing
 
 ## What the experiment covers
 
-The [credential-aware collection extension](COLLECTION.md) captures caller-created disposable fixture trees into a private snapshot, applies trusted store holdouts before traversal, and supplies copied objects to the existing v2 exporter. This is separate from real-home and application-adapter support.
+The [credential-aware collection extension](COLLECTION.md) captures caller-created disposable fixture trees into a private snapshot, applies the trusted [contract policy](../migration_contract/CONTRACT.md#policy) (store holdouts, exclusions, transforms and mounts) before traversal, and supplies copied objects to the existing v2 exporter. This is separate from real-home and application-adapter support.
 
 - Whole-archive encryption, including the private manifest and filenames, with a deliberately synthetic transfer passphrase.
 - Streaming content-digest, mode, and timestamp validation for numbered regular-file objects.
-- Fixture credential holdouts before serialization and explicit inclusion. Fake SSH, Brave, 1Password, and Codex examples are not qualified application adapters.
+- Credential holdouts come from the shared policy and apply before serialization, with explicit inclusion only through fixture adapters. Fake SSH and Brave examples are not qualified application adapters.
 - Rejection of wrong passphrases, tampering/truncation, unsupported schema/age headers, excessive declared work, unsafe paths, duplicate entries, and malformed metadata.
 - Passing the already checked age header to the decoder so a subsequent source-header change cannot increase key-derivation work.
 - Cancellation and non-overwriting publication of complete ciphertext; a successful decode requires authenticated EOF and a successful age exit.
@@ -42,7 +42,7 @@ Tests create fake source files and encrypted output in a private temporary direc
 
 `decode` validates and hashes the archive; it does not extract files. The experimental `verified_bundle` interface reuses that validator to stage private numbered objects, then allows restoration through `Restorer`. The v2 manifest represents directories and symbolic links as authenticated metadata; TAR links, hardlinks, PAX extensions, and device entries remain rejected. Directory metadata finalization, broader link support, extended metadata, production replacement/backup integration, full account mapping, and real-home qualification remain production work.
 
-Direct probe mappings still stat/hash inputs and later reopen them. The disposable collector isolates copied bytes and detects source changes under a quiescent-fixture contract; it does not establish consistent capture of live applications. Its configurable fake-store holdouts exercise early pruning and aliases, but production recognized paths, actual layouts and application support remain unqualified.
+Direct probe mappings still stat/hash inputs and later reopen them. The disposable collector isolates copied bytes and detects source changes under a quiescent-fixture contract; it does not establish consistent capture of live applications. Its policy-driven holdouts exercise early pruning and aliases, but production recognized paths, actual layouts and application support remain unqualified.
 
 The header admission policy deliberately accepts only the pinned passphrase profile with scrypt logN 18. It is not a general age decoder. The maintained age implementation performs cryptographic authentication. The PTY/subprocess adapter, its 60-second deadline, and `preexec_fn` are experimental and are not a supported multithreaded GUI integration API. Production process/memory bounds and long-running export progress remain unfinished.
 

@@ -67,15 +67,6 @@ class BundleProbe(unittest.TestCase):
         for sentinel in (b"FAKE-CODEX-CREDENTIAL", b"manifest.json", b"catppuccin", b"Projects/demo"):
             self.assertNotIn(sentinel, ciphertext)
 
-    def test_default_selection_excludes_fixture_credentials_before_serialization(self):
-        selected = probe.selected_files(self.files)
-        self.assertEqual(set(selected), {name for name in self.files if name.startswith(("Projects/", ".config/example-theme/"))})
-        manifest = probe.make_manifest(selected)
-        output = self.root / "opted-out.age"
-        probe.encrypt(AGE, SECRET, output, lambda stream: probe.write_archive(stream, manifest, selected))
-        self.assertEqual(probe.decode(AGE, SECRET, output), manifest)
-        self.assertEqual(probe.selected_files(self.files, include_credentials=True), self.files)
-
     def test_wrong_passphrase_has_no_completed_decode(self):
         with self.assertRaises(probe.Rejected):
             probe.decode(AGE, b"wrong-synthetic-passphrase", self.bundle)

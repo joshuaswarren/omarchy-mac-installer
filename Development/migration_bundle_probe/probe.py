@@ -36,7 +36,6 @@ CHUNK = 64 * 1024
 SCRYPT_LOG_N = b"18"
 MAX_AGE_LINE = 80
 # Fixture-only holdouts. Real adapter paths/aliases still require qualification.
-HOLDOUTS = (".ssh", ".gnupg", ".config/BraveSoftware", ".config/1Password", ".codex")
 
 
 class Rejected(ValueError):
@@ -78,15 +77,6 @@ def checked_age_header(source):
 def digest_file(path):
     with open(path, "rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def selected_files(files, include_credentials=False):
-    return {
-        name: path
-        for name, path in files.items()
-        if include_credentials
-        or not any(name == root or name.startswith(root + "/") for root in HOLDOUTS)
-    }
 
 
 def make_manifest(files):

@@ -1,5 +1,13 @@
 {
-  "schema": "omarchy-migration-fixture/1",
+  "schema": "omarchy-migration/export-request/1",
   "request_id": "780b82aa-3c95-4f88-8c64-859146068e8f",
-  "include_credentials": false
+  "inventory_id": "a0585dff-e81c-5fab-b4f1-1e52f7819a3b",
+  "policy_revision": "try-omarchy/e1a0dbe/1/fixture",
+  "selection": {
+    "categories": [
+      "files-and-config",
+      "projects"
+    ],
+    "credential_stores": []
+  }
 }

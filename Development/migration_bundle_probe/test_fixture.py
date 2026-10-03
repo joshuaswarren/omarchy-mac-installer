@@ -1,4 +1,4 @@
-"""Exercise the runnable fixture's observable request/result boundaries."""
+"""Exercise the runnable fixture's contract request/result boundaries."""
 
 import json
 import os
@@ -12,50 +12,86 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from Development.migration_bundle_probe import fixture, probe
+from Development.migration_bundle_probe import fixture, probe, restore
 from Development.migration_bundle_probe.dependency import configured_age
+from Development.migration_contract import contract
 
 
 COMMAND = [sys.executable, "-m", "Development.migration_bundle_probe.fixture"]
+SAMPLE = Path(__file__).resolve().parent / "fixture-request.json"
+EXPORTED_FILES = {
+    "Projects/demo/changed.txt", "Projects/demo/untracked.txt",
+    ".config/example-theme/selected", ".config/unfamiliar-example/settings",
+    ".config/hypr/input.lua", ".config/chromium-flags.conf",
+    ".config/omarchy/extensions/omarchy-menu.jsonc",
+}
+
+
+def export_request(**selection):
+    policy = fixture.fixture_policy()
+    files, links = fixture.examples(policy)
+    return {"schema": contract.EXPORT_REQUEST, "request_id": str(uuid.uuid4()),
+            "inventory_id": fixture.inventory_id(policy, files, links), "policy_revision": policy["revision"],
+            "selection": {"categories": ["files-and-config", "projects"], "credential_stores": [], **selection}}
 
 
 class RequestTests(unittest.TestCase):
     def test_malformed_duplicate_and_oversized_requests_fail_before_job_creation(self):
-        request = {"schema": fixture.SCHEMA, "request_id": str(uuid.uuid4()), "include_credentials": False}
-        duplicate = json.dumps(request)[:-1] + ', "include_credentials": true}'
+        request = export_request()
+        duplicate = json.dumps(request)[:-1] + ', "request_id": "' + str(uuid.uuid4()) + '"}'
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source, output = root / "request.json", root / "job"
-            for raw, error in ((b"{", "fixture_operation_failed"),
-                               (duplicate.encode(), "fixture_operation_failed"),
+            for raw, error in ((b"{", "invalid_request"),
+                               (duplicate.encode(), "invalid_request"),
+                               (json.dumps({**request, "passphrase": "x"}).encode(), "invalid_request"),
+                               (json.dumps(json.loads((Path(__file__).parents[1] / "migration_contract/fixtures/valid/plan.json").read_text())).encode(),
+                                "unsupported_request"),
                                (b" " * 8193, "oversized_request")):
                 source.write_bytes(raw)
                 result = subprocess.run(COMMAND + ["export", "--request", str(source),
                                         "--output-directory", str(output)],
                                         capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 1)
-                self.assertEqual(json.loads(result.stdout)["error"], error)
-                self.assertFalse(output.exists())
+                with self.subTest(error=error):
+                    self.assertEqual(result.returncode, 1)
+                    event = json.loads(result.stdout)
+                    self.assertEqual(contract.validate(event), contract.PROGRESS)
+                    self.assertEqual(event["error"], error)
+                    self.assertFalse(output.exists())
 
-    def test_capabilities_and_inventory_need_no_crypto_dependency(self):
+    def test_capabilities_and_inventory_are_contract_documents_without_crypto(self):
         environment = dict(os.environ)
         environment.pop("OMARCHY_TEST_AGE", None)
+        documents = {}
         for operation in ("capabilities", "inventory"):
             result = subprocess.run(COMMAND + [operation], env=environment, capture_output=True,
-                                    text=True, timeout=10, check=True)
-            document = json.loads(result.stdout)
-            self.assertTrue(document["synthetic"])
-            self.assertEqual(document["schema"], fixture.SCHEMA)
-        self.assertFalse(document["categories"]["credentials"]["default_selected"])
+                                    text=True, timeout=30, check=True)
+            documents[operation] = contract.parse(result.stdout.encode())
+        capabilities, inventory = documents["capabilities"], documents["inventory"]
+        self.assertEqual(capabilities["policy_revisions"], [inventory["policy_revision"]])
+        available = {adapter["id"] for adapter in capabilities["adapters"] if adapter["available"]}
+        self.assertEqual(available, set(fixture.SUPPORTED_ADAPTERS))
+        categories = {item["id"]: item for item in inventory["categories"]}
+        self.assertEqual((categories["files-and-config"]["files"], categories["projects"]["files"]), (5, 2))
+        stores = {item["id"]: item for item in inventory["credential_stores"]}
+        self.assertEqual((stores["ssh"]["present"], stores["ssh"]["adapter_available"]), (True, True))
+        self.assertEqual((stores["chromium"]["present"], stores["chromium"]["adapter_available"]), (False, False))
+        self.assertEqual(json.loads(SAMPLE.read_text())["inventory_id"], inventory["inventory_id"])
 
-    def test_requests_require_explicit_boolean_selection_and_canonical_identity(self):
-        valid = {"schema": fixture.SCHEMA, "request_id": str(uuid.uuid4()), "include_credentials": False}
-        self.assertEqual(fixture.request_document(valid), valid)
-        for key, value in (("schema", "future/999"), ("request_id", "../other"),
-                           ("include_credentials", "false"), ("include_credentials", 1),
-                           ("source_home", "/home/someone")):
-            with self.subTest(key=key, value=value), self.assertRaises(fixture.FixtureError):
-                fixture.request_document({**valid, key: value})
+    def test_requests_bind_to_this_inventory_policy_and_available_stores(self):
+        policy = fixture.fixture_policy()
+        fixture.check_request(export_request(credential_stores=["ssh"]), policy)
+        for request, error in (
+                ({**export_request(), "inventory_id": str(uuid.uuid4())}, "inventory_changed"),
+                ({**export_request(), "policy_revision": "try-omarchy/e1a0dbe/1"}, "policy_revision_mismatch"),
+                (export_request(categories=["photos"]), "unknown_category"),
+                (export_request(credential_stores=["keychain"]), "unknown_credential_store"),
+                (export_request(credential_stores=["chromium"]), "credential_store_unavailable"),
+                (export_request(categories=["projects"], credential_stores=["ssh"]), "credential_store_outside_selection")):
+            with self.subTest(error=error), self.assertRaises(fixture.FixtureError) as caught:
+                contract.validate(request)
+                fixture.check_request(request, policy)
+            self.assertEqual(str(caught.exception), error)
 
 
 class ExportFixtureTests(unittest.TestCase):
@@ -70,7 +106,7 @@ class ExportFixtureTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.output = self.root / "job"
-        self.request = {"schema": fixture.SCHEMA, "request_id": str(uuid.uuid4()), "include_credentials": False}
+        self.request = export_request()
         self.request_path = self.root / "request.json"
         self.request_path.write_text(json.dumps(self.request))
 
@@ -79,36 +115,72 @@ class ExportFixtureTests(unittest.TestCase):
                           "--output-directory", str(self.output)]
 
     def execute(self):
-        result = subprocess.run(self.command(), capture_output=True, text=True, timeout=30)
-        return result.returncode, [json.loads(line) for line in result.stdout.splitlines()]
+        result = subprocess.run(self.command(), capture_output=True, text=True, timeout=60)
+        events = [json.loads(line) for line in result.stdout.splitlines()]
+        for event in events:
+            contract.validate(event)
+        return result.returncode, events
 
-    def test_real_command_encrypts_only_generated_selected_data_and_reuses_complete_job(self):
+    def decoded_files(self):
+        decoded = probe.decode(self.age, fixture.SECRET, self.output / "bundle.age")
+        return {entry["path"] for entry in decoded["entries"] if probe.entry_kind(entry) == "file"}, decoded
+
+    def test_real_command_exports_policy_cleaned_data_and_reuses_complete_job(self):
         code, events = self.execute()
         self.assertEqual(code, 0)
         self.assertEqual([event["phase"] for event in events], ["preparing", "capturing", "finalizing", "complete"])
         self.assertEqual([event["sequence"] for event in events], [1, 2, 3, 4])
         receipt = events[-1]["receipt"]
         self.assertEqual(receipt, json.loads((self.output / "receipt.json").read_text()))
-        decoded = probe.decode(self.age, fixture.SECRET, self.output / receipt["filename"])
-        self.assertEqual({entry["path"] for entry in decoded["entries"]}, set(probe.selected_files(fixture.EXAMPLES)))
-        self.assertEqual(receipt["request"], self.request)
+        self.assertEqual(contract.validate(receipt), contract.RECEIPT)
+        self.assertEqual((receipt["request_id"], receipt["policy_revision"]),
+                         (self.request["request_id"], self.request["policy_revision"]))
+        files, decoded = self.decoded_files()
+        self.assertEqual(files, EXPORTED_FILES)
+        self.assertEqual(receipt["estimates"]["entries"], len(decoded["entries"]))
+        self.assertEqual(receipt["bundle"]["bytes"], (self.output / "bundle.age").stat().st_size)
         before = (self.output / "bundle.age").stat()
         code, repeated = self.execute()
         self.assertEqual(code, 0)
+        self.assertEqual([event["phase"] for event in repeated], ["complete"])
         self.assertTrue(repeated[-1]["reused"])
         self.assertEqual(repeated[-1]["receipt"], receipt)
         self.assertEqual((self.output / "bundle.age").stat().st_mtime_ns, before.st_mtime_ns)
 
+    def test_restored_export_keeps_personal_content_without_try_integrations(self):
+        self.assertEqual(self.execute()[0], 0)
+        target, job = self.root / "destination", self.root / "restore-job"
+        target.mkdir(mode=0o700)
+        job.mkdir(mode=0o700)
+        with restore.verified_bundle(self.age, fixture.SECRET, self.output / "bundle.age") as bundle:
+            with restore.Restorer(bundle, target, job) as importer:
+                importer.apply(importer.plan())
+        self.assertEqual((target / ".config/hypr/input.lua").read_bytes(), b"input {\n  kb_layout = us\n}\n")
+        self.assertEqual((target / ".config/chromium-flags.conf").read_bytes(), b"--ozone-platform=wayland\n")
+        menu = (target / ".config/omarchy/extensions/omarchy-menu.jsonc").read_bytes()
+        self.assertEqual(json.loads(menu), {"launch.notes": {"label": "Notes", "action": "obsidian"}})
+        self.assertFalse((target / ".config/hypr/monitors.lua").exists())
+        self.assertFalse((target / ".ssh").exists())
+        self.assertFalse(os.path.lexists(target / "Work"))
+
     def test_explicit_credential_selection_adds_only_fake_stores(self):
-        self.request["include_credentials"] = True
+        self.request = export_request(credential_stores=["ssh", "brave"])
         self.request_path.write_text(json.dumps(self.request))
         self.assertEqual(self.execute()[0], 0)
-        decoded = probe.decode(self.age, fixture.SECRET, self.output / "bundle.age")
-        self.assertEqual({entry["path"] for entry in decoded["entries"]}, set(fixture.EXAMPLES))
+        files, _ = self.decoded_files()
+        self.assertEqual(files, EXPORTED_FILES | {".ssh/id_example", ".config/BraveSoftware/Brave-Origin/Default/example"})
+
+    def test_category_selection_limits_the_export(self):
+        self.request = export_request(categories=["projects"])
+        self.request_path.write_text(json.dumps(self.request))
+        self.assertEqual(self.execute()[0], 0)
+        files, _ = self.decoded_files()
+        self.assertEqual(files, {"Projects/demo/changed.txt", "Projects/demo/untracked.txt"})
 
     def test_changed_request_or_ciphertext_cannot_reuse_success(self):
         self.assertEqual(self.execute()[0], 0)
-        self.request_path.write_text(json.dumps({**self.request, "include_credentials": True}))
+        changed = dict(self.request, selection={"categories": ["projects"], "credential_stores": []})
+        self.request_path.write_text(json.dumps(changed))
         code, events = self.execute()
         self.assertEqual((code, events[-1]["error"]), (1, "request_conflict"))
         self.request_path.write_text(json.dumps(self.request))
@@ -119,6 +191,16 @@ class ExportFixtureTests(unittest.TestCase):
             stream.write(bytes([original[0] ^ 1]))
         code, events = self.execute()
         self.assertEqual((code, events[-1]["error"]), (1, "ciphertext_changed"))
+
+    def test_tampered_receipt_cannot_be_reused(self):
+        self.assertEqual(self.execute()[0], 0)
+        receipt_path = self.output / "receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["bundle"]["sha256"] = receipt["bundle"]["sha256"].upper()
+        receipt_path.chmod(0o600)
+        receipt_path.write_text(json.dumps(receipt))
+        code, events = self.execute()
+        self.assertEqual((code, events[-1]["error"]), (1, "invalid_receipt"))
 
     def test_existing_directory_and_symlink_are_not_repurposed(self):
         self.output.mkdir(mode=0o700)
