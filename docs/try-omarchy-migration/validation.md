@@ -1,5 +1,11 @@
 # Migration exploration validation
 
+## Read-only survey candidate, 2026-10-03 UTC
+
+Source candidate: `a3aedca`, tree `f5bfed533e8d3e3c587a78c95e142ab90472b3fc`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 138 bundle/fixture/restore/tree/replacement/collection/survey and 44 contract tests, `preclean-m1-test` and every installer shell fixture: **390 Python tests passed; one optional skip** (391 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entry.
+
+The [survey](../../Development/migration_bundle_probe/SURVEY.md) is the first command intended for the owner's real Try home. Instrumented tests prove it opens only directories (`O_DIRECTORY|O_NOFOLLOW`, never for writing), never lists credential stores or excluded paths, and creates nothing; its category counts equal what collection exports for the same home. Mutations that open a regular file or ignore stores fail the suite. It has not yet been run on a real home. Categories are now shared (`files-and-projects`, `configuration`, `caches`). No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed.
+
 ## Policy collection and contract fixture candidate, 2026-10-03 UTC
 
 Source candidate: `bf1725b`, tree `d4ec61071442962dce4f7522483b8d698c1551d8`. One authoritative `./test/all` run on pancake, from a git bundle checked out at that commit, passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 132 bundle/fixture/restore/tree/replacement/collection and 44 contract tests, `preclean-m1-test` and every installer shell fixture: **384 Python tests passed; one optional skip** (385 run), exit 0. Encryption and QEMU socket cases were enabled.
