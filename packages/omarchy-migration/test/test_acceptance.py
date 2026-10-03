@@ -194,7 +194,9 @@ class AcceptanceTests(unittest.TestCase):
     def test_try_home_restores_exactly_except_enumerated_changes(self):
         request, manifest, ciphertext, receipt = self.export()
         archived = {entry["path"] for entry in manifest["entries"]}
-        self.assertFalse(any(path.startswith((".ssh", ".config/chromium")) for path in archived))
+        held = (".ssh", ".config/chromium")
+        self.assertFalse(any(path == root or path.startswith(root + "/") for path in archived for root in held))
+        self.assertIn(".config/chromium-flags.conf", archived)  # a sibling name, not the store
         plan, report, results = self.restore(ciphertext, receipt)
         originals = manifest["provenance"]["originals"]
         self.assertEqual(originals, f"{collection.ORIGINALS_ROOT}/{request['request_id']}")
