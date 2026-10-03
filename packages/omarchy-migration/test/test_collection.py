@@ -452,7 +452,8 @@ class CollectionTests(unittest.TestCase):
             entry = next(entry for entry in snapshot.manifest["entries"] if entry["path"] == f"{root}/{path}")
             self.assertEqual((entry["mode"], entry["mtime_ns"]), (0o600, MTIME))
             self.assertEqual(snapshot.paths[f"{root}/.config/app-flags.conf"].read_bytes(), b"--user-choice\n--vm-only\n")
-            self.assertEqual(self.entry(snapshot, f"{root}/{path}")["reason"], "original-copy")
+            copy = next(item for item in snapshot.report["entries"] if item["archive"] == f"{root}/{path}")
+            self.assertEqual((copy["source"], copy["outcome"], copy["reason"]), (path, "included", "original-copy"))
 
     def test_transform_without_provider_content_exports_the_file_unchanged(self):
         self.write(".config/app-flags.conf", b"--user-choice\n")

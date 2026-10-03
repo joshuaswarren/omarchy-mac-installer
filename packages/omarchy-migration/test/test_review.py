@@ -251,8 +251,10 @@ class ReviewTests(unittest.TestCase):
         decoded = probe.decode(self.age, fixture.SECRET, self.export / "bundle.age")
         # Files and the directories that hold them both count as restored.
         configuration = [entry for entry in decoded["entries"] if entry["path"].startswith(".")]
-        self.assertEqual(outcomes["configuration"], ("restored", len(configuration), 0))
-        self.assertEqual(sum(probe.entry_kind(entry) == "file" for entry in configuration), 5)
+        self.assertEqual(outcomes["configuration"], ("restored", len(configuration), 0))  # includes original copies
+        user_files = [entry for entry in configuration
+                      if probe.entry_kind(entry) == "file" and not entry["path"].startswith(fixture.collection.ORIGINALS_ROOT + "/")]
+        self.assertEqual(len(user_files), 5)
         self.assertEqual(outcomes["files-and-projects"][0], "restored")
         work = next(item for item in report["categories"] if item["id"] == "files-and-projects")
         self.assertEqual((work["omitted"], work["reasons"]), (1, ["link_not_restorable"]))

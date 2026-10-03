@@ -84,7 +84,9 @@ def git(*arguments, cwd):
                    "GIT_AUTHOR_NAME": "Synthetic", "GIT_AUTHOR_EMAIL": "synthetic@example.invalid",
                    "GIT_COMMITTER_NAME": "Synthetic", "GIT_COMMITTER_EMAIL": "synthetic@example.invalid",
                    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
-    return subprocess.run(["git", "-c", "init.defaultBranch=main", *arguments], cwd=cwd, env=environment,
+    # No background maintenance: it would change the repository mid-test.
+    return subprocess.run(["git", "-c", "init.defaultBranch=main", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+                           *arguments], cwd=cwd, env=environment,
                           check=True, capture_output=True, text=True).stdout
 
 
@@ -123,7 +125,10 @@ class AcceptanceTests(unittest.TestCase):
         (project / "README.md").write_bytes(b"# app\n\nuncommitted edit\n")
         (project / "notes-untracked.txt").write_bytes(b"draft\n")
         for path in [*self.home.rglob("*")]:
-            os.utime(path, ns=(MTIME, MTIME), follow_symlinks=False)
+            try:
+                os.utime(path, ns=(MTIME, MTIME), follow_symlinks=False)
+            except FileNotFoundError:
+                pass  # A transient Git lock file
         for name, data in DESTINATION_DEFAULTS.items():
             path = self.target / name
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
