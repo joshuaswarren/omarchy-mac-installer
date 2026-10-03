@@ -15,24 +15,41 @@ from Development.migration_bundle_probe.dependency import configured_age
 from Development.migration_contract import contract
 
 COMMAND = [sys.executable, "-m", "Development.migration_bundle_probe.review"]
+VALID = Path(__file__).resolve().parents[1] / "migration_contract/fixtures/valid"
+STATUSES = {"create", "present", "restored", "replace", "replaced", "conflict", "inert", "directory"}
+
+
+class FakeBundle:
+    def __init__(self, receipt):
+        self.export_id = receipt["export_id"]
+        self.ciphertext_sha256 = receipt["bundle"]["sha256"]
+        self._manifest = {"export_id": self.export_id, "entries": []}
 
 
 class ReasonTableTests(unittest.TestCase):
     def test_every_restorer_reason_has_a_stable_code(self):
         tree = ast.parse((Path(restore.__file__)).read_text())
         reasons = set()
+
+        def strings(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return [node.value]
+            if isinstance(node, ast.IfExp):
+                return strings(node.body) + strings(node.orelse)
+            return []
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) in ("Action", "_action"):
-                literals = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
-                reasons.update(literal for literal in literals if " " in literal)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Tuple):
-                values = [element.value for element in node.value.elts if isinstance(element, ast.Constant)]
-                if len(values) == 2 and all(isinstance(value, str) for value in values) and " " in values[1]:
-                    reasons.add(values[1])
-            if isinstance(node, ast.IfExp):
-                for branch in (node.body, node.orelse):
-                    if isinstance(branch, ast.Constant) and isinstance(branch.value, str) and " " in branch.value:
-                        reasons.add(branch.value)
+                values = list(node.args) + [keyword.value for keyword in node.keywords]
+                # Reasons must be literal so they can be mapped to codes.
+                self.assertFalse(any(isinstance(value, ast.JoinedStr) for value in values), ast.unparse(node))
+                literals = [text for value in values for text in strings(value)]
+                reasons.update(text for text in literals if text not in STATUSES and text != "")
+            if isinstance(node, ast.Tuple):
+                values = [text for element in node.elts for text in strings(element)]
+                if len(values) >= 2 and values[0] in STATUSES:
+                    reasons.update(values[1:])
+        reasons = {reason for reason in reasons if reason not in STATUSES}
         self.assertGreaterEqual(len(reasons), 15)
         self.assertEqual(reasons - set(review.REASONS), set())
         self.assertTrue(all(contract.CODE.fullmatch(code) for code in review.REASONS.values()))
@@ -40,6 +57,68 @@ class ReasonTableTests(unittest.TestCase):
     def test_unknown_reason_is_refused(self):
         with self.assertRaises(review.ReviewError):
             review.reason_code(restore.Action("a", "conflict", "a brand new reason"))
+
+
+class DocumentTests(unittest.TestCase):
+    def setUp(self):
+        self.receipt = json.loads((VALID / "receipt.json").read_text())
+        self.bundle = FakeBundle(self.receipt)
+        self.plan = {"plan_id": str(uuid.uuid4()), "export_id": self.bundle.export_id}
+
+    def report(self, *results):
+        return review.report_document(self.plan, results, str(uuid.uuid4()), self.bundle)
+
+    def test_unknown_apply_status_is_refused(self):
+        with self.assertRaisesRegex(review.ReviewError, "unexpected restore status"):
+            self.report(restore.Action("Documents/a", "bogus", "new file"))
+        with self.assertRaisesRegex(review.ReviewError, "unexpected restore status"):
+            self.report(restore.Action("Documents/a", "create", "new file"))
+
+    def test_directory_only_category_is_restored_not_skipped(self):
+        report = self.report(restore.Action(".config", "directory", "structure retained; source directory metadata deferred"))
+        self.assertEqual(report["categories"], [{"id": "configuration", "outcome": "restored", "restored": 1,
+                                                 "conflicts": 0, "omitted": 0, "reasons": []}])
+
+    def test_empty_bundle_cannot_be_planned(self):
+        with self.assertRaisesRegex(review.ReviewError, "empty_bundle"):
+            review.plan_document(self.bundle, (), self.receipt, 1000, {"job": [1, 2]})
+
+    def test_plan_id_covers_receipt_binding_and_actions(self):
+        actions = (restore.Action("Documents/a", "create", "new file"),)
+        base = review.plan_id(self.bundle, actions, 1000, {"job": [1, 2]}, self.receipt)
+        edited = dict(self.receipt, policy_revision="try-omarchy/other/1")
+        for changed in (review.plan_id(self.bundle, actions, 1000, {"job": [1, 3]}, self.receipt),
+                        review.plan_id(self.bundle, actions, 1000, {"job": [1, 2]}, edited),
+                        review.plan_id(self.bundle, actions, 1001, {"job": [1, 2]}, self.receipt),
+                        review.plan_id(self.bundle, (restore.Action("Documents/a", "present", "matching file already exists"),),
+                                       1000, {"job": [1, 2]}, self.receipt)):
+            self.assertNotEqual(changed, base)
+        self.assertEqual(review.plan_id(self.bundle, actions, 1000, {"job": [1, 2]}, self.receipt), base)
+
+
+class PassphraseTests(unittest.TestCase):
+    def read(self, data):
+        read, write = os.pipe()
+        os.write(write, data)
+        os.close(write)
+        try:
+            return review.read_passphrase(read)
+        finally:
+            os.close(read)
+
+    def test_maximum_length_with_or_without_newline_is_accepted(self):
+        secret = b"x" * review.MAX_PASSPHRASE
+        self.assertEqual(self.read(secret + b"\n"), secret)
+        self.assertEqual(self.read(secret), secret)
+
+    def test_overlong_empty_and_ambiguous_input_is_refused(self):
+        for data, error in ((b"x" * (review.MAX_PASSPHRASE + 1), "passphrase_too_long"),
+                            (b"x" * (review.MAX_PASSPHRASE + 1) + b"\n", "passphrase_too_long"),
+                            (b"", "passphrase_invalid"), (b"\n", "passphrase_invalid"),
+                            (b"secret\r\n", "passphrase_invalid"), (b"two\nlines\n", "passphrase_invalid"),
+                            (b"nul\0byte", "passphrase_invalid")):
+            with self.subTest(data=data[:12]), self.assertRaisesRegex(review.ReviewError, error):
+                self.read(data)
 
 
 class ReviewTests(unittest.TestCase):
@@ -67,15 +146,15 @@ class ReviewTests(unittest.TestCase):
     def plan(self):
         with restore.verified_bundle(self.age, fixture.SECRET, self.export / "bundle.age") as bundle:
             with restore.Restorer(bundle, self.target, self.job) as importer:
-                return review.plan_document(bundle, importer.plan(), self.receipt, 1000, self.target), bundle.ciphertext_sha256
+                return review.plan_document(bundle, importer.plan(), self.receipt, 1000, importer._binding), bundle.ciphertext_sha256
 
-    def command(self, operation, *extra, secret=fixture.SECRET):
+    def command(self, operation, *extra, secret=fixture.SECRET, receipt=None):
         read, write = os.pipe()
         os.write(write, secret + b"\n")
         os.close(write)
         try:
             result = subprocess.run(
-                COMMAND + [operation, "--bundle", str(self.export / "bundle.age"), "--receipt", str(self.export / "receipt.json"),
+                COMMAND + [operation, "--bundle", str(self.export / "bundle.age"), "--receipt", str(receipt or self.export / "receipt.json"),
                            "--target", str(self.target), "--job", str(self.job), "--passphrase-fd", str(read), *extra],
                 pass_fds=(read,), capture_output=True, text=True, timeout=60)
         finally:
@@ -114,6 +193,20 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual((refused.returncode, json.loads(refused.stderr)["error"]), (1, "plan_changed"))
         self.assertEqual(list(other.iterdir()), [])
 
+    def test_edited_receipt_revision_changes_the_plan_and_blocks_the_reviewed_id(self):
+        plan = contract.parse(self.command("plan").stdout.encode())
+        edited = self.root / "edited-receipt.json"
+        edited.write_text(json.dumps(dict(self.receipt, policy_revision="try-omarchy/82927e9/9")))
+        replanned = contract.parse(self.command("plan", receipt=edited).stdout.encode())
+        self.assertNotEqual(replanned["plan_id"], plan["plan_id"])
+        refused = self.command("apply", "--plan-id", plan["plan_id"], receipt=edited)
+        self.assertEqual((refused.returncode, json.loads(refused.stderr)["error"]), (1, "plan_changed"))
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_plan_id_option_is_only_for_apply(self):
+        self.assertEqual(self.command("plan", "--plan-id", str(uuid.uuid4())).returncode, 2)
+        self.assertEqual(self.command("apply").returncode, 2)
+
     def test_receipt_for_another_bundle_is_refused(self):
         with restore.verified_bundle(self.age, fixture.SECRET, self.export / "bundle.age") as bundle:
             with restore.Restorer(bundle, self.target, self.job) as importer:
@@ -125,7 +218,7 @@ class ReviewTests(unittest.TestCase):
                         target = target[key]
                     target[field[-1]] = value
                     with self.subTest(field=field), self.assertRaises(review.ReviewError) as caught:
-                        review.plan_document(bundle, actions, receipt, 1000, self.target)
+                        review.plan_document(bundle, actions, receipt, 1000, importer._binding)
                     self.assertEqual(str(caught.exception), "receipt_mismatch")
 
     def test_command_applies_only_the_reviewed_plan_and_reports_by_category(self):
@@ -161,15 +254,21 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(retried["job_id"], report["job_id"])
         self.assertEqual(again["actions"]["create"], 0)
 
-    def test_wrong_passphrase_and_bad_passphrase_input_write_nothing(self):
-        for secret, error in ((b"not-the-transfer-passphrase", None), (b"", "passphrase_invalid")):
+    def test_wrong_passphrase_and_bad_passphrase_input_write_nothing_or_leak(self):
+        wrong = b"not-the-transfer-passphrase"
+        for secret, check in ((wrong, lambda error: error not in ("", "passphrase_invalid")),
+                              (b"", lambda error: error == "passphrase_invalid")):
             result = self.command("plan", secret=secret)
-            with self.subTest(error=error):
+            with self.subTest(secret=secret):
                 self.assertEqual(result.returncode, 1)
-                if error:
-                    self.assertEqual(json.loads(result.stderr)["error"], error)
+                error = json.loads(result.stderr)["error"]
+                self.assertTrue(check(error), error)
+                for text in (result.stdout, result.stderr):
+                    self.assertNotIn(wrong.decode(), text)
+                    self.assertNotIn(fixture.SECRET.decode(), text)
+                    self.assertNotIn(str(self.target), text)
         self.assertEqual(list(self.target.iterdir()), [])
-        self.assertNotIn(fixture.SECRET.decode(), " ".join(COMMAND))
+        self.assertEqual(list(self.job.iterdir()), [])
 
 
 if __name__ == "__main__":

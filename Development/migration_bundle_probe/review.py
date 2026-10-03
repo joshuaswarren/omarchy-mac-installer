@@ -65,17 +65,21 @@ def _entries(bundle):
     return {entry["path"]: entry for entry in bundle._manifest["entries"]}
 
 
-def target_identity(target):
-    metadata = os.stat(target, follow_symlinks=False)
-    return [metadata.st_dev, metadata.st_ino]
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def plan_id(bundle, actions, account_uid, target):
-    # A reviewed plan applies only to the destination it was computed for.
-    material = {"bundle": bundle.ciphertext_sha256, "account_uid": account_uid, "target": target_identity(target),
+def plan_id(bundle, actions, account_uid, binding, receipt):
+    """Bind a reviewed plan to everything that makes it the same plan.
+
+    `binding` is the restorer's pinned job binding: manifest digest, export,
+    target and job identities and any approved replacements. The receipt's
+    digest covers its policy revision, which the bundle does not carry.
+    """
+    material = {"bundle": bundle.ciphertext_sha256, "account_uid": account_uid, "binding": binding,
+                "receipt": _digest(receipt),
                 "actions": [[action.path, action.status, action.reason] for action in actions]}
-    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return str(uuid.uuid5(PLAN_NAMESPACE, digest))
+    return str(uuid.uuid5(PLAN_NAMESPACE, _digest(material)))
 
 
 def check_receipt(bundle, receipt):
@@ -89,8 +93,11 @@ def check_receipt(bundle, receipt):
         raise ReviewError("receipt_mismatch")
 
 
-def plan_document(bundle, actions, receipt, account_uid, target):
+def plan_document(bundle, actions, receipt, account_uid, binding):
     check_receipt(bundle, receipt)
+    if not actions:
+        # report/1 needs at least one category; an empty export has nothing to review.
+        raise ReviewError("empty_bundle")
     entries = _entries(bundle)
     counts = dict.fromkeys(("create", "present", "replace", "conflict", "omit", "inert"), 0)
     required = 0
@@ -100,7 +107,7 @@ def plan_document(bundle, actions, receipt, account_uid, target):
         if action.status in ("create", "replace") and probe.entry_kind(entries[action.path]) == "file":
             required += entries[action.path]["bytes"]
     document = {
-        "schema": contract.PLAN, "plan_id": plan_id(bundle, actions, account_uid, target),
+        "schema": contract.PLAN, "plan_id": plan_id(bundle, actions, account_uid, binding, receipt),
         "export_id": bundle.export_id, "bundle_sha256": bundle.ciphertext_sha256,
         "policy_revision": receipt["policy_revision"], "destination": {"account_uid": account_uid},
         "actions": counts, "packages": {"reinstall": 0, "manual": 0}, "required_bytes": required,
@@ -116,16 +123,16 @@ def report_document(plan, results, job_id, bundle):
     for result in results:
         code = reason_code(result)
         group = groups.setdefault(category(result.path), {"restored": 0, "conflicts": 0, "omitted": 0, "reasons": set()})
-        if result.status == "directory":
-            continue
-        if result.status in ("restored", "replaced", "present"):
+        if result.status in ("restored", "replaced", "present", "directory"):
             group["restored"] += 1
         elif result.status == "conflict":
             group["conflicts"] += 1
             group["reasons"].add(code)
-        else:
+        elif result.status == "inert":
             group["omitted"] += 1
             group["reasons"].add(code)
+        else:
+            raise ReviewError(f"unexpected restore status: {result.status}")
     categories = []
     for name in sorted(groups):
         group = groups[name]
@@ -142,22 +149,27 @@ def report_document(plan, results, job_id, bundle):
     return document
 
 
-def job_identity(job):
-    """A stable id for one restore job directory, so retries report as one job."""
-    metadata = os.stat(job, follow_symlinks=False)
-    return str(uuid.uuid5(PLAN_NAMESPACE, f"job:{metadata.st_dev}:{metadata.st_ino}"))
+def job_identity(binding):
+    """A stable id for one restore job, so retries report as the same job.
+
+    Derived from the restorer's binding (job and target identity, manifest
+    digest), so a recreated directory only collides for the same bundle.
+    """
+    return str(uuid.uuid5(PLAN_NAMESPACE, "job:" + _digest(binding)))
 
 
 def read_passphrase(descriptor):
+    # Room for the passphrase, its optional newline, and one byte to detect overflow.
+    limit = MAX_PASSPHRASE + 2
     data = b""
-    while len(data) <= MAX_PASSPHRASE:
-        piece = os.read(descriptor, MAX_PASSPHRASE + 1 - len(data))
+    while len(data) < limit:
+        piece = os.read(descriptor, limit - len(data))
         if not piece:
             break
         data += piece
-    if len(data) > MAX_PASSPHRASE:
-        raise ReviewError("passphrase_too_long")
     passphrase = data[:-1] if data.endswith(b"\n") else data
+    if len(passphrase) > MAX_PASSPHRASE:
+        raise ReviewError("passphrase_too_long")
     if not passphrase or any(byte in passphrase for byte in b"\n\r\0"):
         raise ReviewError("passphrase_invalid")
     return passphrase
@@ -174,8 +186,8 @@ def main(argv=None):
                         help="read the transfer passphrase from this file descriptor")
     parser.add_argument("--plan-id", help="apply only if the current plan has this id")
     arguments = parser.parse_args(argv)
-    if arguments.operation == "apply" and not arguments.plan_id:
-        parser.error("apply requires --plan-id from a reviewed plan")
+    if (arguments.operation == "apply") != bool(arguments.plan_id):
+        parser.error("--plan-id is required for apply and not accepted for plan")
     try:
         age = configured_age()
         if age is None:
@@ -186,14 +198,14 @@ def main(argv=None):
         with restore.verified_bundle(age, secret, arguments.bundle) as bundle:
             with restore.Restorer(bundle, arguments.target, arguments.job) as importer:
                 actions = importer.plan()
-                plan = plan_document(bundle, actions, receipt, account_uid, arguments.target)
+                plan = plan_document(bundle, actions, receipt, account_uid, importer._binding)
                 if arguments.operation == "plan":
                     print(json.dumps(plan, indent=2, sort_keys=True))
                     return 0
                 if plan["plan_id"] != arguments.plan_id:
                     raise ReviewError("plan_changed")
                 results = importer.apply(actions)
-                print(json.dumps(report_document(plan, results, job_identity(arguments.job), bundle),
+                print(json.dumps(report_document(plan, results, job_identity(importer._binding), bundle),
                                  indent=2, sort_keys=True))
                 return 0
     except (ReviewError, contract.ContractError, probe.Rejected) as error:
