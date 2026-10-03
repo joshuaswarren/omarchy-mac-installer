@@ -1,4 +1,4 @@
-"""Holdouts precede traversal; private snapshots isolate later source changes."""
+"""Policy holdouts and exclusions precede traversal; private snapshots isolate later source changes."""
 
 import copy
 import json
@@ -30,14 +30,35 @@ class CollectionTests(unittest.TestCase):
         self.parent.mkdir(mode=0o700)
         self.request = {"schema": collection.REQUEST_SCHEMA, "request_id": str(uuid.uuid4()),
                         "selection": [{"source": "", "archive": ""}], "selected_adapters": []}
-        self.layout = {
-            "schema": collection.LAYOUT_SCHEMA, "policy_revision": collection.POLICY,
-            "layout_id": "synthetic-default-and-alternate/1", "stores": [
-                {"id": "fake-ssh", "roots": [".ssh", "alternate/ssh"], "adapter": "fixture-ssh-bytes/1"},
-                {"id": "fake-browser", "roots": [".config/BraveSoftware", "alternate/config/BraveSoftware"],
-                 "adapter": "fixture-browser/1"},
-                {"id": "fake-codex", "roots": [".codex/auth.json", "alternate/codex/auth.json"], "adapter": None},
-                {"id": "fake-vault", "roots": [".config/1Password", "alternate/vault"], "adapter": None},
+        evidence = {"path": "synthetic"}
+        self.policy = {
+            "schema": "omarchy-migration/policy/1", "revision": "synthetic-default-and-alternate/1",
+            "source": {"provider": "try-omarchy", "repository": "https://example.invalid/synthetic",
+                       "commit": "0" * 40},
+            "credential_stores": [
+                {"id": "fake-ssh", "category": "credentials", "roots": [".ssh", "alternate/ssh"],
+                 "adapter": "fixture-ssh-bytes/1"},
+                {"id": "fake-browser", "category": "browser-profile",
+                 "roots": [".config/BraveSoftware", "alternate/config/BraveSoftware"], "adapter": "fixture-browser/1"},
+                {"id": "fake-codex", "category": "credentials", "roots": [".codex/auth.json", "alternate/codex/auth.json"],
+                 "adapter": None},
+                {"id": "fake-vault", "category": "credentials", "roots": [".config/1Password", "alternate/vault"],
+                 "adapter": None},
+            ],
+            "mounts": [{"id": "mac-share", "path": "/mnt/mac", "reason": "mac_shared_folder", "evidence": evidence}],
+            "rules": [
+                {"id": "vm-display", "path": ".config/hypr/monitors.lua", "match": "exact", "action": "exclude",
+                 "reason": "display_configuration", "evidence": evidence},
+                {"id": "vm-state", "path": ".local/state/vm", "match": "tree", "action": "exclude",
+                 "reason": "vm_integration", "evidence": evidence},
+                {"id": "vm-menu", "path": ".config/omarchy/extensions/omarchy-menu.jsonc", "match": "exact",
+                 "action": "transform", "reason": "vm_integration", "evidence": evidence,
+                 "transform": {"type": "remove-json-keys", "format": "jsonc", "keys": ["setup.vm"]}},
+                {"id": "vm-flags", "path": ".config/app-flags.conf", "match": "exact", "action": "transform",
+                 "reason": "try_appended_fragment", "evidence": evidence,
+                 "transform": {"type": "strip-appended-block", "block": "--vm-only\n"}},
+                {"id": "keep-toggles", "path": ".local/state/toggles", "match": "tree", "action": "preserve",
+                 "reason": "user_state", "evidence": evidence},
             ],
         }
         self.ordinary = {
@@ -73,7 +94,7 @@ class CollectionTests(unittest.TestCase):
         (self.source / "store-alias").symlink_to(".ssh", target_is_directory=True)
 
     def capture(self, **kwargs):
-        return collection.collect_fixture(self.source, self.request, self.layout,
+        return collection.collect_fixture(self.source, self.request, self.policy,
                                           supported_adapters=("fixture-ssh-bytes/1",),
                                           snapshot_parent=self.parent, **kwargs)
 
@@ -91,7 +112,7 @@ class CollectionTests(unittest.TestCase):
             self.assertTrue(all(snapshot.paths[name].read_bytes() == data for name, data in self.ordinary.items()))
             self.assertTrue(set(self.protected).isdisjoint(snapshot.paths))
             omitted = {item["source"] for item in snapshot.report["entries"] if item["outcome"] == "held-out"}
-            self.assertEqual(omitted, {root for store in self.layout["stores"] for root in store["roots"]})
+            self.assertEqual(omitted, {root for store in self.policy["credential_stores"] for root in store["roots"]})
             self.assertEqual(snapshot.report["counts"]["held-out"], 8)
             self.assertEqual(snapshot.report["status"], "complete")
             self.assert_private(snapshot)
@@ -100,7 +121,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(list(self.parent.iterdir()), [])
 
     def test_held_out_descendants_are_neither_opened_nor_listed(self):
-        blocked = [self.source / root for store in self.layout["stores"] for root in store["roots"]]
+        blocked = [self.source / root for store in self.policy["credential_stores"] for root in store["roots"]]
         opened, scanned = os.open, os.scandir
 
         def guard_path(value, dir_fd=None):
@@ -255,12 +276,12 @@ class CollectionTests(unittest.TestCase):
             if parent.name == "unsafe":
                 parent.chmod(0o755)
             with self.subTest(parent=parent), self.assertRaises(probe.Rejected):
-                with collection.collect_fixture(self.source, self.request, self.layout, snapshot_parent=parent):
+                with collection.collect_fixture(self.source, self.request, self.policy, snapshot_parent=parent):
                     self.fail("unsafe snapshot location accepted")
 
-    def test_request_cannot_change_layout_or_enable_unknown_adapter(self):
+    def test_request_cannot_change_policy_or_enable_unknown_adapter(self):
         baseline = copy.deepcopy(self.request)
-        for key, value in (("layout", {}), ("schema", "unknown"), ("request_id", "bad"),
+        for key, value in (("policy", {}), ("schema", "unknown"), ("request_id", "bad"),
                            ("selected_adapters", ["real-browser"]), ("selected_adapters", [True]),
                            ("selected_adapters", ["fixture-ssh-bytes/1", "fixture-ssh-bytes/1"])):
             self.request = copy.deepcopy(baseline)
@@ -282,31 +303,36 @@ class CollectionTests(unittest.TestCase):
                 with self.capture():
                     self.fail("invalid selection accepted")
 
-    def test_layout_revision_overlap_or_capability_mismatch_is_rejected(self):
-        baseline = copy.deepcopy(self.layout)
-        for damage in ("revision", "overlap", "adapter"):
-            self.layout = copy.deepcopy(baseline)
+    def test_policy_revision_overlap_rule_or_capability_mismatch_is_rejected(self):
+        baseline = copy.deepcopy(self.policy)
+        for damage in ("revision", "overlap", "rule-in-store", "adapter", "schema"):
+            self.policy = copy.deepcopy(baseline)
             if damage == "revision":
-                self.layout["policy_revision"] = "future/2"
+                self.policy["revision"] = "Future 2"
             elif damage == "overlap":
-                self.layout["stores"][0]["roots"].append(".ssh/subdirectory")
+                self.policy["credential_stores"][0]["roots"].append(".ssh/subdirectory")
+            elif damage == "rule-in-store":
+                self.policy["rules"][0]["path"] = ".ssh/config"
+            elif damage == "adapter":
+                self.policy["credential_stores"][0]["adapter"] = "real-ssh/1"
             else:
-                self.layout["stores"][0]["adapter"] = "real-ssh/1"
+                self.policy["schema"] = "omarchy-migration-fixture-layout/1"
             with self.subTest(damage=damage), self.assertRaises(probe.Rejected):
                 with self.capture():
-                    self.fail("invalid layout accepted")
+                    self.fail("invalid policy accepted")
 
     def test_private_report_binds_capabilities_that_change_effective_selection(self):
         self.request["selected_adapters"] = ["fixture-ssh-bytes/1"]
         with self.capture() as available:
             first = copy.deepcopy(available.report)
             self.assertIn(".ssh/id_fake", available.paths)
-        with collection.collect_fixture(self.source, self.request, self.layout,
+        with collection.collect_fixture(self.source, self.request, self.policy,
                                         snapshot_parent=self.parent) as unavailable:
             second = unavailable.report
             self.assertNotIn(".ssh/id_fake", unavailable.paths)
         self.assertEqual(first["request_sha256"], second["request_sha256"])
-        self.assertEqual(first["layout_sha256"], second["layout_sha256"])
+        self.assertEqual(first["policy_sha256"], second["policy_sha256"])
+        self.assertEqual(first["policy_revision"], "synthetic-default-and-alternate/1")
         self.assertNotEqual(first["capabilities_sha256"], second["capabilities_sha256"])
 
     def test_depth_limit_rejects_before_recursive_capture(self):
@@ -339,6 +365,155 @@ class CollectionTests(unittest.TestCase):
                     self.fail("limit exceeded")
             self.assertEqual(list(self.parent.iterdir()), [])
 
+    def write(self, name, data, mode=0o600):
+        path = self.source / name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(data)
+        path.chmod(mode)
+        os.utime(path, ns=(MTIME, MTIME))
+        return path
+
+    def entry(self, snapshot, source):
+        return next(item for item in snapshot.report["entries"] if item["source"] == source)
+
+    def test_excluded_paths_are_reported_and_never_opened(self):
+        self.write(".config/hypr/monitors.lua", b"monitor = host display\n")
+        self.write(".local/state/vm/session/token", b"vm-only state\n")
+        blocked = [self.source / ".config/hypr/monitors.lua", self.source / ".local/state/vm"]
+        opened, scanned = os.open, os.scandir
+
+        def guard(value, dir_fd=None):
+            if isinstance(value, int):
+                path = Path(f"/proc/self/fd/{value}").resolve()
+            else:
+                base = Path(f"/proc/self/fd/{dir_fd}").resolve() if dir_fd is not None else Path.cwd()
+                path = Path(os.path.abspath(base / value))
+            self.assertFalse(any(path == root or path.is_relative_to(root) for root in blocked), str(path))
+
+        def guarded_open(value, flags, *args, **kwargs):
+            guard(value, kwargs.get("dir_fd"))
+            return opened(value, flags, *args, **kwargs)
+
+        def guarded_scan(value):
+            guard(value)
+            return scanned(value)
+
+        with patch.object(collection.os, "open", side_effect=guarded_open), patch.object(
+                collection.os, "scandir", side_effect=guarded_scan), self.capture() as snapshot:
+            self.assertNotIn(".config/hypr/monitors.lua", snapshot.paths)
+            self.assertFalse(any(path.startswith(".local/state/vm") for path in snapshot.paths))
+            self.assertIn(".config/hypr", snapshot.paths)
+            display = self.entry(snapshot, ".config/hypr/monitors.lua")
+            self.assertEqual((display["outcome"], display["reason"], display["rule"]),
+                             ("excluded", "display_configuration", "vm-display"))
+            self.assertEqual(self.entry(snapshot, ".local/state/vm")["rule"], "vm-state")
+            self.assertEqual(snapshot.report["counts"]["excluded"], 2)
+
+    def test_selected_excluded_root_is_reported_without_capture(self):
+        self.write(".config/hypr/monitors.lua", b"monitor = host display\n")
+        self.request["selection"] = [{"source": ".config/hypr/monitors.lua", "archive": "monitors.lua"}]
+        with self.capture() as snapshot:
+            self.assertEqual(snapshot.paths, {})
+            self.assertEqual(snapshot.report["entries"][0]["outcome"], "excluded")
+
+    def test_transform_removes_only_provider_entries_and_keeps_metadata(self):
+        menu = b'{\n  "setup.vm": {"label": "VM settings"},\n  "launch.notes": {"label": "Notes"}\n}\n'
+        self.write(".config/omarchy/extensions/omarchy-menu.jsonc", menu, 0o640)
+        self.write(".config/app-flags.conf", b"--user-choice\n--vm-only\n")
+        with self.capture() as snapshot:
+            path = ".config/omarchy/extensions/omarchy-menu.jsonc"
+            self.assertEqual(json.loads(snapshot.paths[path].read_bytes()), {"launch.notes": {"label": "Notes"}})
+            self.assertEqual(snapshot.paths[".config/app-flags.conf"].read_bytes(), b"--user-choice\n")
+            item = self.entry(snapshot, path)
+            self.assertEqual((item["outcome"], item["reason"], item["rule"]), ("transformed", "vm_integration", "vm-menu"))
+            entry = next(entry for entry in snapshot.manifest["entries"] if entry["path"] == path)
+            data = snapshot.paths[path].read_bytes()
+            self.assertEqual((entry["bytes"], entry["mode"], entry["mtime_ns"]), (len(data), 0o640, MTIME))
+            self.assertEqual(snapshot.report["counts"]["transformed"], 2)
+            self.assert_private(snapshot)
+
+    def test_transform_without_provider_content_exports_the_file_unchanged(self):
+        self.write(".config/app-flags.conf", b"--user-choice\n")
+        with self.capture() as snapshot:
+            self.assertEqual(snapshot.paths[".config/app-flags.conf"].read_bytes(), b"--user-choice\n")
+            item = self.entry(snapshot, ".config/app-flags.conf")
+            self.assertEqual((item["outcome"], item["reason"], item["rule"]), ("included", "regular-file", "vm-flags"))
+
+    def test_untransformable_files_are_withheld_and_reported(self):
+        self.write(".config/omarchy/extensions/omarchy-menu.jsonc", b'{"setup.vm": {}')
+        self.write(".config/app-flags.conf", b"--vm-only\n--vm-only\n")
+        with self.capture() as snapshot:
+            self.assertNotIn(".config/omarchy/extensions/omarchy-menu.jsonc", snapshot.paths)
+            self.assertNotIn(".config/app-flags.conf", snapshot.paths)
+            reasons = {item["source"]: item["reason"] for item in snapshot.report["entries"]
+                       if item["outcome"] == "unsupported"}
+            self.assertEqual(reasons[".config/omarchy/extensions/omarchy-menu.jsonc"], "transform-failed")
+            self.assertEqual(reasons[".config/app-flags.conf"], "transform-ambiguous")
+            self.assertEqual(list(snapshot.directory.iterdir()).__len__(), len(snapshot.paths))
+
+    def test_oversized_and_non_file_transform_targets_are_withheld(self):
+        (self.source / ".config/omarchy/extensions/omarchy-menu.jsonc").mkdir(parents=True, mode=0o700)
+        self.write(".config/app-flags.conf", b"x" * (collection.migration_policy.MAX_TRANSFORM_INPUT + 1))
+        with self.capture() as snapshot:
+            self.assertEqual(self.entry(snapshot, ".config/omarchy/extensions/omarchy-menu.jsonc")["reason"],
+                             "transform-target-not-file")
+            self.assertEqual(self.entry(snapshot, ".config/app-flags.conf")["reason"], "transform-too-large")
+            self.assertNotIn(".config/app-flags.conf", snapshot.paths)
+
+    def test_links_into_the_mac_share_are_inert_metadata(self):
+        (self.source / "Work").symlink_to("/mnt/mac")
+        (self.source / "Notes").symlink_to("/mnt/mac/Projects/notes")
+        with self.capture() as snapshot:
+            for name in ("Work", "Notes"):
+                item = self.entry(snapshot, name)
+                self.assertEqual((item["outcome"], item["reason"], item["mount"]), ("inert-link", "mount-link", "mac-share"))
+                self.assertIn(name, snapshot.paths)
+            self.assertEqual(self.entry(snapshot, "readme-link")["mount"], None)
+
+    def test_preserve_rules_are_traceable_without_changing_content(self):
+        self.write(".local/state/toggles/hypr/flags.lua", b"blur = false\n")
+        with self.capture() as snapshot:
+            self.assertEqual(snapshot.paths[".local/state/toggles/hypr/flags.lua"].read_bytes(), b"blur = false\n")
+            self.assertEqual(self.entry(snapshot, ".local/state/toggles/hypr/flags.lua")["rule"], "keep-toggles")
+            self.assertEqual(self.entry(snapshot, ".local/state/toggles/hypr/flags.lua")["outcome"], "included")
+
+    def test_try_policy_drives_collection_of_a_synthetic_try_home(self):
+        document = json.loads((Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-e1a0dbe.json").read_text())
+        block = next(rule for rule in document["rules"] if rule["id"] == "try-hypr-input-overrides")["transform"]["block"]
+        home = {
+            ".config/hypr/input.lua": b"input { kb_layout = us }\n" + block.encode(),
+            ".config/hypr/monitors.lua": b"monitor = Virtual-1\n",
+            ".config/chromium-flags.conf": b"--ozone-platform=wayland\n--enable-wayland-ime\n",
+            ".config/omarchy/extensions/omarchy-menu.jsonc": b'{\n  "setup.try-omarchy": {"label": "Try"}\n}\n',
+            ".config/omarchy/hooks/pre-refresh-pacman.d/restore-arm-pacman": b"#!/bin/bash\n",
+            ".config/chromium/Default/Cookies": b"FAKE-CHROMIUM-COOKIES",
+            ".local/share/keyrings/login.keyring": b"FAKE-KEYRING",
+            "Documents/notes.md": b"personal\n",
+        }
+        source = self.root / "try-home"
+        source.mkdir(mode=0o700)
+        for name, data in home.items():
+            path = source / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.write_bytes(data)
+            path.chmod(0o600)
+        (source / ".local/share/omarchy").symlink_to("/usr/share/omarchy")
+        (source / "Work").symlink_to("/mnt/mac")
+        with collection.collect_fixture(source, self.request, document, snapshot_parent=self.parent) as snapshot:
+            captured = {name: path.read_bytes() for name, path in snapshot.paths.items() if path.is_file() and not path.is_symlink()}
+            self.assertEqual(captured[".config/hypr/input.lua"], b"input { kb_layout = us }\n")
+            self.assertEqual(captured[".config/chromium-flags.conf"], b"--ozone-platform=wayland\n")
+            self.assertEqual(json.loads(captured[".config/omarchy/extensions/omarchy-menu.jsonc"]), {})
+            self.assertEqual(captured["Documents/notes.md"], b"personal\n")
+            for absent in (".config/hypr/monitors.lua", ".config/omarchy/hooks/pre-refresh-pacman.d/restore-arm-pacman",
+                           ".local/share/omarchy", ".config/chromium/Default/Cookies", ".local/share/keyrings/login.keyring"):
+                self.assertNotIn(absent, snapshot.paths)
+            self.assertEqual(self.entry(snapshot, "Work")["mount"], "mac-share")
+            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/e1a0dbe/1")
+            self.assertEqual(snapshot.report["counts"]["held-out"], 2)
+            self.assertEqual(snapshot.report["counts"]["excluded"], 3)
+            self.assertEqual(snapshot.report["counts"]["transformed"], 3)
+
     def test_encrypted_snapshot_roundtrip_survives_source_edits_preserves_metadata_and_holdouts(self):
         age = configured_age()
         if age is None:
@@ -347,6 +522,7 @@ class CollectionTests(unittest.TestCase):
         target, job = self.root / "destination", self.root / "job"
         target.mkdir(mode=0o700)
         job.mkdir(mode=0o700)
+        self.write(".config/app-flags.conf", b"--user-choice\n--vm-only\n")
         with self.capture() as snapshot:
             manifest = copy.deepcopy(snapshot.manifest)
             report = copy.deepcopy(snapshot.report)
@@ -369,6 +545,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(report["counts"]["held-out"], 8)
         self.assertTrue(set(self.protected).isdisjoint(entry["path"] for entry in manifest["entries"]))
         self.assertNotIn(b"FAKE-SSH-SECRET", ciphertext.read_bytes())
+        self.assertEqual((target / ".config/app-flags.conf").read_bytes(), b"--user-choice\n")
 
 
 if __name__ == "__main__":

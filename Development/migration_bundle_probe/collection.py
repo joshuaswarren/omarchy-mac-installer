@@ -1,5 +1,6 @@
-"""Credential-aware snapshots of caller-owned disposable fixture trees.
+"""Policy-aware snapshots of caller-owned disposable fixture trees.
 
+The source root stands for the owner's home: policy paths are relative to it.
 No home CLI or production adapter. Sources must be quiescent; change detection
 does not establish an atomic application/database snapshot.
 """
@@ -13,13 +14,12 @@ import stat
 import tempfile
 import uuid
 
+from ..migration_contract import contract, policy as migration_policy
 from . import probe
 
 
 REQUEST_SCHEMA = "omarchy-migration-collection-request/1"
-LAYOUT_SCHEMA = "omarchy-migration-fixture-layout/1"
-REPORT_SCHEMA = "omarchy-migration-collection-report/1"
-POLICY = "fixture-holdouts/1"
+REPORT_SCHEMA = "omarchy-migration-collection-report/2"
 MAX_DEPTH = 64
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
@@ -46,13 +46,7 @@ def _beneath(path, root):
     return not root or path == root or path.startswith(root + "/")
 
 
-def _label(value):
-    return type(value) is str and 0 < len(value) <= 128 and all(
-        char.isascii() and (char.isalnum() or char in "-_/.") for char in value
-    )
-
-
-def _contracts(request, layout, supported):
+def _contracts(request, document, supported):
     if (not isinstance(request, dict) or set(request) != {"schema", "request_id", "selection", "selected_adapters"}
             or request["schema"] != REQUEST_SCHEMA):
         raise probe.Rejected("collection request fields/schema")
@@ -77,37 +71,29 @@ def _contracts(request, layout, supported):
             if any(_beneath(item[key], previous[key]) or _beneath(previous[key], item[key])
                    for key in ("source", "archive")):
                 raise probe.Rejected("overlapping collection selections")
-    if (not isinstance(layout, dict) or set(layout) != {"schema", "policy_revision", "layout_id", "stores"}
-            or layout["schema"] != LAYOUT_SCHEMA or layout["policy_revision"] != POLICY
-            or not _label(layout["layout_id"]) or not isinstance(layout["stores"], list)
-            or not 1 <= len(layout["stores"]) <= 32):
-        raise probe.Rejected("trusted fixture layout fields/schema")
-    stores, roots, adapters = set(), [], set()
-    for store in layout["stores"]:
-        if (not isinstance(store, dict) or set(store) != {"id", "roots", "adapter"}
-                or not _label(store["id"]) or store["id"] in stores
-                or not isinstance(store["roots"], list) or not 1 <= len(store["roots"]) <= 32):
-            raise probe.Rejected("trusted fixture store fields")
-        stores.add(store["id"])
+    try:
+        # The contract validates store, mount and rule shapes and overlaps.
+        loaded = migration_policy.Policy(document)
+    except contract.ContractError as error:
+        raise probe.Rejected(f"trusted policy: {error}") from error
+    adapters = set()
+    for store in loaded.stores:
         adapter = store["adapter"]
         if adapter is not None:
-            if not _label(adapter) or not adapter.startswith("fixture-") or adapter in adapters:
+            # This disposable collector never enables a production adapter.
+            if not adapter.startswith("fixture-") or adapter in adapters:
                 raise probe.Rejected("fixture adapter identity")
             adapters.add(adapter)
-        for root in store["roots"]:
-            _path(root)
-            if any(_beneath(root, previous) or _beneath(previous, root) for previous in roots):
-                raise probe.Rejected("overlapping fixture store roots")
-            roots.append(root)
     chosen = request["selected_adapters"]
     if (not isinstance(chosen, list) or any(type(value) is not str for value in chosen)
             or len(set(chosen)) != len(chosen) or not set(chosen) <= adapters
             or not isinstance(supported, (tuple, list, set, frozenset))
             or any(type(value) is not str for value in supported) or not set(supported) <= adapters):
         raise probe.Rejected("fixture adapter selection/capability")
-    for contract in (request, layout):
-        if len(_json_bytes(contract)) > probe.MAX_MANIFEST:
+    for value in (request, document):
+        if len(_json_bytes(value)) > probe.MAX_MANIFEST:
             raise probe.Rejected("collection contract size")
+    return loaded
 
 
 def _metadata(value):
@@ -127,9 +113,9 @@ def _mount(fd):
 
 
 class _Snapshot:
-    def __init__(self, root_fd, root, directory, request, layout, supported):
+    def __init__(self, root_fd, root, directory, request, policy, supported):
         self.root_fd, self.root, self.directory = root_fd, root, directory
-        self.request, self.layout = request, layout
+        self.request, self.policy = request, policy
         self.supported = frozenset(supported)
         self.mount = _mount(root_fd)
         self.paths, self.metadata, self.history = {}, {}, {}
@@ -144,21 +130,28 @@ class _Snapshot:
         if stat.S_ISDIR(metadata.st_mode) and metadata.st_mode & 0o022:
             raise probe.Rejected("unsafe source directory")
 
+    def _match(self, path):
+        return self.policy.match(path) if path else None
+
     def _store(self, path):
-        for store in self.layout["stores"]:
-            if any(_beneath(path, root) for root in store["roots"]):
-                adapter = store["adapter"]
-                if adapter is None or adapter not in self.supported:
-                    return store["id"], "adapter-unavailable"
-                if adapter not in self.request["selected_adapters"]:
-                    return store["id"], "unselected-store"
+        match = self._match(path)
+        if match and match.kind == "store":
+            adapter = match.item["adapter"]
+            if adapter is None or adapter not in self.supported:
+                return match.item["id"], "adapter-unavailable"
+            if adapter not in self.request["selected_adapters"]:
+                return match.item["id"], "unselected-store"
         return None
 
-    def _report(self, source, archive, outcome, reason, store=None):
+    def _rule(self, path):
+        match = self._match(path)
+        return match.item if match and match.kind == "rule" else None
+
+    def _report(self, source, archive, outcome, reason, store=None, rule=None, mount=None):
         if len(self.items) >= probe.MAX_ENTRIES:
             raise probe.Rejected("collection item limit")
         self.items.append({"source": source, "archive": archive, "outcome": outcome,
-                           "reason": reason, "store": store})
+                           "reason": reason, "store": store, "rule": rule, "mount": mount})
 
     @contextlib.contextmanager
     def _parent(self, path):
@@ -208,10 +201,20 @@ class _Snapshot:
         if excluded:
             self._report(source, archive, "held-out", excluded[1], excluded[0])
             return
+        rule = self._rule(source)
+        if rule and rule["action"] == "exclude":
+            # Like a store, an excluded path is never opened or listed.
+            self._report(source, archive, "excluded", rule["reason"], rule=rule["id"])
+            return
+        rule_id = rule["id"] if rule else None
         before = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if before.st_uid != os.geteuid():
             raise probe.Rejected("source entry owner differs")
         destination = self.directory / str(len(self.paths))
+        transform = rule if rule and rule["action"] == "transform" else None
+        if transform and not stat.S_ISREG(before.st_mode):
+            self._report(source, archive, "unsupported", "transform-target-not-file", rule=rule_id)
+            return
         if stat.S_ISDIR(before.st_mode):
             fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
             try:
@@ -219,7 +222,7 @@ class _Snapshot:
                     raise probe.Rejected("source directory replaced")
                 destination.mkdir(mode=0o700)
                 self.paths[archive], self.metadata[archive] = destination, before
-                self._report(source, archive, "included", "directory")
+                self._report(source, archive, "included", "directory", rule=rule_id)
                 self._directory(fd, source, archive, before)
             finally:
                 os.close(fd)
@@ -230,24 +233,45 @@ class _Snapshot:
                 return
             if before.st_size > probe.MAX_TOTAL - self.total:
                 raise probe.Rejected("collection byte limit")
+            if transform and before.st_size > migration_policy.MAX_TRANSFORM_INPUT:
+                self._report(source, archive, "unsupported", "transform-too-large", rule=rule_id)
+                return
             fd = os.open(name, FILE_FLAGS, dir_fd=parent)
+            captured = bytearray() if transform else None
             with os.fdopen(fd, "rb") as source_file:
                 self._guard(fd)
                 if _metadata(os.fstat(fd)) != _metadata(before):
                     raise probe.Rejected("source file replaced before capture")
                 count = 0
-                output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(output_fd, "wb") as output:
+                output_fd = None if transform else os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with contextlib.ExitStack() as stack:
+                    output = stack.enter_context(os.fdopen(output_fd, "wb")) if output_fd is not None else None
                     while piece := source_file.read(min(probe.CHUNK, before.st_size - count + 1)):
                         count += len(piece)
                         if count > before.st_size:
                             raise probe.Rejected("source file grew during capture")
-                        output.write(piece)
+                        if output is None:
+                            captured += piece
+                        else:
+                            output.write(piece)
                 if count != before.st_size or _metadata(os.fstat(fd)) != _metadata(before):
                     raise probe.Rejected("source file changed during capture")
+            outcome, reason = "included", "regular-file"
+            if transform:
+                result = self.policy.transform(transform, bytes(captured))
+                if result.status not in ("applied", "not-applicable"):
+                    # Withhold rather than export a file the policy cannot clean.
+                    self._report(source, archive, "unsupported", f"transform-{result.status}", rule=rule_id)
+                    return
+                if result.status == "applied":
+                    outcome, reason = "transformed", transform["reason"]
+                output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(output_fd, "wb") as output:
+                    output.write(result.data)
+                count = len(result.data)
             self.total += count
             self.paths[archive], self.metadata[archive] = destination, before
-            self._report(source, archive, "included", "regular-file")
+            self._report(source, archive, outcome, reason, rule=rule_id)
         elif stat.S_ISLNK(before.st_mode):
             if any(item["source"] != item["archive"] for item in self.request["selection"]):
                 # V2 has no explicit inert-link flag. A renamed selection
@@ -259,7 +283,12 @@ class _Snapshot:
                 raise probe.Rejected("source link target limit")
             destination.symlink_to(target)
             self.paths[archive], self.metadata[archive] = destination, before
-            self._report(source, archive, "included", "link-metadata")
+            mount = self.policy.mount(target)
+            if mount:
+                # Recorded as inert metadata; mounted contents need their own selection.
+                self._report(source, archive, "inert-link", "mount-link", rule=rule_id, mount=mount["id"])
+            else:
+                self._report(source, archive, "included", "link-metadata", rule=rule_id)
         else:
             self._report(source, archive, "unsupported", "special-file")
             return
@@ -316,24 +345,24 @@ class _Snapshot:
             entry = by_path.get(item["archive"])
             if item["reason"] == "link-metadata" and probe.link_target(entry, by_path) is None:
                 item.update(outcome="inert-link", reason="target-unavailable")
-        outcomes = ("included", "held-out", "unsupported", "inert-link")
+        outcomes = ("included", "transformed", "held-out", "excluded", "unsupported", "inert-link")
         self.report = {
             "schema": REPORT_SCHEMA, "request_id": self.request["request_id"],
             "request_sha256": hashlib.sha256(_json_bytes(self.request)).hexdigest(),
-            "layout_sha256": hashlib.sha256(_json_bytes(self.layout)).hexdigest(),
+            "policy_sha256": hashlib.sha256(_json_bytes(self.policy.document)).hexdigest(),
             "supported_adapters": sorted(self.supported),
             "capabilities_sha256": hashlib.sha256(_json_bytes(sorted(self.supported))).hexdigest(),
-            "policy_revision": POLICY, "status": "complete",
+            "policy_revision": self.policy.revision, "status": "complete",
             "entries": self.items, "counts": {outcome: sum(item["outcome"] == outcome for item in self.items)
                                                for outcome in outcomes},
         }
 
 
 @contextlib.contextmanager
-def collect_fixture(root, request, layout, *, supported_adapters=(), snapshot_parent):
+def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_parent):
     """Capture only an explicitly supplied, caller-created synthetic source."""
-    _contracts(request, layout, supported_adapters)
-    request, layout = json.loads(_json_bytes(request)), json.loads(_json_bytes(layout))
+    loaded = _contracts(request, policy, supported_adapters)
+    request = json.loads(_json_bytes(request))
     if os.geteuid() == 0:
         raise probe.Rejected("fixture collection requires an unprivileged owner")
     root, parent = Path(root).absolute(), Path(snapshot_parent).absolute()
@@ -353,7 +382,7 @@ def collect_fixture(root, request, layout, *, supported_adapters=(), snapshot_pa
                 directory = Path(temporary)
                 if directory.resolve().is_relative_to(root.resolve()) or root.resolve().is_relative_to(directory.resolve()):
                     raise probe.Rejected("snapshot and source must be separate")
-                snapshot = _Snapshot(root_fd, root, directory, request, layout, supported_adapters)
+                snapshot = _Snapshot(root_fd, root, directory, request, loaded, supported_adapters)
                 snapshot.capture()
                 yield snapshot
         finally:

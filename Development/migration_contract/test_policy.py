@@ -1,0 +1,170 @@
+import copy
+import json
+from pathlib import Path
+import unittest
+
+from . import contract, policy
+
+HERE = Path(__file__).resolve().parent
+DOCUMENT = json.loads((HERE / "policy/try-omarchy-e1a0dbe.json").read_text())
+
+# Try's seeded file at e1a0dbe (guest/native-overlay/etc/skel/...).
+SEEDED_MENU = b'''{
+  "setup.try-omarchy": {
+    "icon": "\xef\x84\xb3",
+    "label": "Try Omarchy Settings",
+    "description": "Open the Mac app settings",
+    "action": "omarchy-native-settings",
+    "when": "test -w /dev/virtio-ports/dev.tryomarchy.settings"
+  }
+}
+'''
+
+# The same file after the Touch ID and integrations entries and a user edit.
+EXTENDED_MENU = b'''{
+  // My own shortcuts stay.
+  "setup.try-omarchy": {
+    "label": "Try Omarchy Settings",
+    "action": "omarchy-native-settings"
+  },
+  "setup.security.touch-id": {"label":"Touch ID","action":"try-omarchy-touch-id"},
+  "launch.notes": {"label": "Notes", "action": "obsidian"},  /* keep */
+  "setup.try-omarchy-integrations": {"label":"Try Omarchy Integrations","action":"/usr/local/bin/try-omarchy-integrations"},
+}
+'''
+
+
+def rule(rule_id):
+    return next(item for item in DOCUMENT["rules"] if item["id"] == rule_id)
+
+
+class MatchTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = policy.Policy(DOCUMENT)
+
+    def test_stores_govern_their_whole_tree(self):
+        self.assertEqual(self.policy.match(".ssh/id_ed25519"), ("store", self.policy.stores[0]))
+        self.assertEqual(self.policy.match(".config/chromium/Default/Cookies").item["id"], "chromium")
+
+    def test_exact_rules_do_not_cover_children_or_siblings(self):
+        self.assertEqual(self.policy.match(".config/hypr/monitors.lua").item["id"], "try-hypr-monitors")
+        self.assertIsNone(self.policy.match(".config/hypr/monitors.lua.bak"))
+        self.assertIsNone(self.policy.match(".config/hypr"))
+        self.assertIsNone(self.policy.match(".config/chromium-flags.conf.d/x"))
+
+    def test_tree_rules_cover_descendants(self):
+        self.assertEqual(self.policy.match(".local/state/omarchy/toggles/hypr/flags.lua").item["id"],
+                         "omarchy-hypr-toggles")
+
+    def test_unknown_personal_paths_are_not_matched(self):
+        for path in ("Documents/report.md", ".config/nvim/init.lua", ".bashrc", ".sshconfig"):
+            self.assertIsNone(self.policy.match(path), path)
+
+    def test_match_rejects_unsafe_paths(self):
+        for path in ("../.ssh", "/etc/passwd", ".config//hypr", ""):
+            with self.assertRaises(contract.ContractError):
+                self.policy.match(path)
+
+    def test_links_into_the_mac_share_are_recognized(self):
+        self.assertEqual(self.policy.mount("/mnt/mac")["id"], "mac-share")
+        self.assertEqual(self.policy.mount("/mnt/mac/Projects/x")["id"], "mac-share")
+        self.assertEqual(self.policy.mount("//mnt/./mac/a")["id"], "mac-share")
+        self.assertIsNone(self.policy.mount("/mnt/macintosh"))
+        self.assertIsNone(self.policy.mount("Projects/x"))
+        self.assertEqual(self.policy.mount("/home/../mnt/mac")["id"], "unresolved")
+
+    def test_policy_rejects_documents_that_are_not_policies(self):
+        with self.assertRaises(contract.ContractError):
+            policy.Policy(json.loads((HERE / "fixtures/valid/plan.json").read_text()))
+
+    def test_policy_keeps_its_own_copy(self):
+        document = copy.deepcopy(DOCUMENT)
+        loaded = policy.Policy(document)
+        document["rules"].clear()
+        self.assertTrue(loaded.rules)
+
+
+class StripBlockTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = policy.Policy(DOCUMENT)
+
+    def test_try_input_block_is_removed_and_user_edits_survive(self):
+        block = rule("try-hypr-input-overrides")["transform"]["block"].encode()
+        original = b"input {\n  kb_layout = us\n}\n" + block + b"\n-- my mouse speed\nsensitivity = 0.3\n"
+        result = self.policy.transform(rule("try-hypr-input-overrides"), original)
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(result.data, b"input {\n  kb_layout = us\n}\n\n-- my mouse speed\nsensitivity = 0.3\n")
+
+    def test_chromium_flag_line_is_removed_only_on_a_line_boundary(self):
+        flags = rule("try-chromium-wayland-ime")
+        result = self.policy.transform(flags, b"--ozone-platform=wayland\n--enable-wayland-ime\n")
+        self.assertEqual(result, ("--ozone-platform=wayland\n".encode(), "applied"))
+        untouched = b"--no-enable-wayland-ime\n"
+        self.assertEqual(self.policy.transform(flags, untouched), (untouched, "not-applicable"))
+
+    def test_missing_block_leaves_file_unchanged(self):
+        data = b"-- nothing from Try here\n"
+        self.assertEqual(self.policy.transform(rule("try-hypr-input-overrides"), data), (data, "not-applicable"))
+
+    def test_repeated_block_is_ambiguous(self):
+        line = b"--enable-wayland-ime\n"
+        self.assertEqual(self.policy.transform(rule("try-chromium-wayland-ime"), line * 2), (None, "ambiguous"))
+
+    def test_oversized_input_is_refused(self):
+        data = b"x" * (policy.MAX_TRANSFORM_INPUT + 1)
+        self.assertEqual(self.policy.transform(rule("try-chromium-wayland-ime"), data), (None, "too-large"))
+
+    def test_non_transform_rule_cannot_be_applied(self):
+        with self.assertRaises(ValueError):
+            self.policy.transform(rule("try-hypr-monitors"), b"")
+
+
+class RemoveKeysTests(unittest.TestCase):
+    def setUp(self):
+        self.policy = policy.Policy(DOCUMENT)
+        self.menu = rule("try-menu-entries")
+
+    def keys(self, data):
+        return [member[0] for member in policy._Scanner(data.decode()).members()]
+
+    def test_seeded_try_menu_becomes_an_empty_object(self):
+        result = self.policy.transform(self.menu, SEEDED_MENU)
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(self.keys(result.data), [])
+        self.assertEqual(json.loads(result.data), {})
+
+    def test_user_entries_and_comments_survive(self):
+        result = self.policy.transform(self.menu, EXTENDED_MENU)
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(self.keys(result.data), ["launch.notes"])
+        text = result.data.decode()
+        self.assertIn("// My own shortcuts stay.", text)
+        self.assertIn('"launch.notes": {"label": "Notes", "action": "obsidian"}', text)
+        self.assertNotIn("try-omarchy", text)
+        self.assertNotIn("touch-id", text)
+
+    def test_removing_the_last_member_leaves_no_trailing_comma(self):
+        data = b'{\n  "launch.notes": {"a": 1},\n  "setup.try-omarchy": {"b": 2}\n}\n'
+        result = self.policy.transform(self.menu, data)
+        self.assertEqual(json.loads(result.data), {"launch.notes": {"a": 1}})
+
+    def test_file_without_try_keys_is_unchanged(self):
+        data = b'{"launch.notes": {"label": "Notes"}}\n'
+        self.assertEqual(self.policy.transform(self.menu, data), (data, "not-applicable"))
+
+    def test_strings_that_look_like_keys_or_comments_are_not_parsed_as_such(self):
+        data = b'{\n  "launch.x": {"action": "echo \\"setup.try-omarchy\\" // not a comment"},\n  "setup.try-omarchy": {}\n}\n'
+        result = self.policy.transform(self.menu, data)
+        self.assertEqual(self.keys(result.data), ["launch.x"])
+        self.assertIn('// not a comment', result.data.decode())
+
+    def test_malformed_or_ambiguous_input_fails_closed(self):
+        for data in (b'{"setup.try-omarchy": {}', b'[]', b'{"a": 1} {"b": 2}',
+                     b'{"setup.try-omarchy": 1, "setup.try-omarchy": 2}', b'{"a": tru}',
+                     b'{"a": "unterminated}', b'{/* open', b'\xff'):
+            with self.subTest(data=data):
+                self.assertEqual(self.policy.transform(self.menu, data), (None, "failed"))
+
+
+if __name__ == "__main__":
+    unittest.main()
