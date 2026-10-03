@@ -171,7 +171,7 @@
       {
         "path": "overlay/src/omarchy_asahi.py",
         "destination": "src/omarchy_asahi.py",
-        "sha256": "b973d0f189ff49ded3bf8a984f95f7eb3d33d79dd4181ebe591dd23d7d1e2b21"
+        "sha256": "94058866967b2502fcbec252e143ac057cc4c1e6854dfe20226e88bcfe62bf1e"
       },
       {
         "path": "overlay/src/omarchy_contract.py",
@@ -206,7 +206,7 @@
       {
         "path": "overlay/tests/test_omarchy_asahi.py",
         "destination": "tests/test_omarchy_asahi.py",
-        "sha256": "1192980f36da8f34246bcbabb8adf516fb65770dd27bc35b0bc58303988b172b"
+        "sha256": "094a2aa400b4c43ed7998b128771a65c2207c6bcd327428e8df69606c292cd1f"
       },
       {
         "path": "overlay/tests/test_omarchy_contract.py",
