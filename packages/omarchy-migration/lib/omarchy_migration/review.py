@@ -45,6 +45,7 @@ REASONS = {
     "replacement inputs changed": "destination_changed",
     "original backup changed or disappeared": "backup_unavailable",
     "structure retained; source directory metadata deferred": "directory_metadata_deferred",
+    "directory metadata restored": "directory_metadata_restored",
 }
 PLAN_COUNTS = {"create": "create", "present": "present", "restored": "present",
                "replace": "replace", "conflict": "conflict", "inert": "inert"}

@@ -175,9 +175,10 @@ class TreeRestoreTests(unittest.TestCase):
                 self.assertEqual(destination.stat().st_mtime_ns, entry["mtime_ns"])
             elif entry["kind"] == "directory":
                 self.assertTrue(destination.is_dir())
-                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(destination.stat().st_mode), entry["mode"] & ~0o022)
+                self.assertEqual(destination.stat().st_mtime_ns, entry["mtime_ns"])
                 self.assertEqual(report[entry["path"]].status, "directory")
-                self.assertIn("metadata deferred", report[entry["path"]].reason)
+                self.assertEqual(report[entry["path"]].reason, "directory metadata restored")
         self.assertEqual(list((self.target / "Projects/demo/empty").iterdir()), [])
         for name, target in self.safe_links.items():
             path = self.target / name
@@ -206,15 +207,129 @@ class TreeRestoreTests(unittest.TestCase):
     def test_existing_directory_modes_are_retained_and_later_changes_block_children(self):
         directory = self.target / "Projects"
         directory.mkdir(mode=0o750)
+        os.utime(directory, ns=(1, 1))
         with self.verified() as bundle:
             report = self.run_restore(bundle)
             self.assertEqual(report["Projects"].status, "directory")
+            self.assertIn("metadata deferred", report["Projects"].reason)
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
+            self.assertNotEqual(directory.stat().st_mtime_ns, MTIME)
             directory.chmod(0o700)
             report = self.run_restore(bundle)
         self.assertEqual(report["Projects"].status, "conflict")
         self.assertEqual(report["Projects/demo/run"].status, "conflict")
         self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o700)
+
+    def custom_bundle(self, build, finish=lambda root: None):
+        """Encrypt a test-built tree; finish() runs after mtimes, e.g. to drop write bits."""
+        source = self.root / "custom-source"
+        source.mkdir(mode=0o700)
+        build(source)
+        paths = synthetic_paths(source)
+        for path in paths.values():
+            os.utime(path, ns=(MTIME, MTIME), follow_symlinks=False)
+        finish(source)
+        self.addCleanup(lambda: [path.chmod(0o700) for path in source.rglob("*") if path.is_dir() and not path.is_symlink()])
+        manifest = probe.make_tree_manifest(paths)
+        ciphertext = self.root / "custom.age"
+        probe.encrypt(self.age, SECRET, ciphertext, lambda stream: probe.write_archive(stream, manifest, paths))
+        return ciphertext, manifest
+
+    def release_target(self):
+        for path in [self.target, *self.target.rglob("*")]:
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o700)
+
+    def test_created_directory_waits_for_conflicting_child_then_finalizes_on_retry(self):
+        def build(root):
+            (root / "Notes").mkdir(mode=0o750)
+            (root / "Notes/a.txt").write_bytes(b"a\n")
+            (root / "Notes/b.txt").write_bytes(b"b\n")
+        ciphertext, _ = self.custom_bundle(build)
+        self.addCleanup(self.release_target)
+        notes = self.target / "Notes"
+        original = restore.Restorer._restore_directory
+
+        def then_user_writes_b(importer, entry, action, observed):
+            result = original(importer, entry, action, observed)
+            if entry["path"] == "Notes":
+                (notes / "b.txt").write_bytes(b"written by the user meanwhile\n")
+            return result
+
+        with self.verified(ciphertext) as bundle:
+            with restore.Restorer(bundle, self.target, self.job) as importer:
+                plan = importer.plan()
+                with patch.object(restore.Restorer, "_restore_directory", then_user_writes_b):
+                    report = {action.path: action for action in importer.apply(plan)}
+            self.assertEqual(report["Notes/b.txt"].status, "conflict")
+            self.assertEqual(report["Notes/a.txt"].status, "restored")
+            self.assertIn("metadata deferred", report["Notes"].reason)
+            self.assertEqual(stat.S_IMODE(notes.stat().st_mode), 0o700)
+            (notes / "b.txt").unlink()
+            with restore.Restorer(bundle, self.target, self.job) as importer:
+                plan = importer.plan()
+                planned = {action.path: action.status for action in plan}
+                report = {action.path: action for action in importer.apply(plan)}
+        self.assertEqual((planned["Notes"], planned["Notes/b.txt"]), ("restored", "create"))
+        self.assertEqual((notes / "b.txt").read_bytes(), b"b\n")
+        self.assertEqual(report["Notes"].reason, "directory metadata restored")
+        self.assertEqual((stat.S_IMODE(notes.stat().st_mode), notes.stat().st_mtime_ns), (0o750, MTIME))
+
+    def test_read_only_source_directory_keeps_its_contents_and_retries_cleanly(self):
+        def build(root):
+            (root / "Archive").mkdir()
+            (root / "Archive/old.txt").write_bytes(b"kept\n")
+        ciphertext, manifest = self.custom_bundle(build, lambda root: (root / "Archive").chmod(0o555))
+        self.assertEqual(next(e for e in manifest["entries"] if e["path"] == "Archive")["mode"], 0o555)
+        self.addCleanup(self.release_target)
+        with self.verified(ciphertext) as bundle:
+            first = self.run_restore(bundle)
+            second = self.run_restore(bundle)
+        archive = self.target / "Archive"
+        self.assertEqual((archive / "old.txt").read_bytes(), b"kept\n")
+        self.assertEqual((stat.S_IMODE(archive.stat().st_mode), archive.stat().st_mtime_ns), (0o555, MTIME))
+        self.assertEqual(first["Archive"].reason, "directory metadata restored")
+        self.assertNotIn("conflict", {action.status for action in second.values()})
+
+    def test_crash_during_finalization_recovers_on_retry(self):
+        def build(root):
+            (root / "Pictures").mkdir(mode=0o750)
+            (root / "Pictures/a.png").write_bytes(b"png\n")
+        ciphertext, _ = self.custom_bundle(build)
+        self.addCleanup(self.release_target)
+        with self.verified(ciphertext) as bundle:
+            original_utime = os.utime
+
+            def fail_for_directories(target, *args, **kwargs):
+                # Only finalization touches directory times; file restores proceed.
+                if isinstance(target, int) and stat.S_ISDIR(os.fstat(target).st_mode):
+                    raise OSError("power lost")
+                return original_utime(target, *args, **kwargs)
+
+            with restore.Restorer(bundle, self.target, self.job) as importer:
+                plan = importer.plan()
+                with patch.object(restore.os, "utime", side_effect=fail_for_directories):
+                    with self.assertRaises(OSError):
+                        importer.apply(plan)
+            self.assertEqual((self.target / "Pictures/a.png").read_bytes(), b"png\n")
+            pictures = self.target / "Pictures"
+            self.assertEqual(stat.S_IMODE(pictures.stat().st_mode), 0o750)  # mode set, journal not updated
+            with restore.Restorer(bundle, self.target, self.job) as importer:
+                plan = importer.plan()
+                self.assertEqual({action.path: action.status for action in plan}["Pictures"], "restored")
+                report = {action.path: action for action in importer.apply(plan)}
+        self.assertEqual(report["Pictures"].reason, "directory metadata restored")
+        self.assertEqual(pictures.stat().st_mtime_ns, MTIME)
+
+    def test_group_writable_source_directory_is_restored_without_group_write(self):
+        def build(root):
+            (root / "Shared").mkdir()
+            (root / "Shared/x").write_bytes(b"x\n")
+        ciphertext, manifest = self.custom_bundle(build, lambda root: (root / "Shared").chmod(0o775))
+        self.assertEqual(next(e for e in manifest["entries"] if e["path"] == "Shared")["mode"], 0o775)
+        with self.verified(ciphertext) as bundle:
+            self.run_restore(bundle)
+        self.assertEqual(stat.S_IMODE((self.target / "Shared").stat().st_mode), 0o755)
 
     def test_destination_symlink_cannot_turn_a_valid_manifest_link_into_an_escape(self):
         outside = self.root / "outside"

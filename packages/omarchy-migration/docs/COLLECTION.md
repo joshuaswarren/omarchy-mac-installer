@@ -39,7 +39,7 @@ Protected-path classification happens in source space before stat/open/descendan
 
 Regular files are copied through checked descriptors with size/metadata/identity checks before and after reading. Directories have bounded sorted names and before/after metadata/name checks; a final metadata pass checks captured entries and the original root. Changed sources abort without yielding a handle, and ordinary errors remove only the owned snapshot. These checks require quiescence and do not establish a coherent atomic cutover across live applications, databases, or host shares.
 
-Snapshot files remain 0600 and directories 0700. Original source mode/mtime and link text are recorded in the validated v2 manifest; copied object permissions do not impersonate source final permissions. Original source paths are never supplied to archive writing. Later source edits/deletions cannot change the captured bytes. Mode/mtime/link metadata is the portable scope; ACLs, xattrs, sparse layout, special permission bits, ownership recreation, and hardlink relationships are not preserved. Destination directory metadata remains deferred by the importer.
+Snapshot files remain 0600 and directories 0700. Original source mode/mtime and link text are recorded in the validated v2 manifest; copied object permissions do not impersonate source final permissions. Original source paths are never supplied to archive writing. Later source edits/deletions cannot change the captured bytes. Mode/mtime/link metadata is the portable scope; ACLs, xattrs, sparse layout, special permission bits, ownership recreation, and hardlink relationships are not preserved. The importer applies directory mode and mtime to directories it creates; see [TREE.md](TREE.md).
 
 ## Private report and lifetime
 

@@ -130,13 +130,26 @@ def _matches(entry, observed):
     if observed is None or "blocked" in observed:
         return False
     if probe.entry_kind(entry) == "directory":
-        # This slice restores structure; source directory metadata is deferred.
+        # Structure only: source mode and mtime are applied at finalization.
         return set(observed) == {"device", "inode", "uid", "gid", "mode"}
     if probe.entry_kind(entry) == "symlink":
         return all(observed.get(key) == entry[key] for key in ("target", "mtime_ns"))
     return observed is not None and all(
         observed.get(key) == entry[key] for key in ("bytes", "mode", "mtime_ns", "sha256")
     )
+
+
+def _final_mode(entry):
+    # The restorer's own checks refuse group- or other-writable directories.
+    return entry["mode"] & ~0o022
+
+
+def _created_directory_matches(entry, saved, observed):
+    """A directory this job created, before or after its metadata finalization."""
+    if not isinstance(observed, dict) or "blocked" in observed or set(observed) != set(saved):
+        return False
+    return (all(observed[key] == saved[key] for key in saved if key != "mode")
+            and observed["mode"] in (saved["mode"], _final_mode(entry)))
 
 
 def _ancestors(path):
@@ -450,7 +463,11 @@ class Restorer:
             elif kind == "file" and not entry["mode"] & 0o400:
                 status, reason = "conflict", "unreadable source mode is unsupported by this probe"
             elif saved:
-                if observed == saved["file"] and _matches(entry, observed) and self._backup_valid(saved):
+                created = kind == "directory" and saved["state"] == "applied"
+                if created and _created_directory_matches(entry, saved["file"], observed):
+                    # A crash during finalization leaves either mode; both are this job's.
+                    status, reason = "restored", "prior publication matches journal"
+                elif observed == saved["file"] and _matches(entry, observed) and self._backup_valid(saved):
                     status, reason = "restored", "prior publication matches journal"
                 else:
                     # Missing after intent is ambiguous: a user may have
@@ -592,6 +609,10 @@ class Restorer:
 
     def _restore_directory(self, entry, action, observed):
         identity = entry["object"]
+        previous = self._journal["entries"].get(identity)
+        # Only directories this job created are "applied" and later finalized;
+        # pre-existing destination directories are retained untouched.
+        created = action.status == "create" or (previous is not None and previous["state"] == "applied")
         with self._parent(entry["path"]) as parent:
             if parent is None:
                 raise probe.Rejected("directory parent is unavailable")
@@ -619,9 +640,49 @@ class Restorer:
             finally:
                 os.close(fd)
             os.fsync(parent)
-        self._journal["entries"][identity] = {"state": "applied", "file": fingerprint, "temporary": None}
+        self._journal["entries"][identity] = {"state": "applied" if created else "retained",
+                                              "file": fingerprint, "temporary": None}
         self._save()  # Establish directory identity before touching children.
         return Action(entry["path"], "directory", "structure retained; source directory metadata deferred"), fingerprint
+
+    def _finalize_directories(self, report):
+        """Apply source mode and mtime to directories this job created.
+
+        Runs after every publication, deepest first, so creating children
+        cannot disturb a parent's mtime and a read-only source mode cannot
+        block its own contents. A directory with an unfinished descendant
+        stays private and is finalized by a later retry.
+        """
+        entries = self.bundle._manifest["entries"]
+        finished = {"restored", "replaced", "present", "directory", "inert"}
+        directories = [index for index, entry in enumerate(entries) if probe.entry_kind(entry) == "directory"]
+        for index in sorted(directories, key=lambda index: -entries[index]["path"].count("/")):
+            entry, result = entries[index], report[index]
+            saved = self._journal["entries"].get(entry["object"])
+            if result is None or result.status != "directory" or saved is None or saved["state"] != "applied":
+                continue
+            prefix = entry["path"] + "/"
+            if any(other["path"].startswith(prefix) and (report[position] is None or report[position].status not in finished)
+                   for position, other in enumerate(entries)):
+                continue
+            self._check()
+            with self._parent(entry["path"]) as parent:
+                if parent is None:
+                    report[index] = self._action(entry, "conflict", "directory dependency is unavailable")
+                    continue
+                fd = os.open(entry["path"].split("/")[-1], DIRECTORY_FLAGS, dir_fd=parent)
+                try:
+                    if not _created_directory_matches(entry, saved["file"], _directory_fingerprint(fd)):
+                        report[index] = self._action(entry, "conflict", "directory changed during application")
+                        continue
+                    os.fchmod(fd, _final_mode(entry))
+                    os.utime(fd, ns=(entry["mtime_ns"], entry["mtime_ns"]))
+                    os.fsync(fd)
+                    saved["file"] = _directory_fingerprint(fd)
+                finally:
+                    os.close(fd)
+            self._save()
+            report[index] = Action(entry["path"], "directory", "directory metadata restored")
 
     def _link_ready(self, entry):
         resolution = probe.link_target(entry, self._entries)
@@ -753,4 +814,6 @@ class Restorer:
             report[index] = Action(entry["path"], "replaced" if backup else "restored",
                                    "original retained in private backup" if backup else "new entry published",
                                    backup["name"] if backup else None)
+        if self._tree:
+            self._finalize_directories(report)
         return tuple(report)
