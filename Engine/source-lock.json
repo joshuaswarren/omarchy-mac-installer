@@ -206,7 +206,7 @@
       {
         "path": "overlay/tests/test_omarchy_asahi.py",
         "destination": "tests/test_omarchy_asahi.py",
-        "sha256": "06d68388e85330e8d1a82abb0a72d71f7e0a93f0ad1394aa33951f169dbe6288"
+        "sha256": "bf57c80bf26bbfc00a3cb24d1a5f8fc1196e8c155789fd4af97dddc0e4b7292a"
       },
       {
         "path": "overlay/tests/test_omarchy_contract.py",
