@@ -4,13 +4,13 @@
       "bytes": 1048000,
       "default_selected": true,
       "files": 4,
-      "id": "files-and-config"
+      "id": "configuration"
     },
     {
       "bytes": 576,
       "default_selected": true,
       "files": 2,
-      "id": "projects"
+      "id": "files-and-projects"
     }
   ],
   "credential_stores": [

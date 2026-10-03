@@ -5,8 +5,8 @@
   "schema": "omarchy-migration/export-request/1",
   "selection": {
     "categories": [
-      "files-and-config",
-      "projects"
+      "configuration",
+      "files-and-projects"
     ],
     "credential_stores": [
       "ssh"

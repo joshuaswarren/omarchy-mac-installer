@@ -19,6 +19,7 @@ import uuid
 
 from ..migration_contract import contract
 from . import collection, probe
+from .categories import CATEGORIES, DEFAULT_SELECTED, category
 from .dependency import configured_age
 
 
@@ -30,7 +31,6 @@ SYNTHETIC_UID = 1000
 POLICY_PATH = Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-e1a0dbe.json"
 FIXTURE_ADAPTERS = {"ssh": "fixture-ssh-bytes/1", "brave": "fixture-browser/1"}
 SUPPORTED_ADAPTERS = tuple(sorted(FIXTURE_ADAPTERS.values()))
-CATEGORIES = ("files-and-config", "projects")
 INVENTORY_NAMESPACE = uuid.UUID("5a0e2c1e-7f43-4d1b-9a8e-6c0d3b2f4e17")
 MAX_REQUEST = contract.MAX_REQUEST
 
@@ -91,10 +91,6 @@ def inventory_id(policy, files, links):
     return str(uuid.uuid5(INVENTORY_NAMESPACE, digest))
 
 
-def category(path):
-    return "projects" if path.split("/")[0] == "Projects" else "files-and-config"
-
-
 def roots(files, links, categories):
     names = {name.split("/")[0] for name in files} | set(links)
     return [{"source": name, "archive": name} for name in sorted(names) if category(name) in categories]
@@ -150,7 +146,8 @@ def inventory_document(policy):
         "source": {"provider": "try-omarchy", "architecture": "aarch64",
                    "omarchy_version": OMARCHY_VERSION, "account_uid": SYNTHETIC_UID},
         "policy_revision": policy["revision"],
-        "categories": [{"id": name, **counts[name], "default_selected": True} for name in CATEGORIES],
+        "categories": [{"id": name, **counts[name], "default_selected": DEFAULT_SELECTED[name]}
+                       for name in CATEGORIES],
         "credential_stores": [{"id": store["id"], "category": store["category"], "present": store["id"] in present,
                                "adapter_available": store["adapter"] in SUPPORTED_ADAPTERS}
                               for store in policy["credential_stores"]],

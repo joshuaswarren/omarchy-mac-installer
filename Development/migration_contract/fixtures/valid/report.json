@@ -2,7 +2,7 @@
   "categories": [
     {
       "conflicts": 1,
-      "id": "files-and-config",
+      "id": "configuration",
       "omitted": 0,
       "outcome": "partial",
       "reasons": [
@@ -12,7 +12,7 @@
     },
     {
       "conflicts": 0,
-      "id": "projects",
+      "id": "files-and-projects",
       "omitted": 0,
       "outcome": "restored",
       "reasons": [],

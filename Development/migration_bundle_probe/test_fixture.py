@@ -32,7 +32,7 @@ def export_request(**selection):
     files, links = fixture.examples(policy)
     return {"schema": contract.EXPORT_REQUEST, "request_id": str(uuid.uuid4()),
             "inventory_id": fixture.inventory_id(policy, files, links), "policy_revision": policy["revision"],
-            "selection": {"categories": ["files-and-config", "projects"], "credential_stores": [], **selection}}
+            "selection": {"categories": ["files-and-projects", "configuration"], "credential_stores": [], **selection}}
 
 
 class RequestTests(unittest.TestCase):
@@ -72,7 +72,8 @@ class RequestTests(unittest.TestCase):
         available = {adapter["id"] for adapter in capabilities["adapters"] if adapter["available"]}
         self.assertEqual(available, set(fixture.SUPPORTED_ADAPTERS))
         categories = {item["id"]: item for item in inventory["categories"]}
-        self.assertEqual((categories["files-and-config"]["files"], categories["projects"]["files"]), (5, 2))
+        self.assertEqual((categories["configuration"]["files"], categories["files-and-projects"]["files"]), (5, 2))
+        self.assertEqual((categories["caches"]["files"], categories["caches"]["default_selected"]), (0, False))
         stores = {item["id"]: item for item in inventory["credential_stores"]}
         self.assertEqual((stores["ssh"]["present"], stores["ssh"]["adapter_available"]), (True, True))
         self.assertEqual((stores["chromium"]["present"], stores["chromium"]["adapter_available"]), (False, False))
@@ -87,7 +88,7 @@ class RequestTests(unittest.TestCase):
                 (export_request(categories=["photos"]), "unknown_category"),
                 (export_request(credential_stores=["keychain"]), "unknown_credential_store"),
                 (export_request(credential_stores=["chromium"]), "credential_store_unavailable"),
-                (export_request(categories=["projects"], credential_stores=["ssh"]), "credential_store_outside_selection")):
+                (export_request(categories=["files-and-projects"], credential_stores=["ssh"]), "credential_store_outside_selection")):
             with self.subTest(error=error), self.assertRaises(fixture.FixtureError) as caught:
                 contract.validate(request)
                 fixture.check_request(request, policy)
@@ -171,7 +172,7 @@ class ExportFixtureTests(unittest.TestCase):
         self.assertEqual(files, EXPORTED_FILES | {".ssh/id_example", ".config/BraveSoftware/Brave-Origin/Default/example"})
 
     def test_category_selection_limits_the_export(self):
-        self.request = export_request(categories=["projects"])
+        self.request = export_request(categories=["files-and-projects"])
         self.request_path.write_text(json.dumps(self.request))
         self.assertEqual(self.execute()[0], 0)
         files, _ = self.decoded_files()
@@ -179,7 +180,7 @@ class ExportFixtureTests(unittest.TestCase):
 
     def test_changed_request_or_ciphertext_cannot_reuse_success(self):
         self.assertEqual(self.execute()[0], 0)
-        changed = dict(self.request, selection={"categories": ["projects"], "credential_stores": []})
+        changed = dict(self.request, selection={"categories": ["files-and-projects"], "credential_stores": []})
         self.request_path.write_text(json.dumps(changed))
         code, events = self.execute()
         self.assertEqual((code, events[-1]["error"]), (1, "request_conflict"))

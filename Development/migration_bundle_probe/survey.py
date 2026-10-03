@@ -1,0 +1,244 @@
+"""Read-only migration survey of the caller's own home directory.
+
+Lists directories and reads metadata only: it never opens a regular file,
+never follows a link, never enters a credential store, an excluded path or
+another filesystem, and writes nothing. The result is an inventory/1
+document plus a private, local-only detail summary.
+"""
+
+import argparse
+from collections import Counter
+import json
+import os
+from pathlib import Path
+import platform
+import stat
+import sys
+import uuid
+
+from ..migration_contract import contract, policy as migration_policy
+from . import collection
+from .categories import CATEGORIES, DEFAULT_SELECTED, category
+
+POLICY_PATH = Path(__file__).resolve().parents[1] / "migration_contract/policy/try-omarchy-e1a0dbe.json"
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+MAX_DEPTH = 64
+MAX_ENTRIES = 2_000_000
+EXAMPLES = 10
+
+
+class SurveyError(RuntimeError):
+    pass
+
+
+class Survey:
+    def __init__(self, policy, max_entries=MAX_ENTRIES):
+        self.policy = policy
+        self.max_entries = max_entries
+        self.entries = 0
+        self.counts = {name: Counter() for name in CATEGORIES}
+        self.stores = {}
+        self.outcomes = {}
+        self.top_level = Counter()
+
+    def note(self, outcome, path, **fields):
+        bucket = self.outcomes.setdefault(outcome, {"count": 0, "examples": []})
+        bucket["count"] += 1
+        if len(bucket["examples"]) < EXAMPLES:
+            bucket["examples"].append({"path": path, **fields})
+
+    def run(self, home):
+        if os.geteuid() == 0:
+            raise SurveyError("run the survey as the account that owns the home, not root")
+        fd = os.open(home, DIRECTORY_FLAGS)
+        try:
+            metadata = os.fstat(fd)
+            if metadata.st_uid != os.geteuid():
+                raise SurveyError("the home directory is owned by another account")
+            self.mount = collection._mount(fd)
+            self.device = metadata.st_dev
+            self.directory(fd, "", 0)
+        finally:
+            os.close(fd)
+
+    def directory(self, fd, prefix, depth):
+        try:
+            with os.scandir(fd) as listing:
+                names = sorted(entry.name for entry in listing)
+        except OSError:
+            self.note("unreadable", prefix or ".")
+            return
+        for name in names:
+            path = f"{prefix}/{name}" if prefix else name
+            self.entries += 1
+            if self.entries > self.max_entries:
+                raise SurveyError(f"more than {self.max_entries} entries; survey stopped")
+            try:
+                contract.home_path(path, "path")
+            except contract.ContractError:
+                self.note("unsupported", path, reason="unrepresentable-name")
+                continue
+            self.entry(fd, name, path, depth)
+
+    def entry(self, parent, name, path, depth):
+        match = self.policy.match(path)
+        if match and match.kind == "store":
+            # Never listed or measured: only its presence is reported.
+            store = match.item
+            self.stores.setdefault(store["id"], {"category": store["category"], "present": True})
+            self.note("held-out", path, store=store["id"])
+            return
+        if match and match.item["action"] == "exclude":
+            self.note("excluded", path, rule=match.item["id"], reason=match.item["reason"])
+            return
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            self.note("changed-during-survey", path)
+            return
+        kind = category(path)
+        if stat.S_ISLNK(metadata.st_mode):
+            try:
+                target = os.readlink(name, dir_fd=parent)
+            except OSError:
+                self.note("changed-during-survey", path)
+                return
+            mount = self.policy.mount(target)
+            if mount:
+                self.note("share-link", path, mount=mount["id"])
+            else:
+                self.counts[kind]["links"] += 1
+            return
+        if stat.S_ISDIR(metadata.st_mode):
+            if depth + 1 >= MAX_DEPTH:
+                self.note("unsupported", path, reason="too-deep")
+                return
+            try:
+                fd = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
+            except OSError:
+                self.note("unreadable", path)
+                return
+            try:
+                if os.fstat(fd).st_dev != self.device or collection._mount(fd) != self.mount:
+                    self.note("other-filesystem", path)
+                    return
+                self.counts[kind]["directories"] += 1
+                self.directory(fd, path, depth + 1)
+            finally:
+                os.close(fd)
+            return
+        if stat.S_ISREG(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                self.note("unsupported", path, reason="multiply-linked-file")
+                return
+            if not metadata.st_mode & 0o400:
+                self.note("unsupported", path, reason="unreadable-owner-file")
+                return
+            self.counts[kind]["files"] += 1
+            self.counts[kind]["bytes"] += metadata.st_size
+            self.top_level[path.split("/")[0]] += metadata.st_size
+            if match and match.item["action"] == "transform":
+                # Content is not read, so whether Try's additions are present is unknown.
+                self.note("transform", path, rule=match.item["id"])
+            return
+        self.note("unsupported", path, reason="special-file")
+
+    def store_documents(self):
+        documents = []
+        for store in self.policy.stores:
+            documents.append({"id": store["id"], "category": store["category"],
+                              "present": store["id"] in self.stores, "adapter_available": False})
+        return documents
+
+
+def omarchy_version(home, explicit):
+    if explicit:
+        return explicit
+    for candidate in (Path(home) / ".local/share/omarchy/version", Path("/usr/share/omarchy/version")):
+        try:
+            value = candidate.read_text().strip()
+        except OSError:
+            continue
+        if contract.VERSION.fullmatch(value):
+            return value
+    return "unknown"
+
+
+def inventory(survey, home, version, uid=None):
+    architecture = platform.machine()
+    document = {
+        "schema": contract.INVENTORY,
+        "inventory_id": str(uuid.uuid4()),
+        "source": {"provider": "try-omarchy", "architecture": architecture,
+                   "omarchy_version": omarchy_version(home, version),
+                   "account_uid": os.getuid() if uid is None else uid},
+        "policy_revision": survey.policy.revision,
+        "categories": [{"id": name, "files": survey.counts[name]["files"], "bytes": survey.counts[name]["bytes"],
+                        "default_selected": DEFAULT_SELECTED[name]} for name in CATEGORIES],
+        "credential_stores": survey.store_documents(),
+    }
+    contract.validate(document)
+    return document
+
+
+def size(value):
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{value} B"
+        value /= 1024
+
+
+def summary(survey, document):
+    lines = [f"Migration survey (policy {document['policy_revision']}, read-only; no file contents were read)", ""]
+    lines.append("Categories:")
+    for item in document["categories"]:
+        default = "selected by default" if item["default_selected"] else "not selected by default"
+        lines.append(f"  {item['id']:<20} {item['files']:>8} files  {size(item['bytes']):>11}  ({default})")
+    present = [store["id"] for store in document["credential_stores"] if store["present"]]
+    lines += ["", "Credential stores found (held back; none can be exported yet): " + (", ".join(present) or "none")]
+    labels = {
+        "excluded": "Excluded by the Try policy",
+        "transform": "Would be cleaned of Try additions (content not checked)",
+        "share-link": "Links into the Mac shared folder (not followed)",
+        "other-filesystem": "Other filesystems (not entered)",
+        "unsupported": "Unsupported (withheld)",
+        "unreadable": "Unreadable (skipped)",
+        "changed-during-survey": "Changed during the survey",
+    }
+    for outcome, label in labels.items():
+        bucket = survey.outcomes.get(outcome)
+        if not bucket:
+            continue
+        lines += ["", f"{label}: {bucket['count']}"]
+        for example in bucket["examples"]:
+            extra = ", ".join(f"{key}={value}" for key, value in example.items() if key != "path")
+            lines.append(f"  ~/{example['path']}" + (f"  ({extra})" if extra else ""))
+        if bucket["count"] > len(bucket["examples"]):
+            lines.append(f"  … and {bucket['count'] - len(bucket['examples'])} more")
+    largest = survey.top_level.most_common(EXAMPLES)
+    if largest:
+        lines += ["", "Largest top-level entries:"]
+        lines += [f"  ~/{name:<30} {size(total):>11}" for name, total in largest]
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--home", type=Path, default=Path.home())
+    parser.add_argument("--json", action="store_true", help="print the inventory/1 document instead of a summary")
+    parser.add_argument("--omarchy-version", help="override the detected Omarchy version")
+    arguments = parser.parse_args(argv)
+    policy = migration_policy.Policy(json.loads(POLICY_PATH.read_bytes()))
+    survey = Survey(policy)
+    try:
+        survey.run(arguments.home)
+        document = inventory(survey, arguments.home, arguments.omarchy_version)
+    except (SurveyError, contract.ContractError, OSError) as error:
+        print(f"survey: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(document, indent=2, sort_keys=True) if arguments.json else summary(survey, document))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

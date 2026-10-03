@@ -5,8 +5,8 @@
   "policy_revision": "try-omarchy/e1a0dbe/1/fixture",
   "selection": {
     "categories": [
-      "files-and-config",
-      "projects"
+      "files-and-projects",
+      "configuration"
     ],
     "credential_stores": []
   }
