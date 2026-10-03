@@ -2,7 +2,7 @@
 
 Start with the [collaboration plan](collaboration-plan.md): the agreed product direction, proposed Eduardo/Try and Scott/Omarchy Installer ownership, concrete work packages, initial protocol semantics, and staged delivery.
 
-This branch makes the current synthetic prototypes available for joint development. It does not add a working migration command or enable migration in either app.
+This branch makes the current prototypes available for joint development. The migration code lives in the self-contained [`packages/omarchy-migration`](../../packages/omarchy-migration/README.md) package, which both the Try VM (exporter) and the native installation (importer) will install; its read-only `survey` runs on a real home, while export and import remain synthetic. Neither app enables migration yet.
 
 The [validation record](validation.md) identifies the tested commit, runner, tool hashes, passed checks, and the optional skip.
 

@@ -1,5 +1,11 @@
 # Migration exploration validation
 
+## omarchy-migration package candidate, 2026-10-03 UTC
+
+Source candidate: `ca7aacc`, tree `90106a52a72a1dc413d56b1a9a298273df004fdb`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script and 44 staging tests (one optional `sgdisk` skip), then [`packages/omarchy-migration/test/all`](../../packages/omarchy-migration/README.md): its compilation check, 203 package tests (bundle, fixture, restore, tree, replacement, collection, survey, review, contract and policy) and the staged-root command check, followed by `preclean-m1-test` and every installer shell fixture: **411 Python tests passed; one optional skip** (412 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
+
+The migration code moved from `Development/migration_bundle_probe` and `Development/migration_contract` into the self-contained `packages/omarchy-migration` package (decided with Scott on 2026-10-03): `install DESTDIR` stages `/usr/bin/omarchy-migration` and `/usr/lib/omarchy-migration/` without enabling anything, `test/all` runs from a copy of the directory and then runs the staged command, and one command dispatches survey, plan, apply, validate, evidence and the synthetic fixture. Behavior is unchanged. The first attempt on `0c06828` failed two test paths left pointing at the old layout and is not evidence. The installer-side disk staging experiment stays in `Development/migration_staging`. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed.
+
 ## Reviewable plan and report candidate, 2026-10-03 UTC
 
 Source candidate: `02968cb`, tree `50b15d4bc3ce33e19a429904d2241add7943f8ed`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script, 44 staging (one optional `sgdisk` skip), 156 bundle/fixture/restore/tree/replacement/collection/survey/review and 47 contract tests, `preclean-m1-test` and every installer shell fixture: **411 Python tests passed; one optional skip** (412 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
