@@ -4,6 +4,12 @@ Moves an Omarchy home from Try Omarchy to a native Omarchy installation on the s
 
 Status: exploration. The survey runs against a real home read-only. Export and import are proven on synthetic homes and disposable destinations only; do not use them on real personal data yet.
 
+## Where this package lives
+
+This directory is temporary. The intent is to move the package to [omacom/omarchy-mac](https://github.com/omacom/omarchy-mac) as a top-level `omarchy-migration/`, beside `omarchy-mac/` and `omarchy-mac-boot/`, once that repository's reshaped layout (`proposal/main`) becomes its `main`. It is developed here until then so it does not track a moving branch. It already follows that repository's package contract, so the move is mechanical; its `omarchy-pkgs` recipe will pin an omarchy-mac commit after the move.
+
+One difference from the other Mac packages: the exporter runs inside the Try Omarchy VM, where `omarchy-hw-apple-silicon` is false, so this package must not sit behind the Apple Silicon platform detector.
+
 ## Commands
 
 ```bash
