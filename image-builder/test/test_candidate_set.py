@@ -253,7 +253,7 @@ class CandidateSetTest(unittest.TestCase):
             ("own commit", dict(both, **{"omarchy-mac": fixtures.SOURCE}), {}, "the set's own commit: omarchy-mac"),
             ("short commit", dict(both, **{"omarchy-mac": "d" * 12}), {}, "invalid platform source commit: omarchy-mac"),
             ("not a map", [["omarchy-mac", d]], {}, "invalid platform sources"),
-            ("another repository", both, dict(repository="maralcbr/omarchy-mx-mac"), "mixed package sources: omarchy-mac"),
+            ("another repository", both, dict(repository="example/omarchy-mac-fork"), "mixed package sources: omarchy-mac"),
         )
         for label, declared, change, pattern in cases:
             with self.subTest(label):
