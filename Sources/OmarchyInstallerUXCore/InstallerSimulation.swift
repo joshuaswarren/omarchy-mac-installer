@@ -4,7 +4,8 @@
 
   public enum InstallerSimulationScenario: String, CaseIterable, Identifiable, Sendable {
     case success, freeSpace, unsupported, engineUnavailable, existingInstall, missingHelper
-    case downloadFailure, invalidDownload, outdatedInstaller, planFailure
+    case downloadFailure, invalidDownload, outdatedInstaller, planFailure, insufficientSpace,
+      tightDisk, reserveColorPreview, lowReserve
     case noMacRelease, modelNotOnChannel, channelUnreachable
     case allocationClamped, allocationAligned, approvalChanged, credentialsRejected, connectionLost
     case emptyReply, helperFailure, degradedProgress, recoveryRetry, manualRecovery
@@ -25,7 +26,11 @@
       case .noMacRelease: "Channel has no Mac release yet"
       case .modelNotOnChannel: "Channel doesn’t include this Mac"
       case .channelUnreachable: "Channel release list missing (404)"
-      case .planFailure: "Not enough usable space"
+      case .planFailure: "No eligible disk allocation"
+      case .insufficientSpace: "Not enough space · quantified shortfall"
+      case .tightDisk: "Tight disk · live space cautions"
+      case .reserveColorPreview: "UI preview · drag across macOS reserve"
+      case .lowReserve: "Tight disk · macOS already below its reserve"
       case .allocationClamped: "Disk size adjusted during review"
       case .allocationAligned: "Disk alignment · whole GB unchanged"
       case .approvalChanged: "Plan changes before approval"
@@ -45,6 +50,10 @@
 
     public var guidance: String {
       switch self {
+      case .reserveColorPreview:
+        "UI-only fixture with a wider slider range: choose 42 GB for exactly 38 GB free in macOS, then drag above and below it. The macOS segment and warning should change together. The real planner normally caps the slider at the reserve."
+      case .lowReserve:
+        "macOS already has only 35 GB free, below its 38 GB reserve, so the planner can take no space from it. The installer refuses with the full shortfall: Omarchy's 40 GB minimum plus the 3 GB macOS needs to get back to its reserve."
       case .allocationClamped:
         "Choose a larger size, then apply it. The simulated limit returns to the original size. Confirm the displayed size resets and acknowledgement clears."
       case .missingHelper:
@@ -200,6 +209,28 @@
       }
       if scenario == .planFailure {
         throw InstallerAllocationRecommendationError.noEligibleCandidate
+      }
+      if scenario == .insufficientSpace {
+        throw InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 40_000_000_000, availableBytes: 34_500_000_000)
+      }
+      // As the planner does: a macOS container already below its reserve
+      // offers no space, and the shortfall adds the reserve deficit.
+      if scenario == .lowReserve {
+        throw InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 43_000_000_000, availableBytes: 0)
+      }
+      if [.tightDisk, .reserveColorPreview].contains(scenario) {
+        let maximum: UInt64 =
+          scenario == .reserveColorPreview ? 60_000_000_000 : 42_000_000_000
+        let chosen = min(maximum, max(40_000_000_000, omarchyBytes ?? 40_000_000_000))
+        return .plan(
+          PlanDisplay(
+            diskTotalBytes: 245_000_000_000, omarchyBytes: chosen,
+            bindingDigest: "simulation-tight-\(chosen)", minimumBytes: 40_000_000_000,
+            maximumBytes: maximum,
+            macOSFreeBeforeAllocationBytes: 80_000_000_000,
+            recommendedOmarchyBytes: 77_000_000_000))
       }
       progress(AssetProgressUpdate(stage: .planning))
       try await tick()

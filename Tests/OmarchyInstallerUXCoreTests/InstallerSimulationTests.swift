@@ -6,6 +6,66 @@
 
   @MainActor
   final class InstallerSimulationTests: XCTestCase {
+    func testReserveColorPreviewCrossesBoundaryAndClearsAgain() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .reserveColorPreview, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      for size: UInt64 in [42_000_000_000, 43_000_000_000, 42_000_000_000] {
+        await session.replan(omarchyBytes: size)
+        guard case .planReview(let plan, _) = session.phase else {
+          return XCTFail("Expected disk review")
+        }
+        XCTAssertEqual(plan.omarchyBytes, size)
+        XCTAssertEqual(plan.macOSSpaceCaution(for: size) != nil, size > 42_000_000_000)
+      }
+    }
+
+    func testMacOSAlreadyBelowItsReserveIsRefusedWithTheDeficit() async {
+      // As in the planner: no space can be taken from macOS, so the shortfall
+      // is Omarchy's 40 GB minimum plus the 3 GB below the 38 GB reserve.
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .lowReserve, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      guard case .failed(let failure) = session.phase else {
+        return XCTFail("Expected a refusal")
+      }
+      XCTAssertEqual(failure.headline, "Free up at least 43 GB to install Omarchy")
+      XCTAssertFalse(session.hasExecutionStarted)
+    }
+
+    func testTightDiskSimulationKeepsHardMacOSReserve() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .tightDisk, delay: .zero))
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      await session.replan(omarchyBytes: 55_000_000_000)
+      guard case .planReview(let plan, _) = session.phase else {
+        return XCTFail("Expected disk review")
+      }
+      XCTAssertEqual(plan.maximumBytes, 42_000_000_000)
+      XCTAssertEqual(plan.omarchyBytes, plan.maximumBytes)
+      XCTAssertEqual(plan.macOSFreeBeforeAllocationBytes! - plan.omarchyBytes, 38_000_000_000)
+    }
+
+    func testGenericAndQuantifiedPlanningFailuresRemainDistinct() async {
+      for (scenario, headline) in [
+        (InstallerSimulationScenario.planFailure, "There isn’t enough usable disk space"),
+        (.insufficientSpace, "Free up at least 6 GB to install Omarchy"),
+      ] {
+        let session = InstallerSession(
+          environment: InstallerSimulationEnvironment(scenario: scenario, delay: .zero))
+        await session.inspect()
+        await session.continueToPlan()
+        guard case .failed(let failure) = session.phase else { return XCTFail(scenario.title) }
+        XCTAssertEqual(failure.headline, headline)
+        XCTAssertFalse(session.hasExecutionStarted)
+      }
+    }
+
     func testDiskAlignmentDoesNotClaimSelected180GBIsACapacityLimit() async throws {
       let environment = InstallerSimulationEnvironment(scenario: .allocationAligned, delay: .zero)
       let session = InstallerSession(environment: environment)
@@ -94,6 +154,7 @@
         await session.continueToPlan()
         switch scenario {
         case .downloadFailure, .invalidDownload, .outdatedInstaller, .planFailure,
+          .insufficientSpace, .lowReserve,
           .noMacRelease, .modelNotOnChannel, .channelUnreachable:
           guard case .failed = session.phase else { return XCTFail(scenario.title) }
           XCTAssertFalse(session.hasExecutionStarted)
