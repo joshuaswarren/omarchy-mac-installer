@@ -190,10 +190,11 @@ class CandidateSetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mixed package sources"):
             self.verify(directory, receipt)
 
-    def platform_set(self, label, declared, revisions=None, sources=None, channel=()):
+    def platform_set(self, label, declared, revisions=None, sources=None, channel=(),
+                     repository="omacom/omarchy-mac-pkgs"):
         """A set whose omarchy-mac and omarchy-mac-boot were built from their own
-        commits: REVISIONS in the archives, SOURCES in the manifest, DECLARED as
-        its platform_sources."""
+        commits of REPOSITORY: REVISIONS in the archives, SOURCES in the
+        manifest, DECLARED as its platform_sources."""
         revisions = revisions or {"omarchy-mac": "d" * 40, "omarchy-mac-boot": "e" * 40}
         sources = revisions if sources is None else sources
         contents = fixtures.default_contents()
@@ -205,8 +206,7 @@ class CandidateSetTest(unittest.TestCase):
         def edit(manifest):
             for package in manifest["packages"]:
                 if package["name"] in sources and package["name"] not in channel:
-                    package["source"] = {"repository": fixtures.POLICY["source_repository"],
-                                         "commit": sources[package["name"]]}
+                    package["source"] = {"repository": repository, "commit": sources[package["name"]]}
             if declared is not None:
                 manifest["platform_sources"] = declared
 
@@ -224,6 +224,12 @@ class CandidateSetTest(unittest.TestCase):
                           "omarchy-mac-boot": ("platform " + "e" * 40, "e" * 40)})
         self.assertNotIn("source_commit", packages["linux-aurora"])
         self.assertEqual(fixtures.test_image_pin.pinned(summary), ["omarchy", "omarchy-mac", "omarchy-mac-boot", "omarchy-settings"])
+
+    def test_platform_packages_from_the_repository_they_moved_from(self):
+        declared = {"omarchy-mac": "d" * 40, "omarchy-mac-boot": "e" * 40}
+        directory, receipt = self.platform_set("moved from", declared, repository=fixtures.POLICY["source_repository"])
+        packages = {p["name"]: p for p in self.verify(directory, receipt)["packages"]}
+        self.assertEqual(packages["omarchy-mac"]["origin"], "platform " + "d" * 40)
 
     def test_one_platform_package_declared(self):
         directory, receipt = self.platform_set("one", {"omarchy-mac": "d" * 40}, revisions={"omarchy-mac": "d" * 40})
@@ -247,6 +253,7 @@ class CandidateSetTest(unittest.TestCase):
             ("own commit", dict(both, **{"omarchy-mac": fixtures.SOURCE}), {}, "the set's own commit: omarchy-mac"),
             ("short commit", dict(both, **{"omarchy-mac": "d" * 12}), {}, "invalid platform source commit: omarchy-mac"),
             ("not a map", [["omarchy-mac", d]], {}, "invalid platform sources"),
+            ("another repository", both, dict(repository="example/omarchy-mac-fork"), "mixed package sources: omarchy-mac"),
         )
         for label, declared, change, pattern in cases:
             with self.subTest(label):
