@@ -154,14 +154,15 @@ class EngineRuntime:
                 free_parts,
                 # Also keep tight macOS containers for exact shortfalls.
                 # Do not probe unrelated stubs or data-only containers that
-                # upstream did not consider resizable.
+                # upstream did not consider resizable. A stub carries the
+                # version of the macOS it was made from, so test stub too.
                 [
                     part for part in installer.parts
                     if part in resizable_parts or (
                         part.type == "Apple_APFS"
                         and part.container is not None
                         and part.os
-                        and any(os.version for os in part.os)
+                        and any(os.version and not os.stub for os in part.os)
                     )
                 ] if is_gpt else [],
                 stub_size,
