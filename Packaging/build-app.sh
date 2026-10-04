@@ -31,7 +31,7 @@ build_jobs="${OMARCHY_BUILD_JOBS:-10}"
   || fail "OMARCHY_BUILD_JOBS must be a positive integer"
 export CARGO_BUILD_JOBS="$build_jobs"
 
-marketing_version="${OMARCHY_APP_VERSION:-2.0.10}"
+marketing_version="${OMARCHY_APP_VERSION:-2.1.0}"
 build_number="${OMARCHY_APP_BUILD_NUMBER:-27}"
 signing_identity="${OMARCHY_APP_SIGNING_IDENTITY:--}"
 team_identifier="${OMARCHY_TEAM_ID:-}"
@@ -45,10 +45,9 @@ app_identifier="$INSTALLER_APP_IDENTIFIER"
 helper_identifier="$INSTALLER_HELPER_IDENTIFIER"
 app_name="$INSTALLER_APP_NAME.app"
 app_executable_name="OmarchyAppleInstallerApp"
-helper_executable_name="omarchy-apple-installer-helper"
 daemon_plist_name="$helper_identifier.plist"
-engine_file_name="installer-v0.9.2-omarchy.17.tar.gz"
-engine_digest="ecb61645a9c75ba733425fb300b8b53b09f9dbc297a86acce1e0ee41f36e32e5"
+engine_file_name="installer-v0.9.2-omarchy.27.tar.gz"
+engine_digest="4f9241b0139ba6ccdcfdb3484831002e07e36ba50274279c641ca2020593a15a"
 
 if [[ $signing_identity == "-" ]]; then
   client_requirement="identifier \"$app_identifier\""
@@ -181,25 +180,60 @@ binary_directory="$({
   "$swift_tool" build --configuration release --show-bin-path
 })"
 
+assembly_root="$(mktemp -d "$output_directory/.omarchy-app.XXXXXX")"
+trap 'rm -rf "$assembly_root"' EXIT
+
+# The helper carries its Info.plist and, for SMJobBless, its launchd job in
+# __TEXT sections, so it is linked again with them. Ad hoc builds get only the
+# Info.plist: they cannot install their helper and rely on the package.
+helper_plists="$assembly_root/helper-plists"
+mkdir "$helper_plists"
+if [[ $signing_identity == "-" ]]; then
+  "$script_directory/helper-plists" "$helper_plists" "$build_number" "$marketing_version" >/dev/null
+else
+  "$script_directory/helper-plists" "$helper_plists" "$build_number" "$marketing_version" \
+    "$client_requirement" >/dev/null
+fi
+helper_link_arguments=(
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist
+  -Xlinker "$helper_plists/helper-info.plist"
+)
+if [[ -f $helper_plists/helper-launchd.plist ]]; then
+  helper_link_arguments+=(
+    -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __launchd_plist
+    -Xlinker "$helper_plists/helper-launchd.plist"
+  )
+fi
+(
+  cd "$package_directory"
+  "$swift_tool" build \
+    --configuration release \
+    --jobs "$build_jobs" \
+    --product OmarchyAppleInstallerHelper \
+    "${helper_link_arguments[@]}"
+)
+
 app_binary="$binary_directory/$app_executable_name"
 helper_binary="$binary_directory/OmarchyAppleInstallerHelper"
 [[ -x $app_binary ]] || fail "app executable was not built"
 [[ -x $helper_binary ]] || fail "helper executable was not built"
-
-assembly_root="$(mktemp -d "$output_directory/.omarchy-app.XXXXXX")"
-trap 'rm -rf "$assembly_root"' EXIT
 assembled_app="$assembly_root/$app_name"
 contents="$assembled_app/Contents"
 resources="$contents/Resources"
+# SMJobBless finds the helper here, named by its label; the package's daemon
+# plist points at the same binary.
+helper_relative_path="Contents/Library/LaunchServices/$helper_identifier"
+helper_path="$assembled_app/$helper_relative_path"
 
 mkdir -p \
   "$contents/MacOS" \
   "$resources/Release" \
   "$resources/Engine/artifacts" \
-  "$contents/Library/LaunchDaemons"
+  "$contents/Library/LaunchDaemons" \
+  "$contents/Library/LaunchServices"
 
 install -m 0755 "$app_binary" "$contents/MacOS/$app_executable_name"
-install -m 0755 "$helper_binary" "$resources/$helper_executable_name"
+install -m 0755 "$helper_binary" "$helper_path"
 install -m 0444 "$release_descriptor" "$resources/Release/release.json"
 install -m 0444 "$trust_root" "$resources/Release/trust-root.ed25519.pub"
 if [[ ${OMARCHY_PRIVATE_LIMINE_TEST:-0} == "1" ]]; then
@@ -274,6 +308,14 @@ plutil -replace Label \
 plutil -replace MachServices \
   -json "{\"$helper_identifier\":true}" \
   "$contents/Library/LaunchDaemons/$daemon_plist_name"
+plutil -replace BundleProgram \
+  -string "$helper_relative_path" \
+  "$contents/Library/LaunchDaemons/$daemon_plist_name"
+if [[ $signing_identity != "-" ]]; then
+  plutil -replace SMPrivilegedExecutables \
+    -json "{\"$helper_identifier\":$(printf '%s' "$helper_requirement" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}" \
+    "$contents/Info.plist"
+fi
 plutil -replace \
   EnvironmentVariables.OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT \
   -string "$client_requirement" \
@@ -291,7 +333,7 @@ codesign --force --sign "$signing_identity" \
   "${timestamp_arguments[@]}" \
   --options runtime \
   --identifier "$helper_identifier" \
-  "$resources/$helper_executable_name"
+  "$helper_path"
 codesign --force --sign "$signing_identity" \
   "${timestamp_arguments[@]}" \
   --options runtime \
@@ -300,7 +342,11 @@ codesign --force --sign "$signing_identity" \
 codesign --verify --deep --strict --verbose=2 "$assembled_app"
 codesign --verify --strict \
   -R="$helper_requirement" \
-  "$resources/$helper_executable_name"
+  "$helper_path"
+embedded_version="$(launchctl plist __TEXT,__info_plist "$helper_path" 2>/dev/null \
+  | awk -F'"' '/"CFBundleVersion"/ {print $4}')"
+[[ $embedded_version == "$build_number" ]] \
+  || fail "the helper does not carry its build number (got '${embedded_version:-none}')"
 codesign --verify --strict \
   -R="$client_requirement" \
   "$assembled_app"

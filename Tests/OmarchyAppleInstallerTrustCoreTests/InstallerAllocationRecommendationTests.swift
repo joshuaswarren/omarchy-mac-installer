@@ -5,6 +5,156 @@ import XCTest
 final class InstallerAllocationRecommendationTests: XCTestCase {
   private let gib: UInt64 = 1_073_741_824
 
+  func testShortfallIncludesReserveAndStagingDeficits() {
+    for (container, reserve, expected): (UInt64, UInt64, UInt64) in [
+      (208, 10, 50), (198, 10, 40), (200, 10, 42),
+    ] {
+      let resize = candidate(
+        kind: "resize", source: "disk0s2", length: 200 * gib,
+        minimumInstall: 32 * gib, minimumContainer: container * gib)
+      XCTAssertThrowsError(
+        try InstallerAllocationRecommendation(
+          inventory: inventory([resize]), reservedBytes: reserve * gib)
+      ) {
+        XCTAssertEqual(
+          $0 as? InstallerAllocationRecommendationError,
+          .insufficientSpace(requiredBytes: expected * self.gib, availableBytes: 0))
+      }
+    }
+  }
+
+  func testResizeRangeGrowsAsSpaceIsFreedAfterStaging() throws {
+    var previousMaximum: UInt64 = 0
+    for available: UInt64 in 42...100 {
+      let inventory = try resizeInventory(available: available)
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory, reservedBytes: 10 * gib
+      )
+      // 62 GiB is adopted only once it fits under the 5% drift margin.
+      XCTAssertEqual(recommendation.minimumBytes, (available >= 76 ? 62 : 32) * gib)
+      // Near the floor the margin gives way so the install still fits; once
+      // the margin fits above the minimum, the divider can always move.
+      if (available - 10) * 19 > 32 * 20 {
+        XCTAssertGreaterThan(recommendation.maximumBytes, recommendation.minimumBytes)
+      }
+      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum)
+      XCTAssertLessThanOrEqual(recommendation.maximumBytes, (available - 10) * gib)
+      previousMaximum = recommendation.maximumBytes
+      XCTAssertNoThrow(
+        try PinnedAsahiPlanRequest(
+          inventory: inventory, candidate: recommendation.candidate,
+          requestedLengthBytes: recommendation.requestedLengthBytes))
+    }
+  }
+
+  func testRecommendedMinimumKeepsTheDriftMarginAndARange() throws {
+    // Each step of free space from just below to well above where the doubled
+    // size fits: the divider must move and the margin must survive whenever
+    // the doubled size is the minimum.
+    for quarters: UInt64 in 280...320 {
+      let available = quarters * gib / 4
+      let resize = candidate(
+        kind: "resize", source: "disk0s2", length: 200 * gib,
+        minimumInstall: 32 * gib, minimumContainer: 200 * gib - available,
+        recommendedInstall: 62 * gib)
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory([resize]), reservedBytes: 10 * gib)
+      let usable = available - 10 * gib
+      XCTAssertGreaterThan(recommendation.maximumBytes, recommendation.minimumBytes)
+      if recommendation.minimumBytes == 62 * gib {
+        XCTAssertLessThanOrEqual(recommendation.maximumBytes, usable - usable / 20)
+      }
+    }
+  }
+
+  func testLegacyRecommendationDoesNotShrinkCeilingOrFreezeAtFloor() throws {
+    var previousMaximum: UInt64 = 0
+    for available: UInt64 in 31...100 {
+      let inventory = try resizeInventory(
+        available: available, hardAvailable: max(50, available))
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory, reservedBytes: 10 * gib)
+      XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum)
+      XCTAssertGreaterThan(recommendation.maximumBytes, 32 * gib)
+      previousMaximum = recommendation.maximumBytes
+    }
+  }
+
+  func testResizeFallbackStillRejectsBelowThePartitionFloor() throws {
+    XCTAssertThrowsError(
+      try InstallerAllocationRecommendation(
+        inventory: resizeInventory(available: 50), reservedBytes: 19 * gib
+      )
+    ) { error in
+      XCTAssertEqual(
+        error as? InstallerAllocationRecommendationError,
+        .insufficientSpace(requiredBytes: 32 * self.gib, availableBytes: 31 * self.gib))
+    }
+  }
+
+  func testFreeAndReplaceTranscriptsRetainRecommendations() throws {
+    for kind in ["free", "replace"] {
+      let decoded = try resizeInventory(available: 31, kind: kind)
+      XCTAssertEqual(decoded.candidates[0].recommendedInstallBytes, 62 * gib)
+      XCTAssertEqual(decoded.candidates[0].recommendedContainerBytes, 0)
+    }
+  }
+
+  func testResizeTranscriptRejectsInvalidRecommendations() throws {
+    for fields: [String: Any] in [
+      ["recommended_install_bytes": 62 * gib],
+      ["recommended_install_bytes": 1, "recommended_container_bytes": 169 * gib],
+      ["recommended_install_bytes": 62 * gib, "recommended_container_bytes": 1],
+      ["recommended_install_bytes": NSNull(), "recommended_container_bytes": NSNull()],
+    ] {
+      XCTAssertThrowsError(try resizeInventory(available: 31, recommendations: fields))
+    }
+  }
+
+  private func resizeInventory(
+    available: UInt64, hardAvailable: UInt64? = nil, recommendations: [String: Any]? = nil,
+    kind: String = "resize"
+  ) throws -> ValidatedEngineInventory {
+    let container = (200 - available) * gib
+    var candidate: [String: Any] = [
+      "kind": kind, "source_identifier": "disk0s2", "offset_bytes": gib,
+      "length_bytes": 200 * gib, "minimum_install_bytes": 32 * gib,
+      "minimum_container_bytes": kind == "resize" ? (200 - (hardAvailable ?? available)) * gib : 0,
+    ]
+    candidate.merge(
+      recommendations ?? [
+        "recommended_install_bytes": 62 * gib,
+        "recommended_container_bytes": kind == "resize" ? container : 0,
+      ], uniquingKeysWith: { _, new in new }
+    )
+    var fields = ["disk0", kind, "disk0s2", String(gib), String(200 * gib)]
+    if kind == "replace" {
+      let identity = "sha256:" + String(repeating: "9", count: 64)
+      candidate["identity_digest"] = identity
+      fields.append(identity)
+    }
+    let digest = InstallerDigest.lengthPrefixedSHA256(fields).rawValue
+    let messages: [[String: Any]] = [
+      [
+        "schema_version": 1, "sequence": 1, "type": "inspection",
+        "payload": ["device_identifier": "apple,j314s", "support": "supported"],
+      ],
+      [
+        "schema_version": 1, "sequence": 2, "type": "inventory",
+        "payload": [
+          "layout_digest": digest, "system_store_identifier": "disk0", "candidates": [candidate],
+        ],
+      ],
+    ]
+    var transcript = Data()
+    for message in messages {
+      transcript.append(try JSONSerialization.data(withJSONObject: message))
+      transcript.append(0x0A)
+    }
+    let validated = try AppleInstallerTrustCore().validateEngineTranscript(transcript)
+    return try XCTUnwrap(validated.inventory)
+  }
+
   func testResizeCeilingWithholdsADriftMargin() throws {
     let resize = candidate(
       kind: "resize",
@@ -403,7 +553,9 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       ) {
         XCTAssertEqual(
           $0 as? InstallerAllocationRecommendationError,
-          .insufficientSpace(requiredBytes: 64 * gib, availableBytes: available)
+          .insufficientSpace(
+            requiredBytes: reserve == UInt64.max ? UInt64.max - 36 * gib : 64 * gib,
+            availableBytes: available)
         )
       }
     }
@@ -555,7 +707,8 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
     length: UInt64,
     minimumInstall: UInt64,
     minimumContainer: UInt64 = 0,
-    identityDigest: String? = nil
+    identityDigest: String? = nil,
+    recommendedInstall: UInt64? = nil
   ) -> ValidatedEngineCandidate {
     ValidatedEngineCandidate(
       kind: kind,
@@ -564,7 +717,8 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       lengthBytes: length,
       minimumInstallBytes: minimumInstall,
       minimumContainerBytes: minimumContainer,
-      identityDigest: identityDigest
+      identityDigest: identityDigest,
+      recommendedInstallBytes: recommendedInstall
     )
   }
 }

@@ -4,7 +4,8 @@
 
   public enum InstallerSimulationScenario: String, CaseIterable, Identifiable, Sendable {
     case success, freeSpace, unsupported, engineUnavailable, existingInstall, missingHelper
-    case downloadFailure, invalidDownload, outdatedInstaller, planFailure
+    case downloadFailure, invalidDownload, outdatedInstaller, planFailure, insufficientSpace,
+      tightDisk, reserveColorPreview, lowReserve
     case noMacRelease, modelNotOnChannel, channelUnreachable
     case allocationClamped, allocationAligned, approvalChanged, credentialsRejected, connectionLost
     case emptyReply, helperFailure, degradedProgress, recoveryRetry, manualRecovery
@@ -25,7 +26,11 @@
       case .noMacRelease: "Channel has no Mac release yet"
       case .modelNotOnChannel: "Channel doesn’t include this Mac"
       case .channelUnreachable: "Channel release list missing (404)"
-      case .planFailure: "Not enough usable space"
+      case .planFailure: "No eligible disk allocation"
+      case .insufficientSpace: "Not enough space · quantified shortfall"
+      case .tightDisk: "Tight disk · live space cautions"
+      case .reserveColorPreview: "UI preview · drag across macOS reserve"
+      case .lowReserve: "Tight disk · macOS already below its reserve"
       case .allocationClamped: "Disk size adjusted during review"
       case .allocationAligned: "Disk alignment · whole GB unchanged"
       case .approvalChanged: "Plan changes before approval"
@@ -46,6 +51,10 @@
 
     public var guidance: String {
       switch self {
+      case .reserveColorPreview:
+        "UI-only fixture with a wider slider range: choose 42 GB for exactly 38 GB free in macOS, then drag above and below it. The macOS segment and warning should change together. The real planner normally caps the slider at the reserve."
+      case .lowReserve:
+        "macOS already has only 35 GB free, below its 38 GB reserve, so the planner can take no space from it. The installer refuses with the full shortfall: Omarchy's 40 GB minimum plus the 3 GB macOS needs to get back to its reserve."
       case .allocationClamped:
         "Choose a larger size, then apply it. The simulated limit returns to the original size. Confirm the displayed size resets and acknowledgement clears."
       case .missingHelper:
@@ -63,7 +72,7 @@
       case .spaceChanged:
         "Install the 137 GB plan. The engine refuses it before changing the disk. Choose Check available space: the new plan offers 133 GB, the acknowledgement clears, and the next install succeeds."
       case .unsupported:
-        "The simulated Mac is a MacBook Pro 14-inch (M3). The message must name it and list the M1 and M2 families from the simulated signed catalog."
+        "The simulated Mac is a MacBook Pro 14-inch (M4 Pro). The message must name it and list the M1, M2 and M3 families from the simulated signed catalog."
       case .noMacRelease:
         "The test channel's signed catalog lists no Mac. Its channel label says No Mac release yet, and Continue explains the channel has nothing to install, not a network or verification problem."
       case .modelNotOnChannel:
@@ -102,9 +111,13 @@
     public var engineSupported: Bool { scenario != .unsupported && scenario != .engineUnavailable }
     public var hasApprovedPlan: Bool { lock.withLock { approved } }
     public var helperStatus: HelperDisplay {
-      HelperDisplay(status: scenario == .missingHelper ? .notInstalled : .enabled)
+      HelperDisplay(status: scenario == .missingHelper ? .missing : .current)
     }
     public func refreshHelperStatus() -> HelperDisplay { helperStatus }
+    public func probeHelperStatus() async -> HelperDisplay { helperStatus }
+    public func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws {}
     public func cancel() { lock.withLock { cancelled = true } }
 
     private func tick() async throws {
@@ -124,7 +137,7 @@
           : [],
         unsupportedModel: scenario == .unsupported
           ? UnsupportedModelDisplay(
-            deviceIdentifier: "apple,j504", modelIdentifier: "Mac15,3",
+            deviceIdentifier: "apple,j614s", modelIdentifier: "Mac16,8",
             supportedDeviceIdentifiers: Self.simulatedCatalogDevices)
           : nil)
     }
@@ -146,12 +159,14 @@
       return availability
     }
 
-    /// The 22 M1 and M2 models today's stable catalog admits.
+    /// The 34 M1, M2 and M3 Macs every catalog enables (scripts/supported-models.json).
     public static let simulatedCatalogDevices = [
-      "apple,j274", "apple,j293", "apple,j313", "apple,j314c", "apple,j314s", "apple,j316c",
-      "apple,j316s", "apple,j375c", "apple,j375d", "apple,j413", "apple,j414c", "apple,j414s",
-      "apple,j415", "apple,j416c", "apple,j416s", "apple,j456", "apple,j457", "apple,j473",
-      "apple,j474s", "apple,j475c", "apple,j475d", "apple,j493",
+      "apple,j274", "apple,j293", "apple,j313", "apple,j456", "apple,j457", "apple,j314s",
+      "apple,j314c", "apple,j316s", "apple,j316c", "apple,j375c", "apple,j375d", "apple,j413",
+      "apple,j415", "apple,j473", "apple,j493", "apple,j414s", "apple,j414c", "apple,j416s",
+      "apple,j416c", "apple,j474s", "apple,j475c", "apple,j475d", "apple,j180d", "apple,j433",
+      "apple,j434", "apple,j504", "apple,j613", "apple,j615", "apple,j514s", "apple,j514c",
+      "apple,j514m", "apple,j516s", "apple,j516c", "apple,j516m",
     ]
 
     private var refusedOnce: Bool {
@@ -169,7 +184,7 @@
       case .noMacRelease: throw InstallerAssetPreparationError.noMacRelease
       case .modelNotOnChannel:
         throw InstallerAssetPreparationError.notInCatalog(
-          deviceIdentifier: "apple,j504", modelIdentifier: "Mac15,3",
+          deviceIdentifier: "apple,j614s", modelIdentifier: "Mac16,8",
           supportedDeviceIdentifiers: Self.simulatedCatalogDevices)
       case .outdatedInstaller:
         throw InstallerAssetPreparationError.installerOutdated(
@@ -197,6 +212,28 @@
       }
       if scenario == .planFailure {
         throw InstallerAllocationRecommendationError.noEligibleCandidate
+      }
+      if scenario == .insufficientSpace {
+        throw InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 40_000_000_000, availableBytes: 34_500_000_000)
+      }
+      // As the planner does: a macOS container already below its reserve
+      // offers no space, and the shortfall adds the reserve deficit.
+      if scenario == .lowReserve {
+        throw InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 43_000_000_000, availableBytes: 0)
+      }
+      if [.tightDisk, .reserveColorPreview].contains(scenario) {
+        let maximum: UInt64 =
+          scenario == .reserveColorPreview ? 60_000_000_000 : 42_000_000_000
+        let chosen = min(maximum, max(40_000_000_000, omarchyBytes ?? 40_000_000_000))
+        return .plan(
+          PlanDisplay(
+            diskTotalBytes: 245_000_000_000, omarchyBytes: chosen,
+            bindingDigest: "simulation-tight-\(chosen)", minimumBytes: 40_000_000_000,
+            maximumBytes: maximum,
+            macOSFreeBeforeAllocationBytes: 80_000_000_000,
+            recommendedOmarchyBytes: 77_000_000_000))
       }
       progress(AssetProgressUpdate(stage: .planning))
       try await tick()

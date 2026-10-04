@@ -39,6 +39,60 @@
       XCTAssertFalse(failure.retryRecoveryAvailable)
     }
 
+    func testSpaceCautionsFollowAllocationAndReserveBoundary() {
+      let plan = PlanDisplay(
+        diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
+        bindingDigest: "test", macOSFreeBeforeAllocationBytes: 80_000_000_000,
+        recommendedOmarchyBytes: 77_000_000_000)
+      XCTAssertEqual(
+        plan.spaceCautions(for: 40_000_000_000),
+        ["Omarchy will use its minimum size, 40 GB, leaving little room for updates and snapshots."]
+      )
+      XCTAssertEqual(plan.spaceCautions(for: 42_000_000_000).count, 1)
+      XCTAssertNil(plan.macOSSpaceCaution(for: 42_000_000_000))
+      XCTAssertEqual(
+        plan.macOSSpaceCaution(for: 42_000_000_001),
+        plan.spaceCautions(for: 42_000_000_001).first)
+      XCTAssertEqual(
+        plan.spaceCautions(for: 42_000_000_001)[0],
+        "macOS will have about 37 GB free, less than the recommended 38 GB. You may need to free up space in macOS before an update will install."
+      )
+      let warnings = plan.spaceCautions(for: 43_000_000_000)
+      XCTAssertEqual(warnings.count, 2)
+      XCTAssertEqual(
+        warnings[1],
+        "Omarchy will use 43 GB, less than the recommended 77 GB, leaving limited room for updates and snapshots."
+      )
+      XCTAssertEqual(plan.spaceCautions(for: 77_000_000_000).count, 1)
+      let free = PlanDisplay(
+        diskTotalBytes: 245_000_000_000, omarchyBytes: 40_000_000_000,
+        bindingDigest: "free", fixedMacOSBytes: 180_000_000_000,
+        recommendedOmarchyBytes: 77_000_000_000)
+      XCTAssertNil(free.macOSSpaceCaution(for: 77_000_000_000))
+      XCTAssertEqual(free.spaceCautions(for: 40_000_000_000).count, 1)
+      XCTAssertTrue(free.spaceCautions(for: 77_000_000_000).isEmpty)
+    }
+
+    func testHeaderNamesTheChosenSizeOnceThereIsOne() {
+      let host = HostDisplay(
+        chipAndSpace: "Apple M2 Max · 375 GB free · up to 314 GB for Omarchy",
+        chipAndFreeSpace: "Apple M2 Max · 375 GB free",
+        supported: true)
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: nil),
+        "Apple M2 Max · 375 GB free · up to 314 GB for Omarchy")
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: 285_000_000_000),
+        "Apple M2 Max · 375 GB free · \(PlainLanguage.bytes(285_000_000_000)) for Omarchy")
+    }
+
+    func testHeaderWithoutSeparateFreeSpaceStillNamesTheChosenSize() {
+      let host = HostDisplay(chipAndSpace: "Simulated Mac · 464 GB free", supported: true)
+      XCTAssertEqual(
+        host.header(chosenOmarchyBytes: 100_000_000_000),
+        "Simulated Mac · 464 GB free · \(PlainLanguage.bytes(100_000_000_000)) for Omarchy")
+    }
+
     func testChannelBadgesNameEveryChannel() {
       XCTAssertEqual(PlainLanguage.badge(for: .stable), "Stable")
       XCTAssertEqual(PlainLanguage.badge(for: .rc), "Release candidate")
@@ -209,6 +263,14 @@
         "j514m", "j516s", "j516c", "j516m",
       ].map { "apple,\($0)" }
       XCTAssertEqual(identifiers, Set(everyM1M2M3Mac))
+      let manifest = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: scripts.appendingPathComponent("supported-models.json")))
+      let supported = try XCTUnwrap((manifest as? [String: Any])?["supported"] as? [String])
+      XCTAssertEqual(Set(supported), Set(everyM1M2M3Mac))
+      #if DEBUG
+        XCTAssertEqual(
+          InstallerSimulationEnvironment.simulatedCatalogDevices.sorted(), everyM1M2M3Mac.sorted())
+      #endif
       for identifier in identifiers {
         XCTAssertNotNil(MacModelNames.name(for: identifier), identifier)
       }

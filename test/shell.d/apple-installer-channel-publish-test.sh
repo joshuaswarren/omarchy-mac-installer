@@ -93,6 +93,16 @@ while (( $# > 0 )); do
 done
 path=${url#*://*/}
 file=$BUCKET_DIR/$path
+if [[ -n ${CURL_TRUNCATED:-} && $path == *$CURL_TRUNCATED && -f $file ]]; then
+  # A 200 whose body is cut short, as on a reset connection.
+  [[ -n $output ]] && head -c 100 "$file" >"$output"
+  [[ -n $write_out ]] && printf '200'
+  exit 18
+fi
+if [[ -n ${CURL_UNAVAILABLE:-} && $path == *$CURL_UNAVAILABLE ]]; then
+  [[ -n $write_out ]] && printf '503'
+  exit 22
+fi
 if [[ ! -f $file ]]; then
   [[ -n $write_out ]] && printf '404'
   exit 22
@@ -110,10 +120,27 @@ fi
 exit 0
 SHIM
 
-cat >"$BIN_DIR/pkgutil" <<'SHIM'
+cat >"$BIN_DIR/codesign" <<'SHIM'
 #!/bin/bash
-printf 'pkgutil %s\n' "$*" >>"$CALLS"
+printf 'codesign %s\n' "$*" >>"$CALLS"
+[[ -f $CODESIGN_FAILS ]] && exit 1
 exit 0
+SHIM
+
+# ditto -x -k ZIP DEST, portably.
+cat >"$BIN_DIR/ditto" <<'SHIM'
+#!/bin/bash
+printf 'ditto %s\n' "$*" >>"$CALLS"
+[[ $1 == -x && $2 == -k ]] || exit 64
+python3 - "$3" "$4" <<'PY'
+import os, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for entry in archive.infolist():
+        path = archive.extract(entry, sys.argv[2])
+        mode = entry.external_attr >> 16
+        if mode:
+            os.chmod(path, mode & 0o7777)
+PY
 SHIM
 
 cat >"$BIN_DIR/xcrun" <<'SHIM'
@@ -146,6 +173,7 @@ chmod +x "$BIN_DIR"/*
 export PATH="$BIN_DIR:$PATH"
 export BUCKET_DIR CALLS
 export STAPLE_FAILS="$WORK/staple-fails"
+export CODESIGN_FAILS="$WORK/codesign-fails"
 export BUCKET_LOCKED="$WORK/bucket-locked"
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
 export OMARCHY_R2_BUCKET=test-bucket
@@ -176,20 +204,21 @@ sign_catalog() {
   shasum -a 256 "$1" | cut -d' ' -f1 | tr -d '\n' >"$2"
 }
 
+# Every supported Mac, as a real catalog lists them.
 write_catalog() {
   local output=$1 sequence=$2 payload_url=$3 payload_size=$4
-  python3 - "$output" "$sequence" "$payload_url" "$payload_size" <<'PY'
+  python3 - "$output" "$sequence" "$payload_url" "$payload_size" "$ROOT/scripts/supported-models.json" <<'PY'
 import json
 import sys
 
-output, sequence, payload_url, payload_size = sys.argv[1:5]
+output, sequence, payload_url, payload_size, manifest = sys.argv[1:6]
 catalog = {
     "schemaVersion": 4,
     "sequence": int(sequence),
     "issuedAt": "2026-09-04T00:00:00Z",
     "models": [
         {
-            "deviceIdentifier": "apple,j314s",
+            "deviceIdentifier": identifier,
             "status": "enabled",
             "payloadArtifact": {
                 "sourceURL": payload_url,
@@ -197,6 +226,7 @@ catalog = {
                 "sizeBytes": int(payload_size),
             },
         }
+        for identifier in json.load(open(manifest))["supported"]
     ],
 }
 with open(output, "w", encoding="utf-8") as stream:
@@ -252,6 +282,33 @@ json.loads(base64.b64decode(d["catalog"]))
 ' "$STREAM_DIR/releases/os-v4.0.2-mac.1.20260902/catalog.signed.json" ||
   fail "envelope decodes to a catalog and a signature"
 pass "an envelope holds the catalog and its signature in one object"
+
+# --- a catalog that offers Macs offers every M1, M2 and M3 Mac ---------------
+refused_envelope() {
+  local name=$1 edit=$2 expected=$3
+  write_catalog "$WORK/$name.catalog" 100 "$BASE/releases/x/payload.zip" 128
+  python3 -c "
+import json, sys
+path = sys.argv[1]
+catalog = json.load(open(path))
+models = catalog['models']
+$edit
+json.dump(catalog, open(path, 'w'))
+" "$WORK/$name.catalog" || fail "$name catalog is written"
+  sign_catalog "$WORK/$name.catalog" "$WORK/$name.sig"
+  if "$PUBLISHER" envelope --catalog "$WORK/$name.catalog" --signature "$WORK/$name.sig" \
+    --output "$WORK/$name.envelope" >"$WORK/$name.log" 2>&1; then
+    fail "envelope refuses a catalog with $name"
+  fi
+  grep -q -- "$expected" "$WORK/$name.log" || fail "the $name refusal says $expected" "$(cat "$WORK/$name.log")"
+  [[ ! -e $WORK/$name.envelope ]] || fail "no envelope is written for a catalog with $name"
+}
+refused_envelope "a-missing-m3-mac" "catalog['models'] = [m for m in models if m['deviceIdentifier'] != 'apple,j613']" "missing apple,j613"
+refused_envelope "a-disabled-m3-mac" "models[-1]['status'] = 'disabled'" "apple,j516m is listed but disabled"
+refused_envelope "only-m1-and-m2" "catalog['models'] = models[:23]" "missing apple,j433"
+refused_envelope "an-m3-ultra" "models.append(dict(models[0], deviceIdentifier='apple,j575d'))" "apple,j575d is refused"
+refused_envelope "an-m4-mac" "models.append(dict(models[0], deviceIdentifier='apple,j614s'))" "M4 and later"
+pass "envelope refuses a catalog missing, disabling or overreaching any M1, M2 or M3 Mac"
 
 # --- promotion writes both channel objects and verifies them back -----------
 OMARCHY_PUBLISH_ASSUME_YES=os-v4.0.2-mac.1.20260902 "$PUBLISHER" os-promote --tag os-v4.0.2-mac.1.20260902 --to stable \
@@ -368,41 +425,279 @@ print(json.loads(base64.b64decode(d["catalog"]))["sequence"])
   fail "promoting rc leaves stable alone" "stable is now $stable_sequence"
 pass "promoting rc does not disturb stable"
 
-# --- the installer package publishes to an immutable key and the channel ----
-PKG="$WORK/Installer.pkg"
-head -c 4096 /dev/zero >"$PKG"
+# --- the app zip publishes to an immutable key and the channel -------------
+# make_app_zip OUT [FILLER BYTES] [EXTRA TOP-LEVEL ENTRY] [VERSION] [BUILD] [DECLARES HELPER 1/0]
+make_app_zip() {
+  python3 - "$1" "$INSTALLER_APP_NAME.app" "${2:-4096}" "${3:-}" "${4:-2.0.0}" "${5:-1}" \
+    "${6:-1}" "$INSTALLER_HELPER_IDENTIFIER" "$INSTALLER_APP_IDENTIFIER" "$INSTALLER_TEAM_ID" <<'PY'
+import plistlib, sys, zipfile
+out, app, filler, extra, version, build, declares, helper, app_id, team = sys.argv[1:11]
+helper_req = f'anchor apple generic and identifier "{helper}" and certificate leaf[subject.OU] = "{team}"'
+app_req = f'anchor apple generic and identifier "{app_id}" and certificate leaf[subject.OU] = "{team}"'
+info = {"CFBundleShortVersionString": version, "CFBundleVersion": build}
+if declares == "1":
+    info["SMPrivilegedExecutables"] = {helper: helper_req}
+helper_info = {"CFBundleIdentifier": helper, "CFBundleVersion": build, "SMAuthorizedClients": [app_req]}
+job = {"Label": helper, "MachServices": {helper: True},
+       "EnvironmentVariables": {"OMARCHY_CLIENT_CODE_SIGNING_REQUIREMENT": app_req}}
+with zipfile.ZipFile(out, "w") as archive:
+    archive.writestr(f"{app}/Contents/Info.plist", plistlib.dumps(info))
+    archive.writestr(f"{app}/Contents/MacOS/app", b"\0" * int(filler))
+    entry = zipfile.ZipInfo(f"{app}/Contents/Library/LaunchServices/{helper}")
+    entry.external_attr = 0o100755 << 16
+    archive.writestr(entry, b"\xcf\xfa\xed\xfe __TEXT __launchd_plist "
+                     + plistlib.dumps(helper_info) + b"\0" + plistlib.dumps(job))
+    if extra:
+        archive.writestr(extra, "x")
+PY
+}
+ZIP="$WORK/Installer.zip"
+make_app_zip "$ZIP"
 OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
-  --pkg "$PKG" --version 2.0.0 >"$WORK/app.log" 2>&1 ||
+  --zip "$ZIP" --version 2.0.0 >"$WORK/app.log" 2>&1 ||
   fail "app-publish succeeds" "$(cat "$WORK/app.log")"
-[[ -f $STREAM_DIR/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.pkg ]] ||
-  fail "the immutable package is published"
-[[ -f $STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.pkg ]] ||
-  fail "the stable package is published"
+[[ -f $STREAM_DIR/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.zip ]] ||
+  fail "the immutable zip is published"
+[[ -f $STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip ]] ||
+  fail "the stable zip is published"
 [[ -f $STREAM_DIR/installer/stable/installer.json ]] ||
   fail "the installer pointer is published"
-pass "the installer publishes to both an immutable key and the channel"
+grep -q "\"source\": \".*/installer/2.0.0/$INSTALLER_FILE_STEM-2.0.0.zip\"" \
+  "$STREAM_DIR/installer/stable/installer.json" ||
+  fail "the pointer names the immutable zip" "$(cat "$STREAM_DIR/installer/stable/installer.json")"
+grep -q "^xcrun stapler validate .*/unpacked/$INSTALLER_APP_NAME.app" "$CALLS" ||
+  fail "the app inside the zip is checked for a stapled ticket" "$(grep stapler "$CALLS")"
+grep -qF -- "-R=anchor apple generic and identifier \"$INSTALLER_APP_IDENTIFIER\" and certificate leaf[subject.OU] = \"$INSTALLER_TEAM_ID\"" "$CALLS" ||
+  fail "the app is checked against the team's signing requirement" "$(grep codesign "$CALLS")"
+grep -q '"build_number": 1' "$STREAM_DIR/installer/stable/installer.json" ||
+  fail "the pointer records the build number" "$(cat "$STREAM_DIR/installer/stable/installer.json")"
+pass "the installer zip publishes to both an immutable key and the channel"
 
-grep -qF -- "--content-disposition attachment; filename=\"$INSTALLER_APP_NAME.pkg\"" "$CALLS" ||
+grep -qF -- "--content-disposition attachment; filename=\"$INSTALLER_APP_NAME.zip\"" "$CALLS" ||
   fail "the download keeps its name" "$(grep 'content-disposition' "$CALLS")"
 pass "the stable download is served under its readable name"
 
-# --- an unstapled package never reaches the bucket --------------------------
+# --- the installer package is no longer published ---------------------------
 : >"$CALLS"
-touch "$STAPLE_FAILS"
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.1 "$PUBLISHER" app-publish \
-  --pkg "$PKG" --version 2.0.1 >"$WORK/unstapled.log" 2>&1; then
-  fail "an unstapled package is refused"
+  --pkg "$ZIP" --version 2.0.1 >"$WORK/pkg.log" 2>&1; then
+  fail "publishing a package is refused"
 fi
+grep -q -- "--zip" "$WORK/pkg.log" || fail "the refusal points at --zip" "$(cat "$WORK/pkg.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a refused package uploads nothing"
+pass "the installer package can no longer be published"
+
+# --- a zip holding more than the app, or an unsigned or unstapled app, never
+# --- reaches the bucket -----------------------------------------------------
+make_app_zip "$WORK/Extra.zip" 4096 "README.txt"
+for case in extra unsigned unstapled; do
+  : >"$CALLS"
+  zip=$ZIP
+  [[ $case == extra ]] && zip=$WORK/Extra.zip
+  [[ $case == unsigned ]] && touch "$CODESIGN_FAILS"
+  [[ $case == unstapled ]] && touch "$STAPLE_FAILS"
+  if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.1 "$PUBLISHER" app-publish \
+    --zip "$zip" --version 2.0.1 >"$WORK/$case.log" 2>&1; then
+    fail "a $case zip is refused"
+  fi
+  grep -q "^aws s3 cp" "$CALLS" && fail "a $case zip uploads nothing"
+  rm -f "$CODESIGN_FAILS" "$STAPLE_FAILS"
+done
+grep -q "only $INSTALLER_APP_NAME.app" "$WORK/extra.log" ||
+  fail "the refusal names the app" "$(cat "$WORK/extra.log")"
+grep -q "not validly signed" "$WORK/unsigned.log" ||
+  fail "the refusal names the signature" "$(cat "$WORK/unsigned.log")"
 grep -q "stapled notarization" "$WORK/unstapled.log" ||
   fail "the refusal names notarization" "$(cat "$WORK/unstapled.log")"
-grep -q "^aws s3 cp" "$CALLS" && fail "an unstapled package uploads nothing"
-rm -f "$STAPLE_FAILS"
-pass "an unstapled package is refused before anything is uploaded"
+pass "only a zip of the signed, stapled app is uploaded"
+
+# --- the zip must be this version, a newer build, and able to install its helper
+make_app_zip "$WORK/WrongVersion.zip" 4096 "" 2.0.9 5
+make_app_zip "$WORK/NoHelper.zip" 4096 "" 2.0.2 5 0
+make_app_zip "$WORK/OldBuild.zip" 5000 "" 2.0.2 1
+for case in WrongVersion:2.0.2 NoHelper:2.0.2 OldBuild:2.0.2; do
+  : >"$CALLS"
+  name=${case%%:*} version=${case#*:}
+  if OMARCHY_PUBLISH_ASSUME_YES=installer-v$version "$PUBLISHER" app-publish \
+    --zip "$WORK/$name.zip" --version "$version" >"$WORK/$name.log" 2>&1; then
+    fail "a $name zip is refused"
+  fi
+  grep -q "^aws s3 cp" "$CALLS" && fail "a $name zip uploads nothing"
+done
+grep -q "version 2.0.9, not 2.0.2" "$WORK/WrongVersion.log" ||
+  fail "the refusal names the version" "$(cat "$WORK/WrongVersion.log")"
+grep -q "cannot install it" "$WORK/NoHelper.log" ||
+  fail "the refusal names the helper" "$(cat "$WORK/NoHelper.log")"
+grep -q "build 1 is not above build 1" "$WORK/OldBuild.log" ||
+  fail "the refusal names the build" "$(cat "$WORK/OldBuild.log")"
+pass "only this version, a newer build, with a helper it can install, is uploaded"
+
+# --- the build check is never skipped: only a 404 means no earlier release
+: >"$CALLS"
+make_app_zip "$WORK/Next.zip" 6000 "" 2.0.3 9
+if CURL_UNAVAILABLE=installer/stable/installer.json OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.3 \
+  "$PUBLISHER" app-publish --zip "$WORK/Next.zip" --version 2.0.3 >"$WORK/unavailable.log" 2>&1; then
+  fail "an unreadable channel refuses the publish"
+fi
+grep -q "HTTP 503" "$WORK/unavailable.log" || fail "the refusal names the failure" "$(cat "$WORK/unavailable.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable channel uploads nothing"
+pass "a failed read of the channel never skips the build check"
+
+# --- nor is the zip: a failed read of the live zip stops the publish
+# Reproduces the review: the channel serves a newer zip whose installer.json was
+# never updated, and the live zip can't be read; retrying the old zip must not
+# overwrite the newer one.
+: >"$CALLS"
+cp "$WORK/Next.zip" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
+if CURL_UNAVAILABLE=installer/stable/$INSTALLER_FILE_STEM.zip OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 \
+  "$PUBLISHER" app-publish --zip "$ZIP" --version 2.0.0 >"$WORK/zip-unavailable.log" 2>&1; then
+  fail "an unreadable live zip refuses the retry"
+fi
+grep -q "current zip" "$WORK/zip-unavailable.log" ||
+  fail "the refusal names the zip" "$(cat "$WORK/zip-unavailable.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "an unreadable live zip uploads nothing"
+# A 200 that is cut short is a failed read too, not a smaller zip.
+: >"$CALLS"
+if CURL_TRUNCATED=installer/stable/$INSTALLER_FILE_STEM.zip OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 \
+  "$PUBLISHER" app-publish --zip "$ZIP" --version 2.0.0 >"$WORK/zip-truncated.log" 2>&1; then
+  fail "a truncated live zip refuses the retry"
+fi
+grep -q "curl exit 18" "$WORK/zip-truncated.log" ||
+  fail "the refusal names the cut-short transfer" "$(cat "$WORK/zip-truncated.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a truncated live zip uploads nothing"
+cp "$ZIP" "$STREAM_DIR/installer/stable/$INSTALLER_FILE_STEM.zip"
+pass "a failed or cut-short read of the live zip never permits a rollback"
+
+# --- package-era metadata has no build number: build 27 is the floor
+# Reproduces the review: build 1 replacing a published build 28 because the
+# channel's installer.json carried no build_number.
+mkdir -p "$STREAM_DIR/installer/rc"
+printf '{"schema_version": 1, "version": "2.0.10", "sha256": "old"}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+rm -f "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+make_app_zip "$WORK/Low.zip" 6200 "" 2.0.7 20
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.7 "$PUBLISHER" app-publish \
+  --zip "$WORK/Low.zip" --version 2.0.7 --to rc >"$WORK/floor.log" 2>&1; then
+  fail "a build at or below the package era's 27 is refused"
+fi
+grep -q "build 20 is not above build 27" "$WORK/floor.log" ||
+  fail "the refusal names the floor" "$(cat "$WORK/floor.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a build below the floor uploads nothing"
+printf '{"schema_version": 1, "version": "2.0.10", "sha256": "old", "build_number": "x7"}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.7 "$PUBLISHER" app-publish \
+  --zip "$WORK/Low.zip" --version 2.0.7 --to rc >"$WORK/malformed.log" 2>&1; then
+  fail "a malformed build_number stops the publish"
+fi
+grep -q "malformed build_number" "$WORK/malformed.log" ||
+  fail "the refusal names the malformed field" "$(cat "$WORK/malformed.log")"
+rm -f "$STREAM_DIR/installer/rc/installer.json"
+pass "missing build numbers count as 27, and malformed ones stop the publish"
+
+# --- old metadata beside a newer zip lets no middle build through
+make_app_zip "$WORK/Served40.zip" 6300 "" 2.0.8 40
+cp "$WORK/Served40.zip" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+printf '{"schema_version": 1, "version": "2.0.8", "sha256": "old", "build_number": 30}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+make_app_zip "$WORK/Middle.zip" 6400 "" 2.0.9 35
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.9 "$PUBLISHER" app-publish \
+  --zip "$WORK/Middle.zip" --version 2.0.9 --to rc >"$WORK/middle.log" 2>&1; then
+  fail "a build between stale metadata and the served zip is refused"
+fi
+grep -q "build 35 is not above build 40" "$WORK/middle.log" ||
+  fail "the refusal names the served zip's build" "$(cat "$WORK/middle.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a middle build uploads nothing"
+rm -f "$STREAM_DIR/installer/rc/installer.json" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+pass "the zip a channel serves counts toward the build it must beat"
+
+# --- a zip served without metadata still sets the build to beat
+# Reproduces the review: build 35 replacing a served build 40 because the
+# interrupted first publish never wrote installer.json.
+cp "$WORK/Served40.zip" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.9 "$PUBLISHER" app-publish \
+  --zip "$WORK/Middle.zip" --version 2.0.9 --to rc >"$WORK/orphan.log" 2>&1; then
+  fail "a build below a zip served without metadata is refused"
+fi
+grep -q "build 35 is not above build 40" "$WORK/orphan.log" ||
+  fail "the refusal names the orphaned zip's build" "$(cat "$WORK/orphan.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "a build below an orphaned zip uploads nothing"
+pass "a zip served without metadata counts toward the build it must beat"
+
+# --- an interrupted publish of this very zip may finish, but not past newer metadata
+printf '{"schema_version": 1, "version": "2.0.7", "sha256": "old", "build_number": 30}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/resume.log" 2>&1 ||
+  fail "the zip already served may finish publishing" "$(cat "$WORK/resume.log")"
+grep -q '"build_number": 40' "$STREAM_DIR/installer/rc/installer.json" ||
+  fail "the finished publish records the zip's build" "$(cat "$STREAM_DIR/installer/rc/installer.json")"
+printf '{"schema_version": 1, "version": "2.0.9", "sha256": "other", "build_number": 50}\n' \
+  >"$STREAM_DIR/installer/rc/installer.json"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/stale-resume.log" 2>&1; then
+  fail "the served zip can't finish over metadata recording a newer build"
+fi
+grep -q "build 40 is not above build 50" "$WORK/stale-resume.log" ||
+  fail "the refusal names the recorded build" "$(cat "$WORK/stale-resume.log")"
+pass "an interrupted publish finishes only if it still beats the metadata"
+
+# --- republishing the identical zip still validates the metadata
+printf '{"schema_version": 1, "version": "2.0.8", "sha256": "%s", "build_number": "x7"}\n' \
+  "$(shasum -a 256 "$WORK/Served40.zip" | cut -d' ' -f1)" >"$STREAM_DIR/installer/rc/installer.json"
+: >"$CALLS"
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.8 "$PUBLISHER" app-publish \
+  --zip "$WORK/Served40.zip" --version 2.0.8 --to rc >"$WORK/same-malformed.log" 2>&1; then
+  fail "an identical zip over malformed metadata is refused"
+fi
+grep -q "malformed build_number" "$WORK/same-malformed.log" ||
+  fail "the refusal names the malformed field" "$(cat "$WORK/same-malformed.log")"
+grep -q "^aws s3 cp" "$CALLS" && fail "malformed metadata uploads nothing"
+rm -f "$STREAM_DIR/installer/rc/installer.json" "$STREAM_DIR/installer/rc/$INSTALLER_FILE_STEM.zip"
+pass "an identical zip never skips the metadata check"
+
+# --- a build with a leading zero compares as decimal, not octal
+# (on edge, so the stable and rc checks below are undisturbed)
+make_app_zip "$WORK/Eight.zip" 6050 "" 2.0.4 8
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.4 "$PUBLISHER" app-publish \
+  --zip "$WORK/Eight.zip" --version 2.0.4 --to edge >"$WORK/eight.log" 2>&1 ||
+  fail "build 8 publishes to edge" "$(cat "$WORK/eight.log")"
+make_app_zip "$WORK/Octal.zip" 6100 "" 2.0.6 09
+OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.6 "$PUBLISHER" app-publish \
+  --zip "$WORK/Octal.zip" --version 2.0.6 --to edge >"$WORK/octal.log" 2>&1 ||
+  fail "build 09 is compared as nine, above eight" "$(cat "$WORK/octal.log")"
+pass "build numbers compare as decimal"
+
+# --- the helper's pieces must be valid, not just present
+python3 - "$WORK/BadHelper.zip" "$INSTALLER_APP_NAME.app" "$INSTALLER_HELPER_IDENTIFIER" "$INSTALLER_TEAM_ID" <<'PY'
+import plistlib, sys, zipfile
+out, app, helper, team = sys.argv[1:5]
+req = f'anchor apple generic and identifier "{helper}" and certificate leaf[subject.OU] = "{team}"'
+info = {"CFBundleShortVersionString": "2.0.5", "CFBundleVersion": "10",
+        "SMPrivilegedExecutables": {helper: req}}
+helper_info = {"CFBundleIdentifier": helper, "CFBundleVersion": "10",
+               "SMAuthorizedClients": ['identifier "someone.else"']}
+job = {"Label": helper, "MachServices": {helper: True}}
+with zipfile.ZipFile(out, "w") as archive:
+    archive.writestr(f"{app}/Contents/Info.plist", plistlib.dumps(info))
+    entry = zipfile.ZipInfo(f"{app}/Contents/Library/LaunchServices/{helper}")
+    entry.external_attr = 0o100755 << 16
+    archive.writestr(entry, plistlib.dumps(helper_info) + plistlib.dumps(job))
+PY
+if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.5 "$PUBLISHER" app-publish \
+  --zip "$WORK/BadHelper.zip" --version 2.0.5 >"$WORK/badhelper.log" 2>&1; then
+  fail "a helper that doesn't authorize the app is refused"
+fi
+grep -q "does not authorize this app" "$WORK/badhelper.log" ||
+  fail "the refusal names the helper's client" "$(cat "$WORK/badhelper.log")"
+pass "the helper's embedded plists must name this build and this app"
 
 # --- republishing the same immutable version with different bytes is refused -
-head -c 8192 /dev/zero >"$WORK/Different.pkg"
+make_app_zip "$WORK/Different.zip" 8192 "" 2.0.0 99
 if OMARCHY_PUBLISH_ASSUME_YES=installer-v2.0.0 "$PUBLISHER" app-publish \
-  --pkg "$WORK/Different.pkg" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
+  --zip "$WORK/Different.zip" --version 2.0.0 >"$WORK/clobber.log" 2>&1; then
   fail "rewriting an immutable version is refused"
 fi
 grep -q "publish a new version" "$WORK/clobber.log" ||
@@ -585,10 +880,10 @@ for bucket_key in "${written[@]}"; do
   case $key in
     channels/stable/catalog.signed.json | channels/rc/catalog.signed.json | channels/edge/catalog.signed.json) ;;
     channels/stable/channel.json | channels/rc/channel.json | channels/edge/channel.json) ;;
-    installer/stable/"$INSTALLER_FILE_STEM.pkg" | installer/rc/"$INSTALLER_FILE_STEM.pkg") ;;
-    installer/edge/"$INSTALLER_FILE_STEM.pkg") ;;
+    installer/stable/"$INSTALLER_FILE_STEM.zip" | installer/rc/"$INSTALLER_FILE_STEM.zip") ;;
+    installer/edge/"$INSTALLER_FILE_STEM.zip") ;;
     installer/stable/installer.json | installer/rc/installer.json | installer/edge/installer.json) ;;
-    installer/*/"$INSTALLER_FILE_STEM"-*.pkg | installer/*/*.pkg.sha256) ;;
+    installer/*/"$INSTALLER_FILE_STEM"-*.zip | installer/*/*.zip.sha256) ;;
     *) fail "an unexpected key was written" "$key" ;;
   esac
 done

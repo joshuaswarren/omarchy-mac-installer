@@ -26,6 +26,36 @@
       XCTAssertLessThan(Date().timeIntervalSince(started), 6)
     }
 
+    /// A helper that is absent, or too old to know the call, reports no
+    /// version instead of hanging or throwing.
+    func testHelperVersionIsNilForAMissingService() async throws {
+      let submitter = try AuthenticatedEngineXPCSubmitter(
+        machServiceName: "com.omarchy.apple-installer.test.absent",
+        helperCodeSigningRequirement:
+          #"identifier "com.omarchy.apple-installer.helper""#
+      )
+      let started = Date()
+      let version = await submitter.helperVersion(timeout: .seconds(2))
+      XCTAssertNil(version)
+      XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    /// Third review: a removal that never reached the helper must not look
+    /// like a reply lost after sending, which would hold the person in review.
+    func testARemovalThatCannotBeSentIsNotSubmitted() async throws {
+      let submitter = try AuthenticatedEngineXPCSubmitter(
+        machServiceName: "com.omarchy.apple-installer.test.absent",
+        helperCodeSigningRequirement:
+          #"identifier "com.omarchy.apple-installer.helper""#
+      )
+      do {
+        _ = try await submitter.removal()
+        XCTFail("a removal to an absent helper must throw")
+      } catch let error as EngineXPCSubmissionError {
+        XCTAssertEqual(error, .notSubmitted)
+      }
+    }
+
     func testValidServiceAndRequirementAreAcceptedWithoutRegistration() throws {
       XCTAssertNoThrow(
         try AuthenticatedEngineXPCSubmitter(

@@ -18,7 +18,7 @@ else
     bash "$root/Packaging/build-app.sh" "$release" "$output"
 fi
 app="$output/$INSTALLER_APP_NAME.app"
-helper="$app/Contents/Resources/omarchy-apple-installer-helper"
+helper="$app/Contents/Library/LaunchServices/$INSTALLER_HELPER_IDENTIFIER"
 [[ $(/usr/bin/lipo -archs "$helper") == "arm64" ]] || exit 1
 [[ $(/usr/bin/lipo -archs "$app/Contents/MacOS/OmarchyAppleInstallerApp") == "arm64" ]] || exit 1
 helper_requirement=$(private_code_requirement "$helper" "$INSTALLER_HELPER_IDENTIFIER")

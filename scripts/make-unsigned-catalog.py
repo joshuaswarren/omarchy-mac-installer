@@ -8,7 +8,8 @@ repository.
 
 Every per-release value comes from an inputs file (`--inputs`), so cutting a
 release never edits this script. `scripts/release-inputs.template.json` holds
-the current values.
+the current values. The inputs must list exactly the Macs in
+`scripts/supported-models.json`: every M1, M2 and M3 Mac, none refused.
 
 The catalog pins whole-file digests. When the payload was split for release
 delivery, the sibling `<payload>.partNN` files are emitted as an additional
@@ -30,7 +31,11 @@ import datetime
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import supported_models  # noqa: E402
 
 SCHEMA_VERSION = 4
 
@@ -224,6 +229,10 @@ def load_inputs(path: Path) -> dict:
             identifier
         ):
             raise SystemExit(f"invalid device identifier: {identifier}")
+    # Every catalog enables every M1, M2 and M3 Mac (scripts/supported-models.json).
+    coverage = supported_models.coverage_errors(identifiers)
+    if coverage:
+        raise SystemExit("inputs device_identifiers: " + "; ".join(coverage))
 
     installer = document["installer"]
     if not isinstance(installer, dict):
@@ -244,6 +253,11 @@ def load_inputs(path: Path) -> dict:
         raise SystemExit(
             "inputs installer.minimum_version is newer than installer.latest_version"
         )
+    # Engines with recommendation fields require the compatible decoder and
+    # reserve-policy UI. Refuse a catalog that sends older apps into decoding.
+    engine = re.fullmatch(r"v0\.9\.2-omarchy\.(\d+)", document["engine_version"])
+    if engine and int(engine.group(1)) >= 18 and parse_version(installer["minimum_version"]) < (2, 1, 0):
+        raise SystemExit("this engine requires installer.minimum_version >= 2.1.0")
     download_url = installer["download_url"]
     if not isinstance(download_url, str) or not download_url.startswith("https://"):
         raise SystemExit(f"inputs installer.download_url must be https: {download_url}")

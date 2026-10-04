@@ -12,9 +12,6 @@ import OmarchyInstallerUXCore
 /// model, and no credential is ever stored here.
 final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
   private let lock = NSLock()
-  private let helperService =
-    InstallerHelperServiceManager.preinstalledSystemDaemon()
-
   private var hostInspection: AppleSiliconHostInspection?
   private var engineInspection: ValidatedEngineTranscript?
   private var engineInspectionTranscript: Data?
@@ -60,7 +57,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   }
 
   var helperStatus: HelperDisplay {
-    HelperDisplay(status: helperService.status)
+    InstallerHelperSetup.display
   }
 
   // MARK: Inspection
@@ -277,6 +274,12 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     // Sampled before the engine reads free space, so a download that moves on
     // during inspection only makes the reserve more cautious.
     let payloadBytesOnDisk = prefetch.bytesOnDisk(for: release.assets.payload)
+    let planningReserve = release.assets.planningReserveBytes(
+      payloadBytesOnDisk: payloadBytesOnDisk)
+    let freshHost = try await Task.detached(priority: .userInitiated) {
+      try AppleSiliconHostInspector().inspect()
+    }.value
+    guard freshHost.identity == host.identity else { throw InstallerAppError.hostChanged }
     let stagedEngine = release.assets.engine
     let archive = try PinnedAsahiEngineArchive(
       fileURL: stagedEngine.fileURL,
@@ -306,7 +309,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     let recommendation = try InstallerAllocationRecommendation(
       inventory: inventory,
       targetBytes: omarchyBytes ?? InstallerAllocationRecommendation.balancedTargetBytes,
-      reservedBytes: release.assets.planningReserveBytes(payloadBytesOnDisk: payloadBytesOnDisk),
+      reservedBytes: planningReserve,
       snapshotConstraint: {
         APFSSnapshotInspector().constraint(in: host.storage)
       }
@@ -337,7 +340,8 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
     return .plan(
       Self.planDisplay(
-        review: prepared.review, host: host, recommendation: recommendation,
+        review: prepared.review, host: freshHost, recommendation: recommendation,
+        reservedBytes: planningReserve,
         release:
           "\(channel.rawValue.capitalized) · \(release.assets.payload.fileURL.lastPathComponent)"
       ))
@@ -381,6 +385,17 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
   func refreshHelperStatus() -> HelperDisplay {
     helperStatus
+  }
+
+  func probeHelperStatus() async -> HelperDisplay {
+    await InstallerHelperSetup.probeDisplay()
+  }
+
+  func ensureHelper(
+    _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+  ) async throws {
+    try await InstallerHelperSetup.ensure(
+      authorization, reenablingSwitchedOff: reenablingSwitchedOff)
   }
 
   // MARK: Shutdown
@@ -571,14 +586,16 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
 
     let existing = Self.existingInstalls(in: engine)
     let space = existing.isEmpty ? Self.spaceCheck(engine: engine, host: host) : nil
-    var chipAndSpace =
+    let chipAndFreeSpace =
       "\(host.identity.chip) · \(PlainLanguage.bytes(host.storage.containerFreeBytes)) free"
+    var chipAndSpace = chipAndFreeSpace
     if case .fits(let maximumBytes) = space {
       chipAndSpace += " · up to \(PlainLanguage.bytes(maximumBytes)) for Omarchy"
     }
 
     return HostDisplay(
       chipAndSpace: chipAndSpace,
+      chipAndFreeSpace: chipAndFreeSpace,
       supported: !blocked && engine?.support == .supported,
       blockingReason: blockingReason(host: host, engineFailure: engineFailure),
       existingInstalls: existing,
@@ -653,6 +670,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     review: InstallerPlanReview,
     host: AppleSiliconHostInspection,
     recommendation: InstallerAllocationRecommendation,
+    reservedBytes: UInt64 = 0,
     release: String
   ) -> PlanDisplay {
     let length = review.plan.lengthBytes
@@ -671,7 +689,13 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
       releaseDescription: release,
       targetDescription:
         "Internal storage · \(review.plan.candidateKind == "free" ? "Use free space" : "Resize macOS")",
-      fixedMacOSBytes: review.plan.candidateKind == "free" ? host.storage.containerSizeBytes : nil
+      fixedMacOSBytes: review.plan.candidateKind == "free" ? host.storage.containerSizeBytes : nil,
+      macOSFreeBeforeAllocationBytes:
+        review.plan.candidateKind == "resize"
+        && recommendation.candidate.sourceIdentifier == host.storage.physicalStoreIdentifier
+        ? host.storage.containerFreeBytes - min(host.storage.containerFreeBytes, reservedBytes)
+        : nil,
+      recommendedOmarchyBytes: recommendation.candidate.recommendedInstallBytes
     )
   }
 

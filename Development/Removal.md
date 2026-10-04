@@ -46,6 +46,8 @@ Connection loss locks the app's further disk actions; it does not claim that the
 helper stopped or that no writes occurred. A successful removal refreshes the
 installer's inspection so an old installation plan cannot be reused.
 
+Install journals are named by the plan's binding digest, and removal restores the layout that plan was made from. A successful removal therefore moves `execution-journals` to `retired-execution-journals/<removal ticket>` in the helper directory; otherwise a reinstall at the same size would find its earlier journal complete and report success without writing anything. A failed removal keeps them in place.
+
 ## Verification and simulator
 
 In a debug `--simulate` run, choose the same menu action and use **Removal test**

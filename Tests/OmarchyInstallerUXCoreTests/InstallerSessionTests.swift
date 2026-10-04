@@ -188,10 +188,11 @@
       XCTAssertFalse(failure.isBlockedModel)
       XCTAssertEqual(failure.device, environment.host)
       XCTAssertEqual(
-        failure.headline, "Omarchy needs 77 GB; only 74 GB can be made available")
+        failure.headline, "Free up at least 4 GB to install Omarchy")
       XCTAssertEqual(
         failure.remedy,
-        "Free up at least 4 GB in macOS and empty the Trash, then choose Check again.")
+        "Remove files you no longer need in macOS and empty the Trash, then choose Check again. The installer will check the available space again before allowing installation."
+      )
 
       await session.continueToPlan()
       XCTAssertEqual(environment.prepareCount, 0)
@@ -539,16 +540,23 @@
       XCTAssertNotNil(failure.technicalDetail)
     }
 
-    func testQuitAllowedDuringPayloadWaitAndBlockedOnlyDuringExecution() async throws {
+    func testQuitBlockedDuringHelperSetupAndExecutionButAllowedDuringPayloadWait() async throws {
       let environment = MockInstallerEnvironment()
+      let setupGate = OperationGate()
       let payloadGate = OperationGate()
       let helperGate = OperationGate()
+      environment.ensureHelperGate = setupGate
       environment.payloadWaitGate = payloadGate
       environment.executeGate = helperGate
       let session = await ready(environment)
       session.presentInstallCredentials()
       let credentials = try authorization()
       let task = Task { await session.submit(credentials) }
+      await setupGate.waitUntilEntered()
+      XCTAssertTrue(session.isExecutionInProgress)
+      XCTAssertEqual(environment.payloadWaitCount, 0)
+      XCTAssertEqual(environment.executeCount, 0)
+      await setupGate.release()
       await waitUntil { environment.payloadWaitCount > 0 || environment.executeCount > 0 }
       XCTAssertEqual(environment.payloadWaitCount, 1)
       XCTAssertEqual(environment.executeCount, 0)
@@ -621,11 +629,17 @@
       session.presentInstallCredentials()
       await session.submit(try authorization())
       XCTAssertFalse(session.isExecutionInProgress)
+      let setupGate = OperationGate()
       let gate = OperationGate()
+      environment.ensureHelperGate = setupGate
       environment.executeGate = gate
       session.presentRecoveryRetryCredentials()
       let credentials = try authorization()
       let retry = Task { await session.submit(credentials) }
+      await setupGate.waitUntilEntered()
+      XCTAssertTrue(session.isExecutionInProgress)
+      XCTAssertEqual(environment.executeCount, 1)
+      await setupGate.release()
       await gate.waitUntilEntered()
       XCTAssertTrue(session.isExecutionInProgress)
       await gate.release()
@@ -693,7 +707,7 @@
 
     func testHelperMustBeReachableBeforeInstallationCanStart() async {
       let environment = MockInstallerEnvironment()
-      environment.helper = HelperDisplay(status: .notInstalled)
+      environment.helper = HelperDisplay(status: .missing)
       let session = InstallerSession(environment: environment)
       await session.inspect()
       await session.continueToPlan()
@@ -707,9 +721,203 @@
 
       // The installer package installs the system daemon; refreshing picks it
       // up. There is no registration or Login Items approval step.
-      environment.helper = HelperDisplay(status: .enabled)
+      environment.helper = HelperDisplay(status: .current)
       session.refreshHelperStatus()
       XCTAssertTrue(session.canStartInstallation)
+    }
+
+    func testAMissingHelperTheBuildCanInstallDoesNotBlockInstallation() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      let session = try await approvedSession(environment)
+
+      XCTAssertTrue(session.canStartInstallation)
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testACurrentHelperNeedsNoBackgroundItemNotice() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      let session = try await approvedSession(environment)
+
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, false)
+      await session.submit(try authorization())
+      // Setup still runs: it confirms the helper answers and is current.
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testATypoDuringHelperSetupShowsTheUsualRejection() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      environment.ensureHelperError = EngineXPCSubmissionError.machineOwnerCredentialsRejected
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.submit(try authorization())
+
+      XCTAssertEqual(session.credentialSheet.context?.error, .credentialsRejected)
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+      XCTAssertEqual(environment.executeCount, 0)
+      XCTAssertFalse(session.isExecutionInProgress)
+      XCTAssertTrue(session.canStartInstallation)
+    }
+
+    func testHelperSetupFailuresReopenTheSheetWithoutRunning() async throws {
+      let cases: [(InstallerHelperSetupError, CredentialSheetError)] = [
+        (.cancelled, .helperSetupCancelled),
+        (.switchedOff, .helperSwitchedOff),
+        (.busy, .helperBusy),
+        (.notAdministrator, .notAdministrator),
+        (.failed("launchd"), .helperSetupFailed),
+        (.unavailable, .helperSetupFailed),
+      ]
+      for (setupError, sheetError) in cases {
+        let environment = MockInstallerEnvironment()
+        environment.helper = HelperDisplay(status: .missing, canInstall: true)
+        environment.ensureHelperError = setupError
+        let session = try await approvedSession(environment)
+        session.presentInstallCredentials()
+
+        await session.submit(try authorization())
+
+        XCTAssertEqual(session.credentialSheet.context?.error, sheetError, "\(setupError)")
+        XCTAssertEqual(environment.executeCount, 0, "\(setupError)")
+        XCTAssertFalse(session.isExecutionInProgress, "\(setupError)")
+        // Nothing ran, so the person can simply try again.
+        XCTAssertTrue(session.canStartInstallation, "\(setupError)")
+        await session.submit(try authorization())
+        XCTAssertEqual(environment.executeCount, 1, "\(setupError)")
+      }
+    }
+
+    func testRecoveryRetrySetsUpTheHelperOnceForItsOwnPassword() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+        .success(MockInstallerEnvironment.recoveryCompletion),
+      ]
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      session.presentRecoveryRetryCredentials()
+      await session.submit(try authorization())
+
+      XCTAssertEqual(
+        environment.calls, ["ensureHelper:owner", "execute", "ensureHelper:owner", "execute"])
+    }
+
+    func testASwitchedOffHelperIsOfferedBackBeforeThePasswordIsTyped() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: true)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+      XCTAssertEqual(session.credentialSheet.context?.mentionsBackgroundItem, true)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner:reenable", "execute"])
+    }
+
+    func testAnAnsweringHelperLeavesTheSheetAlone() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, ["ensureHelper:owner", "execute"])
+    }
+
+    func testABuildThatCannotInstallTheHelperDoesNotOfferToTurnItOn() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: false)
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, false)
+    }
+
+    func testSwitchedOffFoundAtSubmitReopensTheSheetOfferingToTurnItOn() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.ensureHelperError = InstallerHelperSetupError.switchedOff
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+
+      await session.submit(try authorization())
+
+      XCTAssertEqual(session.credentialSheet.context?.error, .helperSwitchedOff)
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+      await session.submit(try authorization())
+      XCTAssertEqual(
+        environment.calls, ["ensureHelper:owner", "ensureHelper:owner:reenable", "execute"])
+    }
+
+    func testTheRecoveryRetrySheetIsOfferedTheSameChoice() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+        .success(MockInstallerEnvironment.recoveryCompletion),
+      ]
+      let session = try await approvedSession(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      environment.helper = HelperDisplay(status: .current, canInstall: true)
+      environment.probedHelper = HelperDisplay(status: .disabled, canInstall: true)
+      session.presentRecoveryRetryCredentials()
+
+      await session.checkWhetherHelperIsSwitchedOff()
+
+      XCTAssertEqual(session.credentialSheet.context?.kind, .retryRecoveryAuthorization)
+      XCTAssertEqual(session.credentialSheet.context?.helperSwitchedOff, true)
+    }
+
+    func testAnUnsupportedMacNeverReachesHelperSetup() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: true)
+      let session = try await approvedSession(environment)
+      environment.installationBlocked = true
+
+      XCTAssertFalse(session.canStartInstallation)
+      session.presentInstallCredentials()
+      XCTAssertNil(session.credentialSheet.context)
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.calls, [])
+    }
+
+    func testABuildThatCannotInstallTheHelperStillNeedsItInPlace() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.helper = HelperDisplay(status: .missing, canInstall: false)
+      let session = try await approvedSession(environment)
+
+      XCTAssertFalse(session.canStartInstallation)
+      XCTAssertFalse(environment.helper.isReady)
+    }
+
+    private func approvedSession(
+      _ environment: MockInstallerEnvironment
+    ) async throws -> InstallerSession {
+      let session = InstallerSession(environment: environment)
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      session.setAcknowledged(true)
+      session.approve()
+      return session
     }
 
     func testJournalChunksDriveTheInstallingDisplay() async throws {
@@ -1007,6 +1215,42 @@
       XCTAssertNotNil(failure.technicalDetail)
     }
 
+    func testSpaceShortfallRoundsUpAndRequiresAFreshPlanAfterRechecking() async {
+      let environment = MockInstallerEnvironment()
+      let session = InstallerSession(environment: environment)
+      // A fractional GB must not be rounded down, including just above a whole GB.
+      for (available, expectedGB): (UInt64, Int) in [
+        (34_500_000_000, 6), (34_000_000_000, 6), (33_999_999_999, 7),
+      ] {
+        environment.prepareError = InstallerAllocationRecommendationError.insufficientSpace(
+          requiredBytes: 40_000_000_000, availableBytes: available)
+        await session.inspect()
+        await session.continueToPlan()
+
+        guard case .failed(let failure) = session.phase else {
+          return XCTFail("Expected a space shortfall during planning.")
+        }
+        XCTAssertEqual(failure.headline, "Free up at least \(expectedGB) GB to install Omarchy")
+        XCTAssertTrue(session.canInspect)
+        XCTAssertFalse(session.canStartInstallation)
+        session.approve()
+        session.presentInstallCredentials()
+        XCTAssertNil(session.credentialSheet.context)
+        XCTAssertFalse(environment.hasApprovedPlan)
+        XCTAssertFalse(session.hasExecutionStarted)
+      }
+
+      environment.prepareError = nil
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      guard case .planReview(_, let acknowledged) = session.phase else {
+        return XCTFail("A successful recheck should allow a fresh plan review.")
+      }
+      XCTAssertFalse(acknowledged)
+      XCTAssertFalse(session.canStartInstallation)
+    }
+
     func testSnapshotFailureAllowsRecheckingWithoutAuthorizingInstallation() async {
       let environment = MockInstallerEnvironment()
       environment.prepareError =
@@ -1212,7 +1456,7 @@
   final class MockInstallerEnvironment: InstallerEnvironment, @unchecked Sendable {
     var host = MockInstallerEnvironment.supportedHost
     var plan = MockInstallerEnvironment.samplePlan
-    var helper = HelperDisplay(status: .enabled)
+    var helper = HelperDisplay(status: .current)
     var installationBlocked = false
     var engineSupported = true
     var requestShutdownCount = 0
@@ -1236,6 +1480,10 @@
     private(set) var approveCount = 0
     private(set) var discardCount = 0
     private(set) var executeCount = 0
+    /// Each helper setup, as the order of calls relative to execute.
+    private(set) var calls = [String]()
+    var ensureHelperError: (any Error)?
+    var ensureHelperGate: OperationGate?
     private(set) var prepareCount = 0
     private(set) var lastOperation: InstallOperationKind?
     private(set) var lastEncryptLinuxDisk: Bool?
@@ -1315,6 +1563,23 @@
 
     func refreshHelperStatus() -> HelperDisplay { helper }
 
+    /// What the helper itself reports; nil reports the registration status.
+    var probedHelper: HelperDisplay?
+
+    func probeHelperStatus() async -> HelperDisplay { probedHelper ?? helper }
+
+    func ensureHelper(
+      _ authorization: MachineOwnerAuthorization, reenablingSwitchedOff: Bool
+    ) async throws {
+      calls.append(
+        "ensureHelper:\(authorization.username)" + (reenablingSwitchedOff ? ":reenable" : ""))
+      await ensureHelperGate?.wait()
+      if let ensureHelperError {
+        self.ensureHelperError = nil
+        throw ensureHelperError
+      }
+    }
+
     func requestShutdown() -> Bool {
       requestShutdownCount += 1
       return shutdownAccepted
@@ -1358,6 +1623,7 @@
       journal: @escaping @Sendable (Data) -> Void
     ) async throws -> CompletionDisplay {
       executeCount += 1
+      calls.append("execute")
       lastEncryptLinuxDisk = encryptLinuxDisk
       savedJournal = journal
       await executeGate?.wait()

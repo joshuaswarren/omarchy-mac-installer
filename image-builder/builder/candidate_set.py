@@ -14,8 +14,10 @@ policy allows may come from that channel instead of a pull request build or
 the source commit; each is still signed by the set's key.
 
 The platform packages (omarchy-mac, omarchy-mac-boot) are versioned apart from
-the runtime, so a set may carry them built from their own commit of the source
-repository. It says so in its signed manifest, one entry per such package:
+the runtime, so a set may carry them built from their own commit of a platform
+repository (the policy's platform_repositories: omacom/omarchy-mac-pkgs, their
+home, or the source repository they moved from). It says so in its signed
+manifest, one entry per such package:
 
   "platform_sources": {"omarchy-mac": "<commit>", "omarchy-mac-boot": "<commit>"}
 
@@ -293,7 +295,7 @@ def snapshot(root, destination, receipt_sha256, source_commit, manifest_sha256=N
             if name in runtime:
                 revision = member(path, REVISION_FILES[name]).decode().strip()
                 if name in declared:
-                    require(origin.get('repository') == policy['source_repository']
+                    require(origin.get('repository') in policy['platform_repositories']
                             and origin.get('commit') == declared[name] == revision, 'mixed package sources: ' + name)
                     origins[name] = 'platform ' + revision
                 elif origin.get('repository') == policy['source_repository'] and origin.get('commit') == source_commit:
