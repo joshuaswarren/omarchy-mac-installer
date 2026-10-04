@@ -30,7 +30,13 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       let recommendation = try InstallerAllocationRecommendation(
         inventory: inventory, reservedBytes: 10 * gib
       )
-      XCTAssertEqual(recommendation.minimumBytes, (available >= 72 ? 62 : 32) * gib)
+      // 62 GiB is adopted only once it fits under the 5% drift margin.
+      XCTAssertEqual(recommendation.minimumBytes, (available >= 76 ? 62 : 32) * gib)
+      // Near the floor the margin gives way so the install still fits; once
+      // the margin fits above the minimum, the divider can always move.
+      if (available - 10) * 19 > 32 * 20 {
+        XCTAssertGreaterThan(recommendation.maximumBytes, recommendation.minimumBytes)
+      }
       XCTAssertGreaterThanOrEqual(recommendation.maximumBytes, previousMaximum)
       XCTAssertLessThanOrEqual(recommendation.maximumBytes, (available - 10) * gib)
       previousMaximum = recommendation.maximumBytes
@@ -38,6 +44,26 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
         try PinnedAsahiPlanRequest(
           inventory: inventory, candidate: recommendation.candidate,
           requestedLengthBytes: recommendation.requestedLengthBytes))
+    }
+  }
+
+  func testRecommendedMinimumKeepsTheDriftMarginAndARange() throws {
+    // Each step of free space from just below to well above where the doubled
+    // size fits: the divider must move and the margin must survive whenever
+    // the doubled size is the minimum.
+    for quarters: UInt64 in 280...320 {
+      let available = quarters * gib / 4
+      let resize = candidate(
+        kind: "resize", source: "disk0s2", length: 200 * gib,
+        minimumInstall: 32 * gib, minimumContainer: 200 * gib - available,
+        recommendedInstall: 62 * gib)
+      let recommendation = try InstallerAllocationRecommendation(
+        inventory: inventory([resize]), reservedBytes: 10 * gib)
+      let usable = available - 10 * gib
+      XCTAssertGreaterThan(recommendation.maximumBytes, recommendation.minimumBytes)
+      if recommendation.minimumBytes == 62 * gib {
+        XCTAssertLessThanOrEqual(recommendation.maximumBytes, usable - usable / 20)
+      }
     }
   }
 
@@ -681,7 +707,8 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
     length: UInt64,
     minimumInstall: UInt64,
     minimumContainer: UInt64 = 0,
-    identityDigest: String? = nil
+    identityDigest: String? = nil,
+    recommendedInstall: UInt64? = nil
   ) -> ValidatedEngineCandidate {
     ValidatedEngineCandidate(
       kind: kind,
@@ -690,7 +717,8 @@ final class InstallerAllocationRecommendationTests: XCTestCase {
       lengthBytes: length,
       minimumInstallBytes: minimumInstall,
       minimumContainerBytes: minimumContainer,
-      identityDigest: identityDigest
+      identityDigest: identityDigest,
+      recommendedInstallBytes: recommendedInstall
     )
   }
 }

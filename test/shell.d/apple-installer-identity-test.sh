@@ -77,7 +77,7 @@ import json, sys
 template, base, stem = sys.argv[1:4]
 installer = json.load(open(template))["installer"]
 version = installer["latest_version"]
-expected = f"{base}/installer/{version}/{stem}-{version}.pkg"
+expected = f"{base}/installer/{version}/{stem}-{version}.zip"
 if installer["download_url"] != expected:
     sys.exit(f"{template}: download_url {installer['download_url']} is not {expected}")
 PY

@@ -366,11 +366,12 @@ class EngineRuntimeTests(unittest.TestCase):
             "OMARCHY_ENGINE_JOURNAL": str(self.journal_path),
         })
         runtime.journal.inspection("apple,j314s", "supported")
-        macos = [SimpleNamespace(version="15.7")]
+        macos = [SimpleNamespace(version="15.7", stub=False)]
         tight = SimpleNamespace(type="Apple_APFS", container={"CapacityFree": 1}, os=macos)
         roomy = SimpleNamespace(type="Apple_APFS", container={}, os=macos)
         data = SimpleNamespace(name="data", type="Apple_APFS", container={}, os=[])
-        stub = SimpleNamespace(type="Apple_APFS", container={}, os=[SimpleNamespace(version=None)])
+        # Like upstream's OSInfo, a real stub reports its macOS version.
+        stub = SimpleNamespace(type="Apple_APFS", container={}, os=[SimpleNamespace(version="15.7", stub=True)])
         upstream_data = SimpleNamespace(name="upstream-data", type="Apple_APFS", container={}, os=[])
         recovery = SimpleNamespace(type="Apple_APFS_Recovery", container={}, os=macos)
         unknown = SimpleNamespace(type="Apple_APFS", container=None, os=macos)

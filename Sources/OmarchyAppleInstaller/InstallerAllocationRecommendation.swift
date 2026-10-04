@@ -59,19 +59,22 @@ public struct InstallerAllocationRecommendation:
         // The engine's hard container floor already protects macOS. A second
         // recommendation threshold can shrink the range as free space grows.
         let usable = available - reservedBytes
-        if let recommended = candidate.recommendedInstallBytes {
-          let alignedRecommended = Self.alignUp(recommended, unit: unit)
-          if alignedRecommended <= usable - (usable % unit) {
-            minimum = alignedRecommended
-          }
-        }
         let margin = min(
           usable / Self.resizeDriftMarginDivisor,
           Self.maximumResizeDriftMarginBytes
         )
+        let marginCeiling = usable - margin
+        // The doubled size becomes the minimum only when it stays below the
+        // margin, so the divider keeps a range and the engine its drift room.
+        if let recommended = candidate.recommendedInstallBytes {
+          let alignedRecommended = Self.alignUp(recommended, unit: unit)
+          if alignedRecommended < marginCeiling - (marginCeiling % unit) {
+            minimum = alignedRecommended
+          }
+        }
         // The margin is best effort: on a tight disk keep what fits above the
-        // minimum rather than dropping a candidate the reserve still allows.
-        maximum = min(usable, max(usable - margin, minimum))
+        // partition floor rather than dropping a candidate the reserve allows.
+        maximum = min(usable, max(marginCeiling, minimum))
       } else {
         return nil
       }
