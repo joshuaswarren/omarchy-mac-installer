@@ -8,15 +8,16 @@ The request chooses source roots, archive names, and explicitly selected synthet
 
 ```json
 {
-  "schema": "omarchy-migration-collection-request/2",
+  "schema": "omarchy-migration-collection-request/3",
   "request_id": "00000000-0000-4000-8000-000000000001",
   "selection": [{"source": "", "archive": ""}],
   "selected_adapters": [],
-  "selected_mounts": []
+  "selected_mounts": [],
+  "selected_share_stores": []
 }
 ```
 
-The caller separately supplies a trusted [`omarchy-migration/policy/1`](CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../lib/omarchy_migration/policies/try-omarchy-82927e9.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
+The caller separately supplies a trusted [`omarchy-migration/policy/2`](CONTRACT.md#policy) document; the request cannot change protected paths, rules or mounts. The source root stands for the owner's home, so policy paths are relative to it. Tests use a synthetic policy with fake stores and the real [Try policy](../lib/omarchy_migration/policies/try-omarchy-82927e9.json) against a synthetic Try home. Store adapters must be `fixture-` adapters in this collector.
 
 These are fake-store rules. Actual application locations, alternate paths/environment settings, supported source versions, and supported export modes still need qualification. The generic collector does not run adapters; the trusted capability set can enable a test-only byte-copy policy for a fake store. It must never be advertised as real SSH/browser/Codex support. Unsupported stores remain withheld under explicit selection.
 
@@ -26,7 +27,7 @@ Requests use exact field sets and bounded normalized paths; the policy is valida
 
 The request's `selected_mounts` lists policy mounts whose contents should be copied, such as `mac-share` for `/mnt/mac`. Unselected mounts are never read. For a selected mount, only a home link whose target is exactly the mount root (the link Try generates, for example `~/Work`) is materialized: the archive gets an ordinary directory at the link's path holding the mount's contents, reported as `included` with reason `mount-materialized`. Further links to the same root stay inert (`mount-already-materialized`), and links deeper into a mount stay inert (`mount-link`), so nothing is copied twice. `share_roots` maps a mount id to the directory to read (the policy's mount path by default; tests use a fixture directory).
 
-Share roots are resolved once (the trusted mount path may contain links) and must neither contain nor sit inside the home or the snapshot location. Inside a shared folder the home policy does not apply, because its paths are the Mac's files rather than home paths. Below the resolved root the walk uses the share's own pinned mount, never follows links, and skips rather than fails on entries the home walk would treat as fatal: a different mount (`other-filesystem`), a group- or world-writable directory (`unsafe-permissions`), an unreadable entry (`unreadable`), multiply linked files, special files, and relative links that would leave the share once it is renamed to its link's path (`share-escape`). A skipped entry is rolled back completely, including anything it had already registered or written. Ownership is not required to match. An unreadable share root still fails the export, as do names that cannot be represented and the overall item limit. The Mac can change these files while Try exports, so a shared folder gets the per-entry before/after checks but not the home's final whole-tree recheck; a change detected inside a directory still aborts the export so it can be retried.
+Share roots are resolved once (the trusted mount path may contain links) and must neither contain nor sit inside the home or the snapshot location. Inside a shared folder the home rules and stores do not apply, because its paths are the Mac's files rather than home paths. Instead the policy's `share_stores` recognize credential locations by name at any depth (`.ssh`, `.gnupg`, `.aws`, `Library/Keychains`, browser profile folders, private-key file names such as `*.pem`); each is held back unopened as `held-out`/`unselected-store` with its store and mount ids unless the request lists it in `selected_share_stores`. Below the resolved root the walk uses the share's own pinned mount, never follows links, and skips rather than fails on entries the home walk would treat as fatal: a different mount (`other-filesystem`), a group- or world-writable directory (`unsafe-permissions`), an unreadable entry (`unreadable`), multiply linked files, special files, and relative links that would leave the share once it is renamed to its link's path (`share-escape`). A skipped entry is rolled back completely, including anything it had already registered or written. Ownership is not required to match. An unreadable share root still fails the export, as do names that cannot be represented and the overall item limit. The Mac can change these files while Try exports, so a shared folder gets the per-entry before/after checks but not the home's final whole-tree recheck; a change detected inside a directory still aborts the export so it can be retried.
 
 ## Capture interface and isolation
 

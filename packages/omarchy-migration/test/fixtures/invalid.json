@@ -502,6 +502,56 @@
       ],
       "expect": "overlapping_paths",
       "value": ".config/hypr/monitors.lua/inner"
+    },
+    {
+      "name": "share store file pattern with a slash",
+      "base": "policy",
+      "op": "set",
+      "path": [
+        "share_stores",
+        3,
+        "files",
+        0
+      ],
+      "expect": "invalid_string",
+      "value": "keys/id_rsa"
+    },
+    {
+      "name": "share store with no patterns",
+      "base": "policy",
+      "op": "set",
+      "path": [
+        "share_stores",
+        0,
+        "directories"
+      ],
+      "expect": "missing_value",
+      "value": []
+    },
+    {
+      "name": "share store id reused from a home store",
+      "base": "policy",
+      "op": "set",
+      "path": [
+        "share_stores",
+        0,
+        "id"
+      ],
+      "expect": "duplicate_item",
+      "value": "ssh"
+    },
+    {
+      "name": "share store directory escaping",
+      "base": "policy",
+      "op": "set",
+      "path": [
+        "share_stores",
+        0,
+        "directories",
+        0
+      ],
+      "expect": "unsafe_path",
+      "value": "../.ssh"
     }
   ],
   "raw": [

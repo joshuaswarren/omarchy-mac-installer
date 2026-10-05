@@ -92,7 +92,7 @@
       "reason": "mac_shared_folder"
     }
   ],
-  "revision": "try-omarchy/82927e9/1",
+  "revision": "try-omarchy/82927e9/2",
   "rules": [
     {
       "action": "exclude",
@@ -332,7 +332,71 @@
       "reason": "vm_integration"
     }
   ],
-  "schema": "omarchy-migration/policy/1",
+  "schema": "omarchy-migration/policy/2",
+  "share_stores": [
+    {
+      "category": "credentials",
+      "directories": [
+        ".ssh"
+      ],
+      "files": [],
+      "id": "share-ssh"
+    },
+    {
+      "category": "credentials",
+      "directories": [
+        ".gnupg"
+      ],
+      "files": [],
+      "id": "share-gnupg"
+    },
+    {
+      "category": "credentials",
+      "directories": [
+        ".aws"
+      ],
+      "files": [],
+      "id": "share-aws"
+    },
+    {
+      "category": "credentials",
+      "directories": [],
+      "files": [
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "*.pem",
+        "*.p12",
+        "*.pfx",
+        "*.ppk"
+      ],
+      "id": "share-private-keys"
+    },
+    {
+      "category": "credentials",
+      "directories": [
+        "Library/Keychains"
+      ],
+      "files": [],
+      "id": "share-macos-keychains"
+    },
+    {
+      "category": "browser-profile",
+      "directories": [
+        "Library/Application Support/Google/Chrome",
+        "Library/Application Support/BraveSoftware",
+        "Library/Application Support/Firefox",
+        "Library/Application Support/Microsoft Edge",
+        "Library/Safari",
+        ".mozilla",
+        ".config/chromium",
+        ".config/BraveSoftware"
+      ],
+      "files": [],
+      "id": "share-browser-profiles"
+    }
+  ],
   "source": {
     "commit": "82927e98078a452ace33e527a328ef0b12a0af07",
     "provider": "try-omarchy",

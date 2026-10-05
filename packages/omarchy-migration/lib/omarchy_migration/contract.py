@@ -20,7 +20,7 @@ PROGRESS = PREFIX + "progress/1"
 RECEIPT = PREFIX + "receipt/1"
 PLAN = PREFIX + "plan/1"
 REPORT = PREFIX + "report/1"
-POLICY = PREFIX + "policy/1"
+POLICY = PREFIX + "policy/2"
 BUNDLE = PREFIX + "bundle/2"
 BUNDLE_FORMAT = "age-v1-scrypt"
 
@@ -49,6 +49,7 @@ CODE = re.compile(r"[a-z][a-z0-9_]*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}")
+FILE_PATTERN = re.compile(r"[A-Za-z0-9*?._-]+")
 
 
 class ContractError(ValueError):
@@ -311,7 +312,7 @@ def _report(document):
 
 
 def _policy(document):
-    _object(document, "$", ("schema", "revision", "source", "credential_stores", "mounts", "rules"))
+    _object(document, "$", ("schema", "revision", "source", "credential_stores", "share_stores", "mounts", "rules"))
     _label(document["revision"], "$.revision")
     source = _object(document["source"], "$.source", ("provider", "repository", "commit"))
     _enum(source["provider"], "$.source.provider", PROVIDERS)
@@ -344,6 +345,30 @@ def _policy(document):
         _evidence(value["evidence"], f"{where}.evidence")
         return value["id"]
 
+    def share_store(value, where):
+        # Recognized by name inside selected shared folders; never by content.
+        _object(value, where, ("id", "category", "directories", "files"))
+        _label(value["id"], f"{where}.id")
+        _enum(value["category"], f"{where}.category", STORE_CATEGORIES)
+
+        def suffix(item, location):
+            home_path(item, location)
+            if item.count("/") >= 8:
+                _fail("unsafe_path", location)
+            return item
+
+        def name(item, location):
+            return _pattern(item, location, FILE_PATTERN)
+
+        directories = _list(value["directories"], f"{where}.directories", suffix, maximum=32)
+        files = _list(value["files"], f"{where}.files", name, maximum=32)
+        if not directories and not files:
+            _fail("missing_value", f"{where}.directories")
+        return value["id"]
+
+    share_stores = _list(document["share_stores"], "$.share_stores", share_store, maximum=32)
+    if len(set(share_stores)) != len(share_stores) or set(share_stores) & set(stores):
+        _fail("duplicate_item", "$.share_stores")
     mounts = _list(document["mounts"], "$.mounts", mount, maximum=32)
     if len(set(mounts)) != len(mounts):
         _fail("duplicate_item", "$.mounts")

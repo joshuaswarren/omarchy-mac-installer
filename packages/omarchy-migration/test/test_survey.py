@@ -98,7 +98,7 @@ class SurveyTests(unittest.TestCase):
         parent = self.root / "snapshots"
         parent.mkdir(mode=0o700)
         request = {"schema": collection.REQUEST_SCHEMA, "request_id": str(uuid.uuid4()),
-                   "selection": [{"source": "", "archive": ""}], "selected_adapters": [], "selected_mounts": []}
+                   "selection": [{"source": "", "archive": ""}], "selected_adapters": [], "selected_mounts": [], "selected_share_stores": []}
         collected = {name: [0, 0] for name in surveyed}
         with collection.collect_fixture(self.home, request, DOCUMENT, snapshot_parent=parent) as snapshot:
             for entry in snapshot.manifest["entries"]:

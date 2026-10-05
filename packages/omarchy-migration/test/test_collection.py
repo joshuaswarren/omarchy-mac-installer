@@ -30,10 +30,10 @@ class CollectionTests(unittest.TestCase):
         self.parent.mkdir(mode=0o700)
         self.request = {"schema": collection.REQUEST_SCHEMA, "request_id": str(uuid.uuid4()),
                         "selection": [{"source": "", "archive": ""}], "selected_adapters": [],
-                        "selected_mounts": []}
+                        "selected_mounts": [], "selected_share_stores": []}
         evidence = {"path": "synthetic"}
         self.policy = {
-            "schema": "omarchy-migration/policy/1", "revision": "synthetic-default-and-alternate/1",
+            "schema": "omarchy-migration/policy/2", "revision": "synthetic-default-and-alternate/1",
             "source": {"provider": "try-omarchy", "repository": "https://example.invalid/synthetic",
                        "commit": "0" * 40},
             "credential_stores": [
@@ -45,6 +45,11 @@ class CollectionTests(unittest.TestCase):
                  "adapter": None},
                 {"id": "fake-vault", "category": "credentials", "roots": [".config/1Password", "alternate/vault"],
                  "adapter": None},
+            ],
+            "share_stores": [
+                {"id": "share-ssh", "category": "credentials", "directories": [".ssh"], "files": []},
+                {"id": "share-keys", "category": "credentials", "directories": [], "files": ["id_ed25519", "*.pem"]},
+                {"id": "share-keychains", "category": "credentials", "directories": ["Library/Keychains"], "files": []},
             ],
             "mounts": [{"id": "mac-share", "path": "/mnt/mac", "reason": "mac_shared_folder", "evidence": evidence}],
             "rules": [
@@ -542,13 +547,13 @@ class CollectionTests(unittest.TestCase):
                            ".local/share/omarchy", ".config/chromium/Default/Cookies", ".local/share/keyrings/login.keyring"):
                 self.assertNotIn(absent, snapshot.paths)
             self.assertEqual(self.entry(snapshot, "Work")["mount"], "mac-share")
-            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/82927e9/1")
+            self.assertEqual(snapshot.report["policy_revision"], "try-omarchy/82927e9/2")
             self.assertEqual(snapshot.report["counts"]["held-out"], 2)
             self.assertEqual(snapshot.report["counts"]["excluded"], 3)
             self.assertEqual(snapshot.report["counts"]["transformed"], 3)
             provenance = snapshot.manifest["provenance"]
             self.assertEqual((provenance["policy_revision"], provenance["policy_sha256"]),
-                             ("try-omarchy/82927e9/1", snapshot.report["policy_sha256"]))
+                             ("try-omarchy/82927e9/2", snapshot.report["policy_sha256"]))
             self.assertEqual(provenance["collection"]["counts"], snapshot.report["counts"])
             exceptions = {item["source"]: (item["outcome"], item["rule"] or item["store"] or item["mount"])
                           for item in provenance["collection"]["exceptions"]}
@@ -601,8 +606,11 @@ class CollectionTests(unittest.TestCase):
         with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
             self.assertTrue(snapshot.paths["Work"].is_dir())
             self.assertEqual(snapshot.paths["Work/Projects/plan.md"].read_bytes(), b"plan\n")
-            # Home policy does not apply to the Mac's files inside the share.
-            self.assertEqual(snapshot.paths["Work/.ssh/config"].read_bytes(), b"Host mac-side\n")
+            # Recognized credential locations in a share wait for their own tick.
+            ssh = next(item for item in snapshot.report["entries"] if item["archive"] == "Work/.ssh")
+            self.assertEqual((ssh["outcome"], ssh["reason"], ssh["store"], ssh["mount"]),
+                             ("held-out", "unselected-store", "share-ssh", "mac-share"))
+            self.assertFalse(any(path.startswith("Work/.ssh") for path in snapshot.paths))
             self.assertEqual(snapshot.paths["Work/latest"].readlink(), Path("Projects/plan.md"))
             work = self.entry(snapshot, "Work")
             self.assertEqual((work["outcome"], work["reason"], work["mount"]), ("included", "mount-materialized", "mac-share"))
@@ -638,6 +646,47 @@ class CollectionTests(unittest.TestCase):
                              "other-filesystem")
             self.assertNotIn("Work/Projects/plan.md", snapshot.paths)
             self.assertIn("Work/photo.jpg", snapshot.paths)
+
+    def test_credentials_in_a_mac_home_share_are_held_back_by_name_until_selected(self):
+        share = self.make_share()
+        for name, data in {"Library/Keychains/login.keychain-db": b"FAKE-KEYCHAIN",
+                           "Projects/deploy/server.pem": b"FAKE-PEM", "Documents/talk.key": b"keynote slides"}.items():
+            path = share / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            path.write_bytes(data)
+        self.request["selected_mounts"] = ["mac-share"]
+        held = [share / ".ssh", share / "Library/Keychains", share / "Projects/deploy/server.pem"]
+        opened, scanned = os.open, os.scandir
+
+        def resolve(value, dir_fd=None):
+            if isinstance(value, int):
+                return Path(f"/proc/self/fd/{value}").resolve()
+            base = Path(f"/proc/self/fd/{dir_fd}").resolve() if dir_fd is not None else Path.cwd()
+            return Path(os.path.abspath(base / value))
+
+        def guarded_open(value, flags, *args, **kwargs):
+            path = resolve(value, kwargs.get("dir_fd"))
+            self.assertFalse(any(path == root or path.is_relative_to(root) for root in held), str(path))
+            return opened(value, flags, *args, **kwargs)
+
+        def guarded_scan(value):
+            path = resolve(value)
+            self.assertFalse(any(path == root or path.is_relative_to(root) for root in held), str(path))
+            return scanned(value)
+
+        with patch.object(collection.os, "open", side_effect=guarded_open), \
+                patch.object(collection.os, "scandir", side_effect=guarded_scan), \
+                self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            stores = {item["archive"]: item["store"] for item in snapshot.report["entries"] if item["outcome"] == "held-out"
+                      and item["mount"] == "mac-share"}
+            self.assertEqual(stores, {"Work/.ssh": "share-ssh", "Work/Library/Keychains": "share-keychains",
+                                      "Work/Projects/deploy/server.pem": "share-keys"})
+            self.assertEqual(snapshot.paths["Work/Documents/talk.key"].read_bytes(), b"keynote slides")
+        self.request["selected_share_stores"] = ["share-ssh"]
+        with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            self.assertEqual(snapshot.paths["Work/.ssh/config"].read_bytes(), b"Host mac-side\n")
+            self.assertNotIn("Work/Library/Keychains/login.keychain-db", snapshot.paths)
+            self.assertNotIn("Work/Projects/deploy/server.pem", snapshot.paths)
 
     def test_unlistable_share_directory_is_rolled_back_and_skipped(self):
         share = self.make_share()
@@ -679,6 +728,11 @@ class CollectionTests(unittest.TestCase):
 
     def test_mount_selection_and_roots_are_validated(self):
         share = self.make_share()
+        self.request["selected_share_stores"] = ["not-a-store"]
+        with self.assertRaisesRegex(probe.Rejected, "share store selection"):
+            with self.capture(share_roots={"mac-share": str(share)}):
+                self.fail("unknown share store accepted")
+        self.request["selected_share_stores"] = []
         for mounts, roots in ((["unknown-share"], {"mac-share": str(share)}), (["mac-share", "mac-share"], None),
                               ([True], None), (["mac-share"], {"mac-share": "relative/path"}),
                               (["mac-share"], {"mac-share": str(share), "extra": str(share)})):

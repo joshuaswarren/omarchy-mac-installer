@@ -91,6 +91,16 @@ class MatchTests(unittest.TestCase):
         current = b'{\n  "setup.try-omarchy": {\n    "icon": "x",\n    "iconFont": "omarchy",\n    "label": "Try Omarchy Settings"\n  }\n}\n'
         self.assertEqual(json.loads(self.policy.transform(rule("try-menu-entries"), current).data), {})
 
+    def test_share_stores_match_names_at_any_depth_and_nothing_else(self):
+        cases = {".ssh": "share-ssh", "Users-backup/scott/.ssh": "share-ssh", "Library/Keychains": "share-macos-keychains",
+                 "old-mac/Library/Application Support/Google/Chrome": "share-browser-profiles",
+                 "deploy/server.pem": "share-private-keys", "id_ed25519": "share-private-keys"}
+        for path, store in cases.items():
+            self.assertEqual(self.policy.share_store(path)["id"], store, path)
+        for path in ("Keychains", ".ssh-notes", "Documents/talk.key", "Library/Application Support/Google",
+                     "id_ed25519.pub", "notes/pem.txt"):
+            self.assertIsNone(self.policy.share_store(path), path)
+
     def test_unknown_personal_paths_are_not_matched(self):
         for path in ("Documents/report.md", ".config/nvim/init.lua", ".bashrc", ".sshconfig"):
             self.assertIsNone(self.policy.match(path), path)

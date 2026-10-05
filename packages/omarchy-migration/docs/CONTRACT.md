@@ -15,7 +15,7 @@ Every document is a UTF-8 JSON object whose `schema` names exactly one document 
 | `omarchy-migration/receipt/1` | public | source module → installer → staging | Ciphertext identity and size estimates; the only document that travels with the bundle |
 | `omarchy-migration/plan/1` | public | native module → installer UI | Reviewable summary of an import plan |
 | `omarchy-migration/report/1` | public | native module → app | Per-category outcome with reason codes |
-| `omarchy-migration/policy/1` | trusted input | shipped with the module | Credential stores, mounts and provider rules for one source build |
+| `omarchy-migration/policy/2` | trusted input | shipped with the module | Credential stores, mounts and provider rules for one source build |
 | `omarchy-migration/bundle/2` | private | inside the ciphertext | Manifest with authenticated provenance, and TAR objects |
 
 Private documents never cross an app boundary in plaintext: the bundle manifest, restore journal, collection report and per-file results stay inside the ciphertext or the owner's 0700 job directory.
@@ -47,9 +47,10 @@ Private documents never cross an app boundary in plaintext: the bundle manifest,
 
 ## Policy
 
-A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/82927e9/1`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
+A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/82927e9/2`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
 
 - **credential_stores** `{id, category, roots, adapter}` are matched first, before traversal, stat or open. A store is exported only when explicitly selected and only through an available adapter. Roots may not overlap each other or any rule.
+- **share_stores** `{id, category, directories, files}` recognize credential locations inside an explicitly selected shared folder by name only: `directories` are relative paths matched as trailing components at any depth (for example `.ssh` or `Library/Keychains`), `files` are file-name patterns (for example `*.pem`). Contents are never inspected. A matched entry is held back unopened unless the user selects that share store separately, so a UI can offer each one as its own choice.
 - **mounts** `{id, path, reason, evidence}` are absolute guest mount points such as the Mac share at `/mnt/mac`. Links into a mount are recorded as inert and never traversed; shared contents need an explicit selection.
 - **rules** `{id, path, match, action, reason, evidence[, transform]}` apply to one `exact` path or a whole `tree`. Actions are `exclude` (never exported; excluding a path also excludes everything beneath it), `preserve` (exported as personal configuration) and `transform` (exported after a declared, data-only change; `exact` matches only). Rules may not nest inside each other, so the outcome never depends on rule order.
 - **transforms** are `strip-appended-block` (remove one provider-appended block starting on a line boundary, in LF or CRLF form, with or without its final newline at end of file) and `remove-json-keys` (remove named top-level keys from JSON or JSONC, keeping every other member and comment). Both fail closed: a repeated block, a block line left behind, malformed or non-standard JSONC (including non-JSON numbers and ambiguous line separators in comments) or input over 1 MiB withholds the file. No transform executes code.

@@ -21,7 +21,7 @@ from . import contract, policy as migration_policy
 from . import probe
 
 
-REQUEST_SCHEMA = "omarchy-migration-collection-request/2"
+REQUEST_SCHEMA = "omarchy-migration-collection-request/3"
 REPORT_SCHEMA = "omarchy-migration-collection-report/2"
 # Untouched copies of transformed files, restored as migration-owned files.
 ORIGINALS_ROOT = ".local/share/omarchy-migration/originals"
@@ -61,7 +61,8 @@ class _Skip(Exception):
 
 def _contracts(request, document, supported):
     if (not isinstance(request, dict)
-            or set(request) != {"schema", "request_id", "selection", "selected_adapters", "selected_mounts"}
+            or set(request) != {"schema", "request_id", "selection", "selected_adapters", "selected_mounts",
+                                "selected_share_stores"}
             or request["schema"] != REQUEST_SCHEMA):
         raise probe.Rejected("collection request fields/schema")
     try:
@@ -108,6 +109,11 @@ def _contracts(request, document, supported):
     if (not isinstance(mounts, list) or any(type(value) is not str for value in mounts)
             or len(set(mounts)) != len(mounts) or not set(mounts) <= {mount["id"] for mount in loaded.mounts}):
         raise probe.Rejected("mount selection")
+    chosen_stores = request["selected_share_stores"]
+    if (not isinstance(chosen_stores, list) or any(type(value) is not str for value in chosen_stores)
+            or len(set(chosen_stores)) != len(chosen_stores)
+            or not set(chosen_stores) <= {store["id"] for store in loaded.share_stores}):
+        raise probe.Rejected("share store selection")
     for value in (request, document):
         if len(_json_bytes(value)) > probe.MAX_MANIFEST:
             raise probe.Rejected("collection contract size")
@@ -254,6 +260,14 @@ class _Snapshot:
     def _entry(self, parent, name, source, archive):
         _path(source)
         _path(archive)
+        if self.share is not None:
+            # Recognized credential locations are held back by name, unopened,
+            # unless the user ticked them.
+            relative = archive[len(self.share["archive"]) + 1:]
+            store = self.policy.share_store(relative)
+            if store and store["id"] not in self.request["selected_share_stores"]:
+                self._report(source, archive, "held-out", "unselected-store", store=store["id"], mount=self.share["id"])
+                return
         excluded = self._store(source)
         if excluded:
             self._report(source, archive, "held-out", excluded[1], excluded[0])

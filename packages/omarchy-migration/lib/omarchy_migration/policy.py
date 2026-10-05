@@ -5,6 +5,7 @@ targets, and the two data-only transforms. Callers own all file access.
 """
 
 from collections import namedtuple
+import fnmatch
 import json
 import re
 
@@ -25,6 +26,7 @@ class Policy:
         self.document = json.loads(json.dumps(document))
         self.revision = document["revision"]
         self.stores = self.document["credential_stores"]
+        self.share_stores = self.document["share_stores"]
         self.mounts = self.document["mounts"]
         self.rules = self.document["rules"]
 
@@ -43,6 +45,22 @@ class Policy:
             covers_children = rule["match"] == "tree" or rule["action"] == "exclude"
             if path == rule["path"] or (covers_children and _beneath(path, rule["path"])):
                 return Match("rule", rule)
+        return None
+
+    def share_store(self, path):
+        """The share store a path inside a shared folder names, or None.
+
+        Directory patterns match as trailing path components at any depth;
+        file patterns match the final name. Only names are examined.
+        """
+        parts = path.split("/")
+        for store in self.share_stores:
+            for pattern in store["directories"]:
+                wanted = pattern.split("/")
+                if parts[-len(wanted):] == wanted:
+                    return store
+            if any(fnmatch.fnmatchcase(parts[-1], pattern) for pattern in store["files"]):
+                return store
         return None
 
     def mount(self, target):
