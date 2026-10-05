@@ -772,7 +772,9 @@ class CollectionTests(unittest.TestCase):
         self.assertFalse((target / "MUST-NOT-RUN").exists())
         self.assertFalse((target / "secret-alias").exists())
         self.assertEqual((target / "readme-link").read_bytes(), self.ordinary["Projects/demo/modified"])
-        self.assertEqual(report["counts"]["held-out"], 8)
+        held = [item for item in report["entries"] if item["outcome"] == "held-out"]
+        self.assertEqual(len([item for item in held if item["mount"] is None]), 8)
+        self.assertEqual([item["archive"] for item in held if item["mount"] == "mac-share"], ["Work/.ssh"])
         self.assertTrue(set(self.protected).isdisjoint(entry["path"] for entry in manifest["entries"]))
         self.assertNotIn(b"FAKE-SSH-SECRET", ciphertext.read_bytes())
         self.assertEqual((target / ".config/app-flags.conf").read_bytes(), b"--user-choice\n")
