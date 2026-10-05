@@ -13,7 +13,7 @@ from omarchy_migration.dependency import configured_age
 
 SECRET = b"synthetic-only-otter-maple-window-cobalt"
 POLICY = json.loads((Path(collection.__file__).resolve().parent / "policies/try-omarchy-82927e9.json").read_text())
-DIRECTORIES, FILES_PER_DIRECTORY = 40, 100
+DIRECTORIES, FILES_PER_DIRECTORY = 40, 110
 
 
 class LimitTests(unittest.TestCase):
@@ -72,7 +72,7 @@ class ScaleTests(unittest.TestCase):
             with restore.Restorer(bundle, self.target, self.job) as importer:
                 results = importer.apply(importer.plan())
         self.assertEqual({result.status for result in results}, {"restored", "directory"})
-        self.assertEqual((self.target / "Projects/p39/f099.txt").read_bytes(), b"39-99\n")
+        self.assertEqual((self.target / "Projects/p39/f109.txt").read_bytes(), b"39-109\n")
         journal = self.job / "journal.json"
         # Appends, not rewrites: the log stays proportional to the import.
         self.assertGreater(len(journal.read_bytes().splitlines()), 1)
