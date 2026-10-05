@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import stat
@@ -20,6 +21,7 @@ import asahi_firmware
 import osinstall
 import stub
 
+import omarchy_mt7932
 import omarchy_planner
 from omarchy_image import (
     WRITE_VERIFICATION, flush_device, hash_target, open_target, timing, write_image,
@@ -469,7 +471,9 @@ def stub_installer(sysinfo, dutil, osinfo):
 
     def collect_firmware_from_an_encrypted_recovery(pkg):
         with _newer_trackpad_keys():
-            return _collect_firmware(pkg)
+            result = _collect_firmware(pkg)
+        _collect_neo_radios(installer, pkg)
+        return result
 
     def _collect_firmware(pkg):
         image = os.path.join(
@@ -516,6 +520,24 @@ def stub_installer(sysinfo, dutil, osinfo):
 
     installer.install_files = install_files_with_decrypted_images_and_omarchys_step2
     return installer
+
+
+def _collect_neo_radios(installer, pkg, collect=omarchy_mt7932.collect):
+    """Add a MacBook Neo's MT7932 Wi-Fi and Bluetooth inputs to its firmware.
+
+    The radios are experimental: without these files the Neo still installs
+    and boots, so a failure is logged and the install goes on.
+    """
+    if getattr(getattr(installer, "sysinfo", None), "device_class", "") != "j700ap":
+        return
+    try:
+        files = collect()
+    except (OSError, ValueError, subprocess.CalledProcessError, omarchy_mt7932.Mt7932Error) as error:
+        logging.warning("MacBook Neo radio firmware was not collected: %s", error)
+        return
+    for name, data in sorted(files.items()):
+        pkg.add_file(name, asahi_firmware.core.FWFile(name, data))
+    logging.info("MacBook Neo radio firmware: %d files", len(files))
 
 
 @contextlib.contextmanager

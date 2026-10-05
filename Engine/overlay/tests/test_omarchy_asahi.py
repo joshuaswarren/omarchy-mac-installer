@@ -110,6 +110,7 @@ sys.path.insert(
 )
 
 from omarchy_asahi import (  # noqa: E402
+    _collect_neo_radios,
     STEP2_SCRIPT,
     AsahiAdapterError,
     AsahiInPlaceRepairAdapter,
@@ -1580,6 +1581,41 @@ class NewerTrackpadKeyTests(unittest.TestCase):
         self.assertEqual(seen, {"C1FE0,0": "trackpad", "C1FD0,0": "trackpad", "C1FB0,0": "unknown"})
         self.assertIs(multitouch.device_key_to_kind, original)
 
+
+class NeoRadioFirmwareTests(unittest.TestCase):
+    """The MacBook Neo's MT7932 inputs join its vendor firmware package."""
+
+    files = {"mediatek/mt7932/ppr.bin": b"ppr", "mediatek/j700-mt7932-btcal.bin": b"btcal"}
+
+    def run_hook(self, device_class, collect):
+        package = SimpleNamespace(added=[])
+        package.add_file = lambda name, data: package.added.append((name, data))
+        installer = SimpleNamespace(sysinfo=SimpleNamespace(device_class=device_class))
+        firmware = SimpleNamespace(core=SimpleNamespace(FWFile=lambda name, data: ("FWFile", name, data)))
+        with patch("omarchy_asahi.asahi_firmware", firmware):
+            _collect_neo_radios(installer, package, collect=collect)
+        return package.added
+
+    def test_a_neo_adds_every_collected_file(self):
+        added = self.run_hook("j700ap", lambda: self.files)
+        self.assertEqual(added, [
+            ("mediatek/j700-mt7932-btcal.bin", ("FWFile", "mediatek/j700-mt7932-btcal.bin", b"btcal")),
+            ("mediatek/mt7932/ppr.bin", ("FWFile", "mediatek/mt7932/ppr.bin", b"ppr")),
+        ])
+
+    def test_other_macs_collect_nothing(self):
+        def collect():
+            raise AssertionError("collected on a Mac that is not a Neo")
+        self.assertEqual(self.run_hook("j613ap", collect), [])
+
+    def test_a_failed_collection_leaves_the_install_going(self):
+        import omarchy_mt7932
+
+        def collect():
+            raise omarchy_mt7932.Mt7932Error("the factory BWC2 record has no WCAL")
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(self.run_hook("j700ap", collect), [])
+        self.assertIn("no WCAL", logs.output[0])
 
 if __name__ == "__main__":
     unittest.main()
