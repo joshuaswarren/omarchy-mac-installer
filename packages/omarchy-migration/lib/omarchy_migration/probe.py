@@ -31,9 +31,10 @@ from . import contract
 SCHEMA = "omarchy-migration-probe/1"
 TREE_SCHEMA = "omarchy-migration/bundle/2"
 PROVENANCE_OUTCOMES = ("included", "transformed", "held-out", "excluded", "unsupported", "inert-link")
-MAX_MANIFEST = 1024 * 1024
-MAX_ENTRIES = 1024
-MAX_TOTAL = 1024 * 1024 * 1024
+MAX_MANIFEST = contract.MAX_MANIFEST
+MAX_ENTRIES = contract.MAX_ENTRIES
+MAX_TOTAL = contract.MAX_EXPANDED
+MAX_CIPHERTEXT = contract.MAX_CIPHERTEXT
 CHUNK = 64 * 1024
 # Narrow probe profile, matching the pinned age CLI's default. This is not a
 # general-purpose age parser or cryptographic verifier.
@@ -491,13 +492,20 @@ def unique_json_pairs(pairs):
     return result
 
 
-def validate_archive(stream, *, _objects=None):
+def validate_archive(stream, *, _objects=None, budget=None):
+    """Validate an archive stream; `budget` caps the bytes objects may occupy.
+
+    The manifest comes first and declares every size, so an oversized bundle
+    is refused before any object is written.
+    """
     length = read_header(stream, "manifest.json", MAX_MANIFEST)
     try:
         manifest = json.loads(read_exact(stream, length), object_pairs_hook=unique_json_pairs)
         validate_manifest(manifest)
     except (ValueError, UnicodeError, TypeError) as error:
         raise Rejected("invalid manifest") from error
+    if budget is not None and sum(entry.get("bytes", 0) for entry in manifest["entries"]) > budget:
+        raise Rejected("bundle exceeds available space")
     consume_padding(stream, length)
     for entry in manifest["entries"]:
         if entry_kind(entry) != "file":
@@ -532,11 +540,11 @@ def validate_archive(stream, *, _objects=None):
     return manifest
 
 
-def decode(age, secret, ciphertext, limit=MAX_TOTAL + MAX_MANIFEST + 2 * 1024 * 1024):
+def decode(age, secret, ciphertext, limit=MAX_CIPHERTEXT):
     return _decode(age, secret, ciphertext, limit)
 
 
-def _decode(age, secret, ciphertext, limit, *, objects=None, digest=None):
+def _decode(age, secret, ciphertext, limit, *, objects=None, digest=None, budget=None):
     fd = os.open(ciphertext, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb", buffering=0) as source:
         metadata = os.fstat(fd)
@@ -572,7 +580,7 @@ def _decode(age, secret, ciphertext, limit, *, objects=None, digest=None):
             feeder = threading.Thread(target=feed, daemon=True)
             feeder.start()
             try:
-                manifest = validate_archive(child.process.stdout, _objects=objects)
+                manifest = validate_archive(child.process.stdout, _objects=objects, budget=budget)
                 child.finish()
                 feeder.join(timeout=1)
                 if errors or feeder.is_alive():

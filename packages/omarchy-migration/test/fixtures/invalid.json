@@ -80,7 +80,7 @@
         "bytes"
       ],
       "expect": "out_of_range",
-      "value": 1076887553
+      "value": 276018757633
     },
     {
       "name": "boolean is not an integer",

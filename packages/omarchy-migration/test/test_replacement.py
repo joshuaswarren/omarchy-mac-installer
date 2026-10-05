@@ -76,7 +76,7 @@ class ReplacementTests(unittest.TestCase):
             return {action.path: action for action in importer.apply(importer.plan())}
 
     def saved(self):
-        journal = json.loads((self.job / "journal.json").read_bytes())
+        journal = restore.read_journal(self.job / "journal.json")
         identity = next(entry["object"] for entry in self.manifest["entries"] if entry["path"] == FILE)
         return journal["entries"][identity]
 
@@ -178,8 +178,7 @@ class ReplacementTests(unittest.TestCase):
                 report = {action.path: action for action in importer.apply(plan)}
         self.assertEqual(report[FILE].status, "conflict")
         self.assertEqual(self.file.read_bytes(), b"later user edit")
-        self.assertFalse(any("backup" in entry for entry in json.loads(
-            (self.job / "journal.json").read_bytes())["entries"].values()))
+        self.assertFalse(any("backup" in entry for entry in restore.read_journal(self.job / "journal.json")["entries"].values()))
 
     def test_parent_replaced_after_plan_does_not_write_into_replacement(self):
         with self.verified() as bundle:
@@ -222,8 +221,7 @@ class ReplacementTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "backup sync"):
                 self.run_restore(bundle)
         self.assertEqual(self.file.read_bytes(), OLD)
-        self.assertFalse(any("backup" in entry for entry in json.loads(
-            (self.job / "journal.json").read_bytes())["entries"].values()))
+        self.assertFalse(any("backup" in entry for entry in restore.read_journal(self.job / "journal.json")["entries"].values()))
 
     def test_original_changed_before_backup_is_rejected_without_publication(self):
         backup = restore.Restorer._backup
@@ -438,7 +436,7 @@ with restore.verified_bundle(sys.argv[1], b'synthetic-only-otter-maple-window-co
         with self.verified() as bundle:
             self.run_restore(bundle)
             path = self.job / "journal.json"
-            baseline = json.loads(path.read_bytes())
+            baseline = restore.read_journal(path)
             identity = next(key for key, entry in baseline["entries"].items() if "backup" in entry)
             for damage in ("path", "unknown", "digest", "mode", "alias", "approval"):
                 changed = copy.deepcopy(baseline)

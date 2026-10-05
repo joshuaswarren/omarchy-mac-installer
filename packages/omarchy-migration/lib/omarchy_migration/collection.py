@@ -23,6 +23,8 @@ from . import probe
 
 REQUEST_SCHEMA = "omarchy-migration-collection-request/3"
 REPORT_SCHEMA = "omarchy-migration-collection-report/2"
+# Free space left untouched when copying a snapshot.
+SNAPSHOT_MARGIN = 64 * 1024 * 1024
 # Untouched copies of transformed files, restored as migration-owned files.
 ORIGINALS_ROOT = ".local/share/omarchy-migration/originals"
 MAX_DEPTH = 64
@@ -137,12 +139,13 @@ def _mount(fd):
 
 
 class _Snapshot:
-    def __init__(self, root_fd, root, directory, request, policy, supported, share_roots):
+    def __init__(self, root_fd, root, directory, request, policy, supported, share_roots, budget):
         self.root_fd, self.root, self.directory = root_fd, root, directory
         self.request, self.policy = request, policy
         self.supported = frozenset(supported)
         self.mount = _mount(root_fd)
         self.share_roots = share_roots
+        self.budget = budget
         # Set only while walking a selected shared folder's contents.
         self.share = None
         self.materialized = set()
@@ -165,6 +168,10 @@ class _Snapshot:
             raise probe.Rejected("source owner or mount differs")
         if stat.S_ISDIR(metadata.st_mode) and metadata.st_mode & 0o022:
             raise probe.Rejected("unsafe source directory")
+
+    def _room(self):
+        """Bytes the snapshot may still take: the hard ceiling or free space."""
+        return min(probe.MAX_TOTAL, self.budget) - self.total
 
     def _match(self, path):
         # Home policy describes home paths; shared folder contents are not.
@@ -305,7 +312,7 @@ class _Snapshot:
                              "multiply-linked-file" if before.st_nlink != 1 else "unreadable-owner-file",
                              rule=rule_id)
                 return
-            if before.st_size > probe.MAX_TOTAL - self.total:
+            if before.st_size > self._room():
                 raise probe.Rejected("collection byte limit")
             if transform and before.st_size > migration_policy.MAX_TRANSFORM_INPUT:
                 self._report(source, archive, "unsupported", "transform-too-large", rule=rule_id)
@@ -337,7 +344,7 @@ class _Snapshot:
                     # Withhold rather than export a file the policy cannot clean.
                     self._report(source, archive, "unsupported", f"transform-{result.status}", rule=rule_id)
                     return
-                if len(captured) + len(result.data) > probe.MAX_TOTAL - self.total:
+                if len(captured) + len(result.data) > self._room():
                     raise probe.Rejected("collection byte limit")
                 if result.status == "applied":
                     outcome, reason = "transformed", transform["reason"]
@@ -580,7 +587,9 @@ def collect_fixture(root, request, policy, *, supported_adapters=(), snapshot_pa
                 directory = Path(temporary)
                 if directory.resolve().is_relative_to(root.resolve()) or root.resolve().is_relative_to(directory.resolve()):
                     raise probe.Rejected("snapshot and source must be separate")
-                snapshot = _Snapshot(root_fd, root, directory, request, loaded, supported_adapters, roots)
+                status = os.statvfs(directory)
+                budget = max(0, status.f_bavail * status.f_frsize - SNAPSHOT_MARGIN)
+                snapshot = _Snapshot(root_fd, root, directory, request, loaded, supported_adapters, roots, budget)
                 snapshot.capture()
                 yield snapshot
         finally:

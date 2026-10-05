@@ -318,7 +318,7 @@ class TreeRestoreTests(unittest.TestCase):
             self.assertEqual((self.target / "Pictures/a.png").read_bytes(), b"png\n")
             pictures = self.target / "Pictures"
             self.assertEqual(stat.S_IMODE(pictures.stat().st_mode), 0o750)  # mode set, journal not updated
-            journal = json.loads((self.job / "journal.json").read_text())
+            journal = restore.read_journal(self.job / "journal.json")
             identity = next(entry["object"] for entry in bundle._manifest["entries"] if entry["path"] == "Pictures")
             self.assertEqual(journal["entries"][identity]["file"]["mode"], 0o700)
             with restore.Restorer(bundle, self.target, self.job) as importer:

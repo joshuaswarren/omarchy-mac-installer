@@ -26,9 +26,14 @@ BUNDLE_FORMAT = "age-v1-scrypt"
 
 MAX_DOCUMENT = 1024 * 1024
 MAX_REQUEST = 8192
-MAX_ITEMS = 1024
-MAX_CIPHERTEXT = 1024 * 1024 * 1024 + 3 * 1024 * 1024
-MAX_EXPANDED = 1024 * 1024 * 1024
+MAX_ITEMS = 1024  # list lengths inside a document
+# Hard ceilings sized for real homes. The working bound is tighter: an
+# importer refuses a bundle whose declared content exceeds its free space.
+MAX_ENTRIES = 200_000
+MAX_EXPANDED = 256 * 1024 ** 3
+MAX_MANIFEST = 64 * 1024 ** 2
+# age adds 16 bytes per 64 KiB chunk and TAR adds headers and padding per entry.
+MAX_CIPHERTEXT = MAX_EXPANDED + MAX_MANIFEST + 1024 ** 3
 MAX_PATH = 4096
 MAX_COMPONENT = 255
 MAX_DEPTH = 64
@@ -243,7 +248,7 @@ def _receipt(document):
     _pattern(bundle["sha256"], "$.bundle.sha256", SHA256)
     estimates = _object(document["estimates"], "$.estimates", ("expanded_bytes", "entries"))
     _integer(estimates["expanded_bytes"], "$.estimates.expanded_bytes", 0, MAX_EXPANDED)
-    _integer(estimates["entries"], "$.estimates.entries", 0, MAX_ITEMS)
+    _integer(estimates["entries"], "$.estimates.entries", 0, MAX_ENTRIES)
 
 
 def _progress(document):
@@ -284,10 +289,10 @@ def _plan(document):
     _integer(destination["account_uid"], "$.destination.account_uid", 1000, 2**31 - 1)
     actions = _object(document["actions"], "$.actions", ("create", "present", "replace", "conflict", "omit", "inert"))
     for name, value in actions.items():
-        _integer(value, f"$.actions.{name}", 0, MAX_ITEMS)
+        _integer(value, f"$.actions.{name}", 0, MAX_ENTRIES)
     packages = _object(document["packages"], "$.packages", ("reinstall", "manual"))
     for name, value in packages.items():
-        _integer(value, f"$.packages.{name}", 0, MAX_ITEMS)
+        _integer(value, f"$.packages.{name}", 0, MAX_ENTRIES)
     _integer(document["required_bytes"], "$.required_bytes", 0, MAX_EXPANDED)
 
 
@@ -302,7 +307,7 @@ def _report(document):
         _label(value["id"], f"{where}.id")
         _enum(value["outcome"], f"{where}.outcome", CATEGORY_OUTCOMES)
         for name in ("restored", "conflicts", "omitted"):
-            _integer(value[name], f"{where}.{name}", 0, MAX_ITEMS)
+            _integer(value[name], f"{where}.{name}", 0, MAX_ENTRIES)
         _list(value["reasons"], f"{where}.reasons", lambda v, w: _pattern(v, w, CODE))
         return value["id"]
 

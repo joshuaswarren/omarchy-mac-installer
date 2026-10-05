@@ -18,17 +18,64 @@ import uuid
 from . import probe
 
 
-JOURNAL_SCHEMA = "omarchy-migration-restore-probe/1"
-# /4 and /5: an "applied" directory means this job created it and may finalize it.
-TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/4"
-REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/5"
-JOURNAL_LIMIT = 4 * 1024 * 1024
+# /6-/8: an append-only log of a snapshot line followed by changed entries;
+# an "applied" tree directory means this job created it and may finalize it.
+JOURNAL_SCHEMA = "omarchy-migration-restore-probe/6"
+TREE_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/7"
+REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/8"
+JOURNAL_NAME = "journal.json"
+# Base size plus room per manifest entry for its snapshot record and updates.
+JOURNAL_BASE_LIMIT = 4 * 1024 * 1024
+JOURNAL_ENTRY_LIMIT = 8 * 1024
+# Free space left untouched when authenticating a bundle into scratch.
+SCRATCH_MARGIN = 64 * 1024 * 1024
+
+
+def _free_bytes(path):
+    status = os.statvfs(path)
+    return status.f_bavail * status.f_frsize
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 def _json_bytes(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _replay(raw):
+    """Rebuild a journal document from its snapshot line and change records.
+
+    A final line without its newline is a torn append from an interrupted
+    save; it was never durable, so the action it recorded never started.
+    Returns (document, number of lines kept, whether a torn tail was dropped).
+    """
+    lines = raw.split(b"\n")
+    torn = False
+    if lines and lines[-1] == b"":
+        lines.pop()
+    elif len(lines) > 1:
+        lines.pop()
+        torn = True
+    if not lines:
+        raise probe.Rejected("invalid restore journal")
+    try:
+        document = json.loads(lines[0], object_pairs_hook=probe.unique_json_pairs)
+        if not isinstance(document, dict) or not isinstance(document.get("entries"), dict):
+            raise ValueError()
+        for line in lines[1:]:
+            record = json.loads(line, object_pairs_hook=probe.unique_json_pairs)
+            if (not isinstance(record, dict) or set(record) != {"object", "entry"}
+                    or not isinstance(record["object"], str)):
+                raise ValueError()
+            document["entries"][record["object"]] = record["entry"]
+    except (ValueError, UnicodeError) as error:
+        raise probe.Rejected("invalid restore journal") from error
+    return document, len(lines), torn
+
+
+def read_journal(path):
+    """The current journal document at a path, for inspection and tests."""
+    return _replay(Path(path).read_bytes())[0]
 
 
 @dataclass(frozen=True)
@@ -73,9 +120,10 @@ def verified_bundle(age, secret, ciphertext):
 
         digest = hashlib.sha256()
         manifest = probe._decode(
-            age, secret, ciphertext,
-            probe.MAX_TOTAL + probe.MAX_MANIFEST + 2 * 1024 * 1024,
+            age, secret, ciphertext, probe.MAX_CIPHERTEXT,
             objects=objects, digest=digest,
+            # Refuse before decrypting objects that cannot fit in scratch.
+            budget=max(0, _free_bytes(root) - SCRATCH_MARGIN),
         )
         bundle = _VerifiedBundle(manifest, root, digest.hexdigest())
         try:
@@ -239,6 +287,11 @@ class Restorer:
             if self._replace:
                 self._binding["replacement_paths"] = sorted(self._replace)
             self._journal = self._load()
+            self._written = {key: _json_bytes(value) for key, value in self._journal["entries"].items()}
+            # A torn tail must be removed before appending again; an overgrown
+            # log is compacted.
+            if self._journal_torn or self._journal_lines > 2 * len(self._written) + 16:
+                self._snapshot()
         except BaseException:
             self._stack.close()
             raise
@@ -264,25 +317,27 @@ class Restorer:
         if stat.S_IMODE(os.fstat(self._job_fd).st_mode) != 0o700:
             raise probe.Rejected("job directory must remain private")
 
+    def _journal_limit(self):
+        return JOURNAL_BASE_LIMIT + JOURNAL_ENTRY_LIMIT * len(self.bundle._manifest["entries"])
+
     def _load(self):
+        self._journal_lines, self._journal_torn = 0, False
         try:
-            fd = os.open("journal.json", FILE_FLAGS, dir_fd=self._job_fd)
+            fd = os.open(JOURNAL_NAME, FILE_FLAGS, dir_fd=self._job_fd)
         except FileNotFoundError:
             if os.listdir(self._job_fd):
                 raise probe.Rejected("unrecognized nonempty restore job")
             return {**self._binding, "entries": {}}
+        limit = self._journal_limit()
         with os.fdopen(fd, "rb") as source:
             metadata = os.fstat(fd)
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
                     or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1):
                 raise probe.Rejected("unsafe restore journal")
-            raw = source.read(JOURNAL_LIMIT + 1)
-        if len(raw) > JOURNAL_LIMIT:
+            raw = source.read(limit + 1)
+        if len(raw) > limit:
             raise probe.Rejected("restore journal size")
-        try:
-            journal = json.loads(raw, object_pairs_hook=probe.unique_json_pairs)
-        except (ValueError, UnicodeError) as error:
-            raise probe.Rejected("invalid restore journal") from error
+        journal, self._journal_lines, self._journal_torn = _replay(raw)
         if (not isinstance(journal, dict) or set(journal) != {*self._binding, "entries"}
                 or any(journal[key] != value for key, value in self._binding.items())):
             raise probe.Rejected("restore journal binding differs")
@@ -375,18 +430,50 @@ class Restorer:
             return False
 
     def _save(self):
+        """Durably record every entry changed since the last save.
+
+        Appends one line per change; rewrites a compact snapshot when there is
+        no journal yet or the log has grown well past the live state.
+        """
+        entries = self._journal["entries"]
+        changed = []
+        for key, value in entries.items():
+            data = _json_bytes(value)
+            if self._written.get(key) != data:
+                changed.append((key, data))
+        exists = self._journal_lines > 0
+        if not exists or self._journal_lines + len(changed) > 2 * len(entries) + 16:
+            self._snapshot()
+            return
+        if not changed:
+            return
+        fd = os.open(JOURNAL_NAME, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW, dir_fd=self._job_fd)
+        with os.fdopen(fd, "ab") as output:
+            metadata = os.fstat(output.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise probe.Rejected("unsafe restore journal")
+            output.write(b"".join(b'{"entry":' + data + b',"object":' + _json_bytes(key) + b"}\n"
+                                  for key, data in changed))
+            output.flush()
+            os.fsync(output.fileno())
+        self._written.update(changed)
+        self._journal_lines += len(changed)
+
+    def _snapshot(self):
         temporary = f".journal-{uuid.uuid4()}"
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=self._job_fd)
         try:
             with os.fdopen(fd, "wb") as output:
-                output.write(_json_bytes(self._journal))
+                output.write(_json_bytes(self._journal) + b"\n")
                 output.flush()
                 os.fsync(output.fileno())
-            os.replace(temporary, "journal.json", src_dir_fd=self._job_fd, dst_dir_fd=self._job_fd)
+            os.replace(temporary, JOURNAL_NAME, src_dir_fd=self._job_fd, dst_dir_fd=self._job_fd)
             os.fsync(self._job_fd)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary, dir_fd=self._job_fd)
+        self._written = {key: _json_bytes(value) for key, value in self._journal["entries"].items()}
+        self._journal_lines = 1
 
     @contextlib.contextmanager
     def _parent(self, path, *, create=False, identities=None):
@@ -658,14 +745,16 @@ class Restorer:
         entries = self.bundle._manifest["entries"]
         finished = {"restored", "replaced", "present", "directory", "inert"}
         directories = [index for index, entry in enumerate(entries) if probe.entry_kind(entry) == "directory"]
+        blocked = set()
+        for position, other in enumerate(entries):
+            if report[position] is None or report[position].status not in finished:
+                blocked.update(_ancestors(other["path"]))
         for index in sorted(directories, key=lambda index: -entries[index]["path"].count("/")):
             entry, result = entries[index], report[index]
             saved = self._journal["entries"].get(entry["object"])
             if result is None or result.status != "directory" or saved is None or saved["state"] != "applied":
                 continue
-            prefix = entry["path"] + "/"
-            if any(other["path"].startswith(prefix) and (report[position] is None or report[position].status not in finished)
-                   for position, other in enumerate(entries)):
+            if entry["path"] in blocked:
                 continue
             self._check()
             fingerprint = self._finalize_directory(entry, saved)

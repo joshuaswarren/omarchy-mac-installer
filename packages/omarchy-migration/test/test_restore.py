@@ -404,14 +404,13 @@ with restore.verified_bundle(configured_age(), b'synthetic-only-otter-maple-wind
 
     def test_publication_intent_sync_failure_cannot_publish_even_after_data_sync(self):
         sync = os.fsync
-        job_inode = self.job.stat().st_ino
 
         def fail_intent(fd):
-            metadata = os.fstat(fd)
-            if stat.S_ISDIR(metadata.st_mode) and metadata.st_ino == job_inode:
-                journal = self.job / "journal.json"
-                if journal.exists() and json.loads(journal.read_bytes())["entries"]:
-                    raise OSError(errno.ENOSPC, "synthetic intent sync failure")
+            # Intents are appended to the journal and made durable by its fsync.
+            journal = self.job / "journal.json"
+            if (journal.exists() and stat.S_ISREG(os.fstat(fd).st_mode)
+                    and os.fstat(fd).st_ino == journal.stat().st_ino and restore.read_journal(journal)["entries"]):
+                raise OSError(errno.ENOSPC, "synthetic intent sync failure")
             return sync(fd)
 
         with self.verified() as bundle:

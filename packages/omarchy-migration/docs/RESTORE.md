@@ -35,6 +35,12 @@ The fixture intentionally has no command that accepts a home directory. No file 
 
 Destination traversal uses pinned directory descriptors and refuses symlink components. Newly needed directories use mode 0700. The original v1 format has implicit parent directories and regular files only. The [v2 extension](TREE.md) represents directories and links in the encrypted manifest, restores directory structure and then finalizes source mode and mtime on directories it created, and publishes eligible links only after verifying their actual destination dependencies. Actual TAR link/directory/special records remain rejected. ACLs, xattrs, sparse layout, hardlink relationships, and atime preservation are outside this experiment.
 
+## Journal
+
+The journal (`journal.json` in the job directory) is an append-only log in JSON Lines: a snapshot line holding the binding and every entry, followed by one line per changed entry. Each save appends only what changed and makes it durable with an `fsync` of the journal before the action it records, so its cost follows the work done rather than the job's size. A final line without its newline is a torn append from an interrupted save; it was never durable, is dropped on load, and reopening the job rewrites a clean snapshot before anything else is appended. The log is rewritten as a single snapshot when it grows past roughly twice the live state. Its size limit is 4 MiB plus 8 KiB per manifest entry. Loading replays the lines and then applies the same strict validation as before.
+
+Before authenticating a bundle into scratch, `verified_bundle` compares the manifest's declared content with the scratch filesystem's free space (less a 64 MiB margin) and refuses before writing any object.
+
 ## Publication and recovery
 
 1. Recheck the planned destination observation and directory identities.
@@ -59,4 +65,4 @@ PYTHONPATH=lib python3 -W error::ResourceWarning -m unittest discover -s test -t
 
 The cases cover byte/metadata roundtrip, no destination writes before authentication, private scratch cleanup, existing files/links/FIFOs, nested parent replacement, changed plans, wrong job/target/manifest binding, duplicate jobs, post-import edits/deletions, publication races, interrupted hardlinks, journal synchronization failures, and recovery by a fresh process after an actual SIGKILL immediately after publication. That process test does not simulate filesystem or host power loss. The shared crypto tests remain necessary because restoration reuses their validator.
 
-The next production work includes stable source capture and early credential holdouts, broader link/extended-metadata policy, product approval/recovery/cleanup for the experimental replacements, Try-specific configuration transformations, scalable journals/capacity checks, safe plaintext lifecycle, packaging, and the shared public command. Tickets 04 and 05 remain incomplete. Native owner setup and reboot/encryption integration are separate gates.
+The next production work includes stable source capture and early credential holdouts, broader link/extended-metadata policy, product approval/recovery/cleanup for the experimental replacements, Try-specific configuration transformations, safe plaintext lifecycle, packaging, and the shared public command. Tickets 04 and 05 remain incomplete. Native owner setup and reboot/encryption integration are separate gates.
