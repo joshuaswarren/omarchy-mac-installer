@@ -146,6 +146,7 @@ class _Snapshot:
         self.mount = _mount(root_fd)
         self.share_roots = share_roots
         self.budget = budget
+        self.footprint = 0  # whole-block estimate of what the snapshot occupies
         # Set only while walking a selected shared folder's contents.
         self.share = None
         self.materialized = set()
@@ -169,9 +170,10 @@ class _Snapshot:
         if stat.S_ISDIR(metadata.st_mode) and metadata.st_mode & 0o022:
             raise probe.Rejected("unsafe source directory")
 
-    def _room(self):
-        """Bytes the snapshot may still take: the hard ceiling or free space."""
-        return min(probe.MAX_TOTAL, self.budget) - self.total
+    def _room(self, size):
+        """Whether `size` more bytes fit the content ceiling and free space."""
+        return (self.total + size <= probe.MAX_TOTAL
+                and self.footprint + probe.footprint(size) <= self.budget)
 
     def _match(self, path):
         # Home policy describes home paths; shared folder contents are not.
@@ -312,7 +314,7 @@ class _Snapshot:
                              "multiply-linked-file" if before.st_nlink != 1 else "unreadable-owner-file",
                              rule=rule_id)
                 return
-            if before.st_size > self._room():
+            if not self._room(before.st_size):
                 raise probe.Rejected("collection byte limit")
             if transform and before.st_size > migration_policy.MAX_TRANSFORM_INPUT:
                 self._report(source, archive, "unsupported", "transform-too-large", rule=rule_id)
@@ -344,7 +346,7 @@ class _Snapshot:
                     # Withhold rather than export a file the policy cannot clean.
                     self._report(source, archive, "unsupported", f"transform-{result.status}", rule=rule_id)
                     return
-                if len(captured) + len(result.data) > self._room():
+                if not self._room(len(captured) + len(result.data)):
                     raise probe.Rejected("collection byte limit")
                 if result.status == "applied":
                     outcome, reason = "transformed", transform["reason"]
@@ -353,12 +355,14 @@ class _Snapshot:
                     with os.fdopen(original_fd, "wb") as output:
                         output.write(captured)
                     self.total += len(captured)
+                    self.footprint += probe.footprint(len(captured))
                     self.originals.append((source, archive, original, before.st_mtime_ns))
                 output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(output_fd, "wb") as output:
                     output.write(result.data)
                 count = len(result.data)
             self.total += count
+            self.footprint += probe.footprint(count)
             self.paths[archive], self.metadata[archive] = destination, before
             self._report(source, archive, outcome, reason, rule=rule_id)
         elif stat.S_ISLNK(before.st_mode):

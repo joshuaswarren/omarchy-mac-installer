@@ -114,7 +114,10 @@ def plan_document(bundle, actions, receipt, account_uid, binding):
         reason_code(action)
         counts[PLAN_COUNTS[action.status]] += 1
         if action.status in ("create", "replace") and probe.entry_kind(entries[action.path]) == "file":
-            required += entries[action.path]["bytes"]
+            # Whole blocks per file; a replacement also keeps a private backup.
+            required += probe.footprint(entries[action.path]["bytes"]) * (2 if action.status == "replace" else 1)
+        elif action.status == "create":
+            required += probe.BLOCK
     document = {
         "schema": contract.PLAN, "plan_id": plan_id(bundle, actions, account_uid, binding, receipt),
         "export_id": bundle.export_id, "bundle_sha256": bundle.ciphertext_sha256,

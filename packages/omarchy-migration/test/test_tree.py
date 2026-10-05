@@ -343,6 +343,24 @@ class TreeRestoreTests(unittest.TestCase):
         self.assertEqual({action.status for action in second.values()} - {"restored", "directory", "present"}, set())
         self.assertEqual((locked / "inner.txt").read_bytes(), b"inner\n")
 
+    def test_failed_child_finalization_keeps_its_parent_private(self):
+        def build(root):
+            (root / "Archive/Inner").mkdir(parents=True)
+            (root / "Archive/Inner/x").write_bytes(b"x\n")
+            (root / "Archive").chmod(0o555)
+        ciphertext, _ = self.custom_bundle(build)
+        self.addCleanup(self.release_target)
+        original = restore.Restorer._finalize_directory
+
+        def fail_inner(importer, entry, saved):
+            return None if entry["path"] == "Archive/Inner" else original(importer, entry, saved)
+
+        with self.verified(ciphertext) as bundle, patch.object(restore.Restorer, "_finalize_directory", fail_inner):
+            report = self.run_restore(bundle)
+        self.assertEqual(report["Archive/Inner"].status, "conflict")
+        self.assertIn("metadata deferred", report["Archive"].reason)
+        self.assertEqual(stat.S_IMODE((self.target / "Archive").stat().st_mode), 0o700)
+
     def test_group_writable_source_directory_is_restored_without_group_write(self):
         def build(root):
             (root / "Shared").mkdir()

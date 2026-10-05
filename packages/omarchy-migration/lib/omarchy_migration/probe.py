@@ -35,6 +35,13 @@ MAX_MANIFEST = contract.MAX_MANIFEST
 MAX_ENTRIES = contract.MAX_ENTRIES
 MAX_TOTAL = contract.MAX_EXPANDED
 MAX_CIPHERTEXT = contract.MAX_CIPHERTEXT
+# Space estimates round every file up to whole blocks and allow one block per entry.
+BLOCK = 4096
+
+
+def footprint(size):
+    """Bytes a file of `size` bytes plausibly occupies, plus its entry overhead."""
+    return -(-size // BLOCK) * BLOCK + BLOCK
 CHUNK = 64 * 1024
 # Narrow probe profile, matching the pinned age CLI's default. This is not a
 # general-purpose age parser or cryptographic verifier.
@@ -504,7 +511,7 @@ def validate_archive(stream, *, _objects=None, budget=None):
         validate_manifest(manifest)
     except (ValueError, UnicodeError, TypeError) as error:
         raise Rejected("invalid manifest") from error
-    if budget is not None and sum(entry.get("bytes", 0) for entry in manifest["entries"]) > budget:
+    if budget is not None and sum(footprint(entry.get("bytes", 0)) for entry in manifest["entries"]) > budget:
         raise Rejected("bundle exceeds available space")
     consume_padding(stream, length)
     for entry in manifest["entries"]:

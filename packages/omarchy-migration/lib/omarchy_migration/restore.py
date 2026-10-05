@@ -26,7 +26,7 @@ REPLACEMENT_JOURNAL_SCHEMA = "omarchy-migration-restore-probe/8"
 JOURNAL_NAME = "journal.json"
 # Base size plus room per manifest entry for its snapshot record and updates.
 JOURNAL_BASE_LIMIT = 4 * 1024 * 1024
-JOURNAL_ENTRY_LIMIT = 8 * 1024
+JOURNAL_ENTRY_LIMIT = 3 * 1024
 # Free space left untouched when authenticating a bundle into scratch.
 SCRATCH_MARGIN = 64 * 1024 * 1024
 
@@ -429,16 +429,18 @@ class Restorer:
         except (OSError, probe.Rejected):
             return False
 
-    def _save(self):
-        """Durably record every entry changed since the last save.
+    def _save(self, *keys):
+        """Durably record changed entries: the named ones, or all when none are named.
 
-        Appends one line per change; rewrites a compact snapshot when there is
-        no journal yet or the log has grown well past the live state.
+        Naming the changed entries keeps each save proportional to the change,
+        not to the job. Appends one line per change; rewrites a compact
+        snapshot when there is no journal yet or the log has grown well past
+        the live state.
         """
         entries = self._journal["entries"]
         changed = []
-        for key, value in entries.items():
-            data = _json_bytes(value)
+        for key in keys or tuple(entries):
+            data = _json_bytes(entries[key])
             if self._written.get(key) != data:
                 changed.append((key, data))
         exists = self._journal_lines > 0
@@ -711,7 +713,7 @@ class Restorer:
                 # crash before the second journal write leaves an uncertain
                 # directory, which retry must not adopt or recreate.
                 self._journal["entries"][identity] = {"state": "pending", "file": None, "temporary": None}
-                self._save()
+                self._save(identity)
                 try:
                     os.mkdir(name, 0o700, dir_fd=parent)
                 except FileExistsError:
@@ -731,7 +733,7 @@ class Restorer:
             os.fsync(parent)
         self._journal["entries"][identity] = {"state": "applied" if created else "retained",
                                               "file": fingerprint, "temporary": None}
-        self._save()  # Establish directory identity before touching children.
+        self._save(identity)  # Establish directory identity before touching children.
         return Action(entry["path"], "directory", "structure retained; source directory metadata deferred"), fingerprint
 
     def _finalize_directories(self, report):
@@ -760,9 +762,11 @@ class Restorer:
             fingerprint = self._finalize_directory(entry, saved)
             if fingerprint is None:
                 report[index] = self._action(entry, "conflict", "directory changed during application")
+                # Deepest first: its ancestors come later and must stay private.
+                blocked.update(_ancestors(entry["path"]))
                 continue
             saved["file"] = fingerprint
-            self._save()
+            self._save(entry["object"])
             report[index] = Action(entry["path"], "directory", "directory metadata restored")
 
     def _finalize_directory(self, entry, saved):
@@ -856,7 +860,7 @@ class Restorer:
                     self._journal["entries"][entry["object"]] = {
                         "state": "retained", "file": observed, "temporary": None,
                     }
-                    self._save()
+                    self._save(entry["object"])
                 self._ready[entry["path"]] = observed
                 report[index] = action
                 continue
@@ -873,7 +877,7 @@ class Restorer:
                     os.fsync(self._job_fd)
                 if previous["state"] != "retained":
                     previous["state"] = "applied"
-                self._save()
+                self._save(entry["object"])
                 self._cleanup(previous)
                 self._ready[entry["path"]] = observed
                 report[index] = Action(action.path, action.status, action.reason,
@@ -891,7 +895,7 @@ class Restorer:
             if backup is not None:
                 saved["backup"] = backup
             self._journal["entries"][entry["object"]] = saved
-            self._save()  # Durable witness must precede target publication.
+            self._save(entry["object"])  # Durable witness must precede target publication.
             if backup is not None:
                 backup_valid = self._backup_valid(saved)
                 current_parents = []
@@ -917,7 +921,7 @@ class Restorer:
                     continue
                 os.fsync(parent)
             saved["state"] = "applied"
-            self._save()
+            self._save(entry["object"])
             self._cleanup(saved)
             self._ready[entry["path"]] = saved["file"]
             report[index] = Action(entry["path"], "replaced" if backup else "restored",

@@ -184,7 +184,9 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(sum(plan["actions"].values()), self.receipt["estimates"]["entries"])
         self.assertEqual(plan["actions"]["conflict"], 0)
         self.assertEqual(plan["actions"]["inert"], 1)  # the Work link into /mnt/mac
-        self.assertEqual(plan["required_bytes"], self.receipt["estimates"]["expanded_bytes"])
+        # Whole blocks per file and one per new entry: at least the content itself.
+        self.assertGreaterEqual(plan["required_bytes"], self.receipt["estimates"]["expanded_bytes"])
+        self.assertEqual(plan["required_bytes"] % 4096, 0)
 
     def test_plan_id_is_stable_until_the_destination_changes(self):
         first, _ = self.plan()

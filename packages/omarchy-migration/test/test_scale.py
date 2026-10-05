@@ -68,10 +68,21 @@ class ScaleTests(unittest.TestCase):
         expected = DIRECTORIES * FILES_PER_DIRECTORY + DIRECTORIES + 1
         self.assertEqual(len(manifest["entries"]), expected)
         self.assertGreater(expected, 4 * 1024)
+        serialized = 0
+        original = restore._json_bytes
+
+        def counted(value):
+            nonlocal serialized
+            serialized += 1
+            return original(value)
+
         with restore.verified_bundle(self.age, SECRET, ciphertext) as bundle:
             with restore.Restorer(bundle, self.target, self.job) as importer:
-                results = importer.apply(importer.plan())
+                with patch.object(restore, "_json_bytes", side_effect=counted):
+                    results = importer.apply(importer.plan())
         self.assertEqual({result.status for result in results}, {"restored", "directory"})
+        # Each save serializes only what it changed: linear, not quadratic.
+        self.assertLess(serialized, 10 * expected)
         self.assertEqual((self.target / "Projects/p39/f109.txt").read_bytes(), b"39-109\n")
         journal = self.job / "journal.json"
         # Appends, not rewrites: the log stays proportional to the import.

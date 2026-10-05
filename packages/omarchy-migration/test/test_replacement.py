@@ -272,8 +272,8 @@ class ReplacementTests(unittest.TestCase):
     def test_intent_failure_leaves_original_and_retry_reports_uncertainty(self):
         save = restore.Restorer._save
 
-        def fail_intent(importer):
-            save(importer)
+        def fail_intent(importer, *keys):
+            save(importer, *keys)
             if any("backup" in entry for entry in importer._journal["entries"].values()):
                 raise OSError(errno.ENOSPC, "synthetic intent sync failure")
 
@@ -305,11 +305,11 @@ class ReplacementTests(unittest.TestCase):
     def test_completion_journal_failure_recovers_new_inode_and_original_backup(self):
         save = restore.Restorer._save
 
-        def fail_completion(importer):
+        def fail_completion(importer, *keys):
             if any("backup" in entry and entry["state"] == "applied"
                    for entry in importer._journal["entries"].values()):
                 raise OSError(errno.ENOSPC, "synthetic completion failure")
-            return save(importer)
+            return save(importer, *keys)
 
         with self.verified() as bundle:
             with patch.object(restore.Restorer, "_save", fail_completion), self.assertRaisesRegex(OSError, "completion"):
