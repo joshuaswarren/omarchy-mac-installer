@@ -1,5 +1,11 @@
 # Migration exploration validation
 
+## Share credential stores candidate, 2026-10-04 UTC
+
+Source candidate: `4c4157e`, tree `5b40067a402b262c547d66da74d6c61a3f2d35b5`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script and 44 staging tests (one optional `sgdisk` skip), then `packages/omarchy-migration/test/all` (224 package tests and the staged-root command check), `preclean-m1-test` and every installer shell fixture: **432 Python tests passed; one optional skip** (433 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
+
+Decided with Scott: credentials inside a selected shared folder are recognized by name only (no content inspection) and offered as their own choices. Policy revision `try-omarchy/82927e9/2` (schema `policy/2`) adds share stores for SSH, GnuPG and AWS folders, macOS keychains, browser profiles and private-key file names; collection requests (`collection-request/3`) select them through `selected_share_stores`, and unselected matches are held back unopened, verified by instrumented open/listing checks. Keynote-style `*.key` files are deliberately not matched. The first attempt on `69b6670` failed one round-trip count that predated share holdouts and is not evidence. No Swift, helper, packaging input, engine lock, trust, host-support or native disk source changed.
+
 ## Shared folder candidate, 2026-10-03 UTC
 
 Source candidate: `e28c6c1`, tree `dd8c3f28e8b9bbfd653bd912ba3eeac96126fe9f`. One authoritative `./test/all` run on pancake from a git bundle at that commit passed compilation/shell syntax, 37 engine, 104 overlay, 24 release/script and 44 staging tests (one optional `sgdisk` skip), then `packages/omarchy-migration/test/all` (222 package tests and the staged-root command check), `preclean-m1-test` and every installer shell fixture: **430 Python tests passed; one optional skip** (431 run), exit 0, with encryption and QEMU socket cases enabled. Runner and dependency identities match the previous entries.
