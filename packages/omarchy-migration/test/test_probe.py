@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import tracemalloc
@@ -249,6 +250,47 @@ class BundleProbe(unittest.TestCase):
         self.assertLess(peak, 4 * 1024 * 1024)
         print(f"probe_stream_bytes={source.stat().st_size} python_peak_bytes={peak}")
 
+
+
+class ArchiveTailTests(unittest.TestCase):
+    def archive(self, sizes):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory)
+        files = {}
+        for index, size in enumerate(sizes):
+            path = directory / f"f{index}"
+            path.write_bytes(b"x" * size)
+            files[f"f{index}"] = path
+        manifest = probe.make_tree_manifest(files)
+        stream = io.BytesIO()
+        probe.write_archive(stream, manifest, files)
+        return manifest, stream.getvalue()
+
+    def test_every_padding_residue_the_writer_produces_is_accepted(self):
+        tails = set()
+        for size in range(0, 41 * 512, 128):
+            manifest, data = self.archive([size, 100])
+            end = -(-len(data.rstrip(b"\0")) // 512) * 512
+            tails.add(len(data) - end)
+            with self.subTest(size=size):
+                self.assertEqual(probe.validate_archive(io.BytesIO(data)), manifest)
+        # The sweep must reach the largest tail tarfile writes, or it proves nothing.
+        self.assertEqual(max(tails), probe.MAX_ARCHIVE_TAIL)
+
+    def test_tail_bounds_are_exact(self):
+        manifest, data = self.archive([3])
+        body = data.rstrip(b"\0")
+        body += b"\0" * (-len(body) % 512)
+        self.assertEqual(probe.MAX_ARCHIVE_TAIL, 10752)
+        for tail, accepted in ((1024, True), (probe.MAX_ARCHIVE_TAIL, True), (probe.MAX_ARCHIVE_TAIL + 512, False),
+                               (512, False), (1024 + 100, False)):
+            with self.subTest(tail=tail):
+                stream = io.BytesIO(body + b"\0" * tail)
+                if accepted:
+                    self.assertEqual(probe.validate_archive(stream), manifest)
+                else:
+                    with self.assertRaises(probe.Rejected):
+                        probe.validate_archive(stream)
 
 
 class ProvenanceTests(unittest.TestCase):

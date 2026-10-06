@@ -680,7 +680,7 @@ class CollectionTests(unittest.TestCase):
 
     def test_credentials_in_a_mac_home_share_are_held_back_by_name_until_selected(self):
         share = self.make_share()
-        for name, data in {"Library/Keychains/login.keychain-db": b"FAKE-KEYCHAIN",
+        for name, data in {"Library/Keychains/login.keychain-db": b"FAKE-KEYCHAIN", ".ssh/id_ed25519": b"FAKE-KEY",
                            "Projects/deploy/server.pem": b"FAKE-PEM", "Documents/talk.key": b"keynote slides"}.items():
             path = share / name
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
@@ -716,6 +716,8 @@ class CollectionTests(unittest.TestCase):
         self.request["selected_share_stores"] = ["share-ssh"]
         with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
             self.assertEqual(snapshot.paths["Work/.ssh/config"].read_bytes(), b"Host mac-side\n")
+            # A key file name inside the ticked folder does not hold it back.
+            self.assertEqual(snapshot.paths["Work/.ssh/id_ed25519"].read_bytes(), b"FAKE-KEY")
             self.assertNotIn("Work/Library/Keychains/login.keychain-db", snapshot.paths)
             self.assertNotIn("Work/Projects/deploy/server.pem", snapshot.paths)
 

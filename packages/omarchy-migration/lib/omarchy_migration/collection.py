@@ -296,7 +296,13 @@ class _Snapshot:
             # Recognized credential locations are held back by name, unopened,
             # unless the user ticked them.
             relative = archive[len(self.share["archive"]) + 1:]
-            store = self.policy.share_store(relative)
+            parts = relative.split("/")
+            # Inside a store the user ticked, everything comes along: no other
+            # pattern (such as a key file name) holds part of it back.
+            inside_selected = any(
+                (found := self.policy.share_store("/".join(parts[:depth])))
+                and found["id"] in self.request["selected_share_stores"] for depth in range(1, len(parts)))
+            store = None if inside_selected else self.policy.share_store(relative)
             if store and store["id"] not in self.request["selected_share_stores"]:
                 self._report(source, archive, "held-out", "unselected-store", store=store["id"], mount=self.share["id"])
                 return

@@ -37,6 +37,8 @@ MAX_MANIFEST = contract.MAX_MANIFEST
 MAX_ENTRIES = contract.MAX_ENTRIES
 MAX_TOTAL = contract.MAX_EXPANDED
 MAX_CIPHERTEXT = contract.MAX_CIPHERTEXT
+# tarfile ends with two zero blocks, then pads the archive to a whole record.
+MAX_ARCHIVE_TAIL = 2 * tarfile.BLOCKSIZE + tarfile.RECORDSIZE - tarfile.BLOCKSIZE
 # Space estimates round every file up to whole blocks and allow one block per entry.
 BLOCK = 4096
 
@@ -554,7 +556,7 @@ def validate_archive(stream, *, _objects=None, budget=None):
     tail_size = 0
     while piece := stream.read(CHUNK):
         tail_size += len(piece)
-        if any(piece) or tail_size > 10240:
+        if any(piece) or tail_size > MAX_ARCHIVE_TAIL:
             raise Rejected("trailing archive data")
     if tail_size < 1024 or tail_size % 512:
         raise Rejected("archive end marker")
