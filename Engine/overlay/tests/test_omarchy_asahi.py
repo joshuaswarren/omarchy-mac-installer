@@ -111,6 +111,7 @@ sys.path.insert(
 
 from omarchy_asahi import (  # noqa: E402
     _collect_neo_radios,
+    _collect_neo_touch_id,
     STEP2_SCRIPT,
     AsahiAdapterError,
     AsahiInPlaceRepairAdapter,
@@ -1616,6 +1617,56 @@ class NeoRadioFirmwareTests(unittest.TestCase):
         with self.assertLogs(level="WARNING") as logs:
             self.assertEqual(self.run_hook("j700ap", collect), [])
         self.assertIn("no WCAL", logs.output[0])
+
+class NeoTouchIdCalibrationTests(unittest.TestCase):
+    """The MacBook Neo's FSC2 calibration joins its vendor firmware package."""
+
+    def run_hook(self, device_class, collect, partitions=None):
+        package = SimpleNamespace(added=[])
+        package.add_file = lambda name, data: package.added.append((name, data))
+        dutil = SimpleNamespace(
+            find_system_disk=lambda: "disk0",
+            disk_parts={"disk0": {"Partitions": partitions or [
+                {"Content": "Apple_APFS_ISC", "DeviceIdentifier": "disk0s1"},
+                {"Content": "Apple_APFS", "DeviceIdentifier": "disk0s2"},
+            ]}},
+        )
+        installer = SimpleNamespace(sysinfo=SimpleNamespace(device_class=device_class), dutil=dutil)
+        firmware = SimpleNamespace(core=SimpleNamespace(FWFile=lambda name, data: ("FWFile", name, data)))
+        with patch("omarchy_asahi.asahi_firmware", firmware):
+            _collect_neo_touch_id(installer, package, collect=collect)
+        return package.added
+
+    def test_a_neo_reads_the_raw_iboot_system_container(self):
+        devices = []
+
+        def collect(device):
+            devices.append(device)
+            return {"apple/mesacal-j700.bin": b"img4"}
+
+        self.assertEqual(self.run_hook("j700ap", collect), [
+            ("apple/mesacal-j700.bin", ("FWFile", "apple/mesacal-j700.bin", b"img4")),
+        ])
+        self.assertEqual(devices, ["/dev/rdisk0s1"])
+
+    def test_other_macs_collect_nothing(self):
+        self.assertEqual(self.run_hook("j613ap", lambda device: self.fail("read the container")), [])
+
+    def test_a_failed_collection_leaves_the_install_going(self):
+        import omarchy_mesa
+
+        def collect(device):
+            raise omarchy_mesa.MesaError("expected one signed FSC2 calibration, found 0")
+
+        with self.assertLogs(level="WARNING") as logs:
+            self.assertEqual(self.run_hook("j700ap", collect), [])
+        self.assertIn("found 0", logs.output[0])
+
+    def test_a_disk_without_its_container_first_is_not_read(self):
+        partitions = [{"Content": "Apple_APFS", "DeviceIdentifier": "disk0s1"}]
+        with self.assertLogs(level="WARNING"):
+            self.assertEqual(self.run_hook("j700ap", lambda device: self.fail("read"), partitions), [])
+
 
 if __name__ == "__main__":
     unittest.main()

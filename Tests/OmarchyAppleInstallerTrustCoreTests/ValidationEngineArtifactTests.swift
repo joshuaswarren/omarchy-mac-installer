@@ -8,19 +8,19 @@
     func testM3CapableInspectionIdentityIsPinnedExactly() {
       XCTAssertEqual(
         ValidationEngineArtifactLocator.version,
-        "v0.9.2-omarchy.29"
+        "v0.9.2-omarchy.30"
       )
       XCTAssertEqual(
         ValidationEngineArtifactLocator.fileName,
-        "installer-v0.9.2-omarchy.29.tar.gz"
+        "installer-v0.9.2-omarchy.30.tar.gz"
       )
       XCTAssertEqual(
         ValidationEngineArtifactLocator.expectedDigest,
-        "sha256:14323c787b94521451504d481f783b2710c259ae1448c8039db09ee5c6d8d337"
+        "sha256:2d5a14c3dde7b9ebb7076cd65a6d5a478d7f20b6396fadb52b59532752d12bdc"
       )
       XCTAssertEqual(
         ValidationEngineArtifactLocator.expectedSizeBytes,
-        17_851_067
+        17_852_406
       )
     }
 

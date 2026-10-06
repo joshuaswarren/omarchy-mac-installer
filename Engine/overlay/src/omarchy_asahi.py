@@ -21,6 +21,7 @@ import asahi_firmware
 import osinstall
 import stub
 
+import omarchy_mesa
 import omarchy_mt7932
 import omarchy_planner
 from omarchy_image import (
@@ -473,6 +474,7 @@ def stub_installer(sysinfo, dutil, osinfo):
         with _newer_trackpad_keys():
             result = _collect_firmware(pkg)
         _collect_neo_radios(installer, pkg)
+        _collect_neo_touch_id(installer, pkg)
         return result
 
     def _collect_firmware(pkg):
@@ -538,6 +540,33 @@ def _collect_neo_radios(installer, pkg, collect=omarchy_mt7932.collect):
     for name, data in sorted(files.items()):
         pkg.add_file(name, asahi_firmware.core.FWFile(name, data))
     logging.info("MacBook Neo radio firmware: %d files", len(files))
+
+
+def _iboot_system_container(dutil):
+    """The raw device of the system disk's iBoot System Container, its first
+    partition (asahi-installer's find_system_disk test)."""
+    partition = dutil.disk_parts[dutil.find_system_disk()]["Partitions"][0]
+    if partition.get("Content") != "Apple_APFS_ISC":
+        raise omarchy_mesa.MesaError("the system disk does not start with its iBoot System Container")
+    return "/dev/r" + partition["DeviceIdentifier"]
+
+
+def _collect_neo_touch_id(installer, pkg, collect=omarchy_mesa.collect):
+    """Add a MacBook Neo's Touch ID calibration to its firmware.
+
+    Touch ID on the Neo is experimental too: without the calibration the Neo
+    installs and boots, so a failure is logged and the install goes on.
+    """
+    if getattr(getattr(installer, "sysinfo", None), "device_class", "") != "j700ap":
+        return
+    try:
+        files = collect(_iboot_system_container(installer.dutil))
+    except (OSError, KeyError, IndexError, omarchy_mesa.MesaError) as error:
+        logging.warning("MacBook Neo Touch ID calibration was not collected: %s", error)
+        return
+    for name, data in sorted(files.items()):
+        pkg.add_file(name, asahi_firmware.core.FWFile(name, data))
+    logging.info("MacBook Neo Touch ID calibration: %d bytes", sum(map(len, files.values())))
 
 
 @contextlib.contextmanager
