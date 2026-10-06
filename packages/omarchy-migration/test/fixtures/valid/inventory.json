@@ -28,7 +28,7 @@
     }
   ],
   "inventory_id": "5b0c7a52-3f1e-4c4e-9a1d-2f6e8b0c1d01",
-  "policy_revision": "try-omarchy/82927e9/2",
+  "policy_revision": "try-omarchy/82927e9/3",
   "schema": "omarchy-migration/inventory/1",
   "source": {
     "account_uid": 1000,

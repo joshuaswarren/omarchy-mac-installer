@@ -79,6 +79,76 @@
       "roots": [
         ".local/share/pki"
       ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "google-chrome",
+      "roots": [
+        ".config/google-chrome",
+        ".config/google-chrome-beta",
+        ".config/google-chrome-unstable"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "vivaldi",
+      "roots": [
+        ".config/vivaldi",
+        ".config/vivaldi-snapshot"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "microsoft-edge",
+      "roots": [
+        ".config/microsoft-edge",
+        ".config/microsoft-edge-beta",
+        ".config/microsoft-edge-dev"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "helium",
+      "roots": [
+        ".config/net.imput.helium"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "browser-profile",
+      "id": "firefox-xdg",
+      "roots": [
+        ".config/mozilla"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "cargo",
+      "roots": [
+        ".cargo/credentials",
+        ".cargo/credentials.toml"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "opencode",
+      "roots": [
+        ".local/share/opencode/auth.json"
+      ]
+    },
+    {
+      "adapter": null,
+      "category": "credentials",
+      "id": "zed",
+      "roots": [
+        ".config/zed/credentials.json"
+      ]
     }
   ],
   "mounts": [
@@ -92,7 +162,7 @@
       "reason": "mac_shared_folder"
     }
   ],
-  "revision": "try-omarchy/82927e9/2",
+  "revision": "try-omarchy/82927e9/3",
   "rules": [
     {
       "action": "exclude",
@@ -391,7 +461,13 @@
         "Library/Safari",
         ".mozilla",
         ".config/chromium",
-        ".config/BraveSoftware"
+        ".config/BraveSoftware",
+        ".config/google-chrome",
+        ".config/vivaldi",
+        ".config/microsoft-edge",
+        ".config/net.imput.helium",
+        ".config/mozilla",
+        "Library/Application Support/Vivaldi"
       ],
       "files": [],
       "id": "share-browser-profiles"

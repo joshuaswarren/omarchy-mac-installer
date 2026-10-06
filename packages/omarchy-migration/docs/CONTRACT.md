@@ -47,7 +47,7 @@ Private documents never cross an app boundary in plaintext: the bundle manifest,
 
 ## Policy
 
-A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/82927e9/2`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
+A policy is the trusted, versioned description of one source build. `revision` names it (for example `try-omarchy/82927e9/3`) and `source {provider, repository, commit}` pins the exact provider commit it was derived from.
 
 - **credential_stores** `{id, category, roots, adapter}` are matched first, before traversal, stat or open. A store is exported only when explicitly selected and only through an available adapter. Roots may not overlap each other or any rule.
 - **share_stores** `{id, category, directories, files}` recognize credential locations inside an explicitly selected shared folder by name only: `directories` are relative paths matched as trailing components at any depth (for example `.ssh` or `Library/Keychains`), `files` are file-name patterns (for example `*.pem`). Contents are never inspected. A matched entry is held back unopened unless the user selects that share store separately, so a UI can offer each one as its own choice.

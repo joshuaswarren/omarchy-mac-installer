@@ -82,6 +82,21 @@ class MatchTests(unittest.TestCase):
             self.assertIsNone(self.policy.match(path), path)
         self.assertEqual(self.policy.match(".local/state/omarchy/toggles/hypr/flags.lua").item["action"], "preserve")
 
+    def test_revision_three_stores_from_the_windows_importer_comparison(self):
+        for path, store in ((".config/google-chrome/Default/Cookies", "google-chrome"),
+                            (".config/vivaldi-snapshot/Default/Login Data", "vivaldi"),
+                            (".config/microsoft-edge-dev/Local State", "microsoft-edge"),
+                            (".config/net.imput.helium/Default/Cookies", "helium"),
+                            (".config/mozilla/firefox/profiles.ini", "firefox-xdg"),
+                            (".cargo/credentials.toml", "cargo"),
+                            (".local/share/opencode/auth.json", "opencode"),
+                            (".config/zed/credentials.json", "zed")):
+            match = self.policy.match(path)
+            self.assertEqual((match.kind, match.item["id"]), ("store", store), path)
+        for path in (".cargo/config.toml", ".config/zed/settings.json", ".local/share/opencode/sessions/a.json"):
+            self.assertIsNone(self.policy.match(path), path)
+        self.assertEqual(self.policy.share_store("old/.config/google-chrome")["id"], "share-browser-profiles")
+
     def test_try_settings_desktop_override_is_excluded_but_other_entries_migrate(self):
         match = self.policy.match(".local/share/applications/try-omarchy-settings.desktop")
         self.assertEqual((match.item["id"], match.item["action"]), ("try-settings-desktop-override", "exclude"))
