@@ -2,7 +2,7 @@
 
 Lists directories and reads metadata only: it never opens a regular file,
 never follows a link, never enters a credential store, an excluded path or
-another filesystem, and writes nothing. The result is an inventory/1
+another filesystem, and writes nothing. The result is an inventory/2
 document plus a private, local-only detail summary.
 """
 
@@ -108,7 +108,7 @@ class Survey:
             mount = self.policy.mount(target)
             if mount:
                 self.note("share-link", path, mount=mount["id"])
-                if target.rstrip("/") == mount["path"].rstrip("/"):
+                if collection._Snapshot._is_mount_root(target, mount):
                     self.linked_mounts.add(mount["id"])
             else:
                 self.counts[kind]["links"] += 1
@@ -143,7 +143,7 @@ class Survey:
             self.counts[kind]["files"] += 1
             self.counts[kind]["bytes"] += metadata.st_size
             # Attribute names only, through the parent descriptor; the file is never opened.
-            if lost := collection.metadata_losses(f"/proc/self/fd/{parent}/{name}", metadata):
+            if DEFAULT_SELECTED[kind] and (lost := collection.metadata_losses(f"/proc/self/fd/{parent}/{name}", metadata)):
                 self.note("metadata-not-preserved", path, lost=" ".join(lost))
             if DEFAULT_SELECTED[kind]:
                 # Unselected categories (caches) are shown only as a total.
@@ -307,7 +307,7 @@ def summary(survey, document):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--home", type=Path, default=Path.home())
-    parser.add_argument("--json", action="store_true", help="print the inventory/1 document instead of a summary")
+    parser.add_argument("--json", action="store_true", help="print the inventory/2 document instead of a summary")
     parser.add_argument("--omarchy-version", help="override the detected Omarchy version")
     parser.add_argument("--measure-shares", action="store_true",
                         help="also count linked shared folders (read-only; credential stores are not entered)")

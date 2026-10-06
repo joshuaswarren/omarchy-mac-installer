@@ -1,6 +1,6 @@
 # omarchy-migration contract v1
 
-Status: experimental draft for ticket 04, validated by `contract.py` and its fixtures. The disposable collector applies the policy through `policy.py`, the runnable fixture exporter emits and consumes the export documents, and `review.py` emits `plan` and `report` from the restorer; transforms run at export, so restore needs no provider rules. It formalizes the documents the disposable probe already exchanges so that Try, the installer and the native importer can be built against one versioned interface. It is not yet production code; the canonical home remains the shared Omarchy runtime (`bin/omarchy-migration`, `install/migration/omarchy_migration/`).
+Status: experimental draft. Until the first release, draft schemas (including `bundle/2` and its provenance) may change without a version bump and older drafts are not readable; no bundle outside tests exists yet. Developed for ticket 04, validated by `contract.py` and its fixtures. The disposable collector applies the policy through `policy.py`, the runnable fixture exporter emits and consumes the export documents, and `review.py` emits `plan` and `report` from the restorer; transforms run at export, so restore needs no provider rules. It formalizes the documents the disposable probe already exchanges so that Try, the installer and the native importer can be built against one versioned interface. It is not yet production code; the canonical home remains the shared Omarchy runtime (`bin/omarchy-migration`, `install/migration/omarchy_migration/`).
 
 ## Documents
 

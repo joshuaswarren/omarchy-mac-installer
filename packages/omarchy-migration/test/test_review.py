@@ -93,6 +93,11 @@ class DocumentTests(unittest.TestCase):
                              restore.Action("Documents/a", "restored", "new entry published"))
         reasons = {item["id"]: item["reasons"] for item in report["categories"]}
         self.assertEqual(reasons, {"configuration": ["metadata_not_preserved"], "files-and-projects": []})
+        # A lossy file that did not arrive does not make its category claim a loss.
+        report = self.report(restore.Action(".config/app/settings", "conflict", "existing file or unsafe path preserved"))
+        self.assertEqual(report["categories"][0]["reasons"], ["destination_exists"])
+        self.bundle._manifest["provenance"] = None
+        self.report(restore.Action("Documents/a", "restored", "new entry published"))
 
     def test_bundle_without_provenance_cannot_be_planned(self):
         del self.bundle._manifest["provenance"]

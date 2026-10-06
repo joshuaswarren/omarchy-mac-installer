@@ -154,9 +154,22 @@ class SurveyTests(unittest.TestCase):
         sparse = self.home / "Documents/disk.img"
         with sparse.open("wb") as output:
             output.truncate(1024 * 1024)
-        result = self.run_survey()
+        tagged = self.home / "Documents/report.md"
+        try:
+            os.setxattr(tagged, "user.origin", b"mac")
+        except OSError:
+            self.skipTest("this filesystem has no user extended attributes")
+        opened = os.open
+
+        def directories_only(value, flags, *args, **kwargs):
+            self.assertTrue(flags & os.O_DIRECTORY, value)
+            return opened(value, flags, *args, **kwargs)
+
+        with patch.object(survey.os, "open", side_effect=directories_only):
+            result = self.run_survey()
         lost = {item["path"]: item["lost"] for item in result.outcomes["metadata-not-preserved"]["examples"]}
         self.assertEqual(lost["Documents/disk.img"], "sparse")
+        self.assertEqual(lost["Documents/report.md"], "extended-attributes")
 
     def test_measured_share_counts_files_and_names_stores_without_entering_them(self):
         share = self.root / "mac-share"
@@ -165,16 +178,36 @@ class SurveyTests(unittest.TestCase):
             path = share / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
-        scanned = os.scandir
+        scanned, opened, stated = os.scandir, os.open, os.stat
         held = [share / ".ssh", share / "Library/Keychains"]
 
-        def guarded(value):
-            path = Path(f"/proc/self/fd/{value}").resolve() if isinstance(value, int) else Path(value)
+        def resolve(value, dir_fd=None):
+            if isinstance(value, int):
+                return Path(f"/proc/self/fd/{value}").resolve()
+            base = Path(f"/proc/self/fd/{dir_fd}").resolve() if dir_fd is not None else Path.cwd()
+            return Path(os.path.abspath(base / value))
+
+        def check(path):
             self.assertFalse(any(path == root or path.is_relative_to(root) for root in held), str(path))
+
+        def guarded_scan(value):
+            check(resolve(value))
             return scanned(value)
 
+        def guarded_open(value, flags, *args, **kwargs):
+            check(resolve(value, kwargs.get("dir_fd")))
+            return opened(value, flags, *args, **kwargs)
+
+        def guarded_stat(value, *args, **kwargs):
+            check(resolve(value, kwargs.get("dir_fd")))
+            return stated(value, *args, **kwargs)
+
+        (self.home / "Work-normalized").symlink_to("/mnt//mac/.")
         result = self.run_survey()
-        with patch.object(survey.os, "scandir", side_effect=guarded):
+        self.assertIn("mac-share", result.linked_mounts)
+        with patch.object(survey.os, "scandir", side_effect=guarded_scan), \
+                patch.object(survey.os, "open", side_effect=guarded_open), \
+                patch.object(survey.os, "stat", side_effect=guarded_stat):
             result.measure_share(self.policy.mounts[0], str(share))
         document = survey.inventory(result, self.home, "4.0.4", uid=1000)
         mount = document["mounts"][0]

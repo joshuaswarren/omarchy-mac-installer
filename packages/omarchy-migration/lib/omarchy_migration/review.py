@@ -132,10 +132,12 @@ def report_document(plan, results, job_id, bundle):
     if plan["export_id"] != bundle.export_id:
         raise ReviewError("plan_mismatch")
     groups = {}
-    losses = {}
-    for item in bundle._manifest.get("provenance", {}).get("metadata", []):
-        losses.setdefault(category(item["archive"]), True)
+    lossy = {item["archive"] for item in (bundle._manifest.get("provenance") or {}).get("metadata", [])}
+    losses = set()
     for result in results:
+        if result.path in lossy and result.status in ("restored", "replaced", "present", "directory"):
+            # Only entries actually in place can be missing metadata.
+            losses.add(category(result.path))
         code = reason_code(result)
         group = groups.setdefault(category(result.path), {"restored": 0, "conflicts": 0, "omitted": 0, "reasons": set()})
         if result.status in ("restored", "replaced", "present", "directory"):
@@ -151,7 +153,7 @@ def report_document(plan, results, job_id, bundle):
     categories = []
     for name in sorted(groups):
         group = groups[name]
-        if losses.get(name):
+        if name in losses:
             group["reasons"].add("metadata_not_preserved")
         if group["conflicts"]:
             outcome = "partial" if group["restored"] else "failed"

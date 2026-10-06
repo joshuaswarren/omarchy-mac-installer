@@ -47,11 +47,12 @@ class Policy:
                 return Match("rule", rule)
         return None
 
-    def share_store(self, path):
+    def share_store(self, path, directories_only=False):
         """The share store a path inside a shared folder names, or None.
 
         Directory patterns match as trailing path components at any depth;
-        file patterns match the final name. Only names are examined.
+        file patterns match the final name unless `directories_only`. Only
+        names are examined.
         """
         parts = path.split("/")
         for store in self.share_stores:
@@ -59,7 +60,7 @@ class Policy:
                 wanted = pattern.split("/")
                 if parts[-len(wanted):] == wanted:
                     return store
-            if any(fnmatch.fnmatchcase(parts[-1], pattern) for pattern in store["files"]):
+            if not directories_only and any(fnmatch.fnmatchcase(parts[-1], pattern) for pattern in store["files"]):
                 return store
         return None
 

@@ -721,6 +721,23 @@ class CollectionTests(unittest.TestCase):
             self.assertNotIn("Work/Library/Keychains/login.keychain-db", snapshot.paths)
             self.assertNotIn("Work/Projects/deploy/server.pem", snapshot.paths)
 
+    def test_a_ticked_key_pattern_does_not_unlock_stores_inside_a_like_named_directory(self):
+        share = self.make_share()
+        for name in ("certs.pem/.ssh/id_ed25519", "certs.pem/Library/Keychains/login.keychain-db", "certs.pem/notes.txt"):
+            path = share / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+            path.write_bytes(b"FAKE")
+        self.request["selected_mounts"] = ["mac-share"]
+        self.request["selected_share_stores"] = ["share-keys"]
+        with self.capture(share_roots={"mac-share": str(share)}) as snapshot:
+            held = {item["archive"]: item["store"] for item in snapshot.report["entries"] if item["outcome"] == "held-out"}
+            # The directory itself matches the ticked *.pem pattern and comes along...
+            self.assertIn("Work/certs.pem/notes.txt", snapshot.paths)
+            # ...but folder stores inside it still need their own tick.
+            self.assertEqual(held["Work/certs.pem/.ssh"], "share-ssh")
+            self.assertEqual(held["Work/certs.pem/Library/Keychains"], "share-keychains")
+            self.assertNotIn("Work/certs.pem/.ssh/id_ed25519", snapshot.paths)
+
     def test_unlistable_share_directory_is_rolled_back_and_skipped(self):
         share = self.make_share()
         self.request["selected_mounts"] = ["mac-share"]

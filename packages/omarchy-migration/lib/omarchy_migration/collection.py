@@ -133,9 +133,10 @@ def metadata_losses(target, metadata):
         names = os.listxattr(target) if isinstance(target, int) else os.listxattr(target, follow_symlinks=False)
     except OSError:
         names = []  # Filesystems without extended attributes have none to lose.
-    if any(name in ("system.posix_acl_access", "system.posix_acl_default") for name in names):
+    acl_names = ("system.posix_acl_access", "system.posix_acl_default", "system.nfs4_acl")
+    if any(name in acl_names for name in names):
         losses.add("acl")
-    if any(name not in ("system.posix_acl_access", "system.posix_acl_default") for name in names):
+    if any(name not in acl_names for name in names):
         losses.add("extended-attributes")
     if stat.S_ISREG(metadata.st_mode) and metadata.st_size and metadata.st_blocks * 512 < metadata.st_size:
         losses.add("sparse")
@@ -170,6 +171,7 @@ class _Snapshot:
         self.budget = budget
         self.footprint = 0  # whole-block estimate of what the snapshot occupies
         self.losses = {}  # archive path -> metadata the bundle cannot carry
+        self.original_losses = {}  # transformed archive path -> its source's losses
         # Set only while walking a selected shared folder's contents.
         self.share = None
         self.materialized = set()
@@ -300,7 +302,9 @@ class _Snapshot:
             # Inside a store the user ticked, everything comes along: no other
             # pattern (such as a key file name) holds part of it back.
             inside_selected = any(
-                (found := self.policy.share_store("/".join(parts[:depth])))
+                # Only folder patterns make a ticked store; a directory merely named like
+                # a key file (certs.pem/) must not unlock unticked stores beneath it.
+                (found := self.policy.share_store("/".join(parts[:depth]), directories_only=True))
                 and found["id"] in self.request["selected_share_stores"] for depth in range(1, len(parts)))
             store = None if inside_selected else self.policy.share_store(relative)
             if store and store["id"] not in self.request["selected_share_stores"]:
@@ -388,6 +392,7 @@ class _Snapshot:
                         output.write(captured)
                     self.total += len(captured)
                     self.footprint += probe.footprint(len(captured))
+                    self.original_losses[archive] = lost
                     self.originals.append((source, archive, original, before.st_mtime_ns))
                 output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(output_fd, "wb") as output:
@@ -466,6 +471,8 @@ class _Snapshot:
             destination = self.directory / str(len(self.paths))
             destination.mkdir(mode=0o700)
             self.paths[archive], self.metadata[archive] = destination, metadata
+            if lost := metadata_losses(fd, metadata):
+                self.losses[archive] = lost
             self._report(source, archive, "included", "mount-materialized", mount=mount["id"])
             self._directory(fd, source, archive, metadata)
             self.materialized.add(mount["id"])
@@ -502,6 +509,9 @@ class _Snapshot:
             if path in self.paths:
                 raise probe.Rejected("originals location collides with a captured entry")
             self.paths[path] = original
+            if self.original_losses.get(archive):
+                # The untouched copy lacks the same attributes as its source.
+                self.losses[path] = self.original_losses[archive]
             # Private copies, whatever the original's mode.
             self.metadata[path] = types.SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_mtime_ns=mtime_ns)
             self._report(source, path, "included", "original-copy")

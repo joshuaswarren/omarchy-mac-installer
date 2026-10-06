@@ -85,7 +85,8 @@ SHARE_MOUNT = "mac-share"
 
 def share_links(links):
     """Home link names that point at the shared folder's root."""
-    return [name for name, target in links.items() if target.rstrip("/") == "/mnt/mac"]
+    mount = {"path": "/mnt/mac"}
+    return [name for name, target in links.items() if collection._Snapshot._is_mount_root(target, mount)]
 
 
 def materialize(directory, files, links):
