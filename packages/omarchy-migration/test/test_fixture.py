@@ -193,13 +193,15 @@ class ExportFixtureTests(unittest.TestCase):
     def test_selected_share_arrives_with_its_stores_only_when_ticked(self):
         self.request = export_request(mounts=["mac-share"])
         self.request_path.write_text(json.dumps(self.request))
-        self.assertEqual(self.execute()[0], 0)
+        code, events = self.execute()
+        self.assertEqual(code, 0, events[-1])
         files, _ = self.decoded_files()
         self.assertTrue({"Work/Projects/plan.md", "Work/photo.jpg"} <= files)
         self.assertNotIn("Work/.ssh/id_ed25519", files)
         self.output, self.request = self.root / "job-with-key", export_request(mounts=["mac-share"], share_stores=["share-ssh"])
         self.request_path.write_text(json.dumps(self.request))
-        self.assertEqual(self.execute()[0], 0)
+        code, events = self.execute()
+        self.assertEqual(code, 0, events[-1])
         files, _ = self.decoded_files()
         self.assertIn("Work/.ssh/id_ed25519", files)
 
@@ -212,7 +214,7 @@ class ExportFixtureTests(unittest.TestCase):
 
     def test_changed_request_or_ciphertext_cannot_reuse_success(self):
         self.assertEqual(self.execute()[0], 0)
-        changed = dict(self.request, selection={"categories": ["files-and-projects"], "credential_stores": []})
+        changed = dict(self.request, selection={**self.request["selection"], "categories": ["files-and-projects"]})
         self.request_path.write_text(json.dumps(changed))
         code, events = self.execute()
         self.assertEqual((code, events[-1]["error"]), (1, "request_conflict"))
