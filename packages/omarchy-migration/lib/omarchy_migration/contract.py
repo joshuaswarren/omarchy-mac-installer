@@ -14,8 +14,8 @@ import uuid
 
 PREFIX = "omarchy-migration/"
 CAPABILITIES = PREFIX + "capabilities/1"
-INVENTORY = PREFIX + "inventory/1"
-EXPORT_REQUEST = PREFIX + "export-request/1"
+INVENTORY = PREFIX + "inventory/2"
+EXPORT_REQUEST = PREFIX + "export-request/2"
 PROGRESS = PREFIX + "progress/1"
 RECEIPT = PREFIX + "receipt/1"
 PLAN = PREFIX + "plan/1"
@@ -197,7 +197,7 @@ def _source(value, where):
 
 def _inventory(document):
     _object(document, "$", ("schema", "inventory_id", "source", "policy_revision",
-                            "categories", "credential_stores"))
+                            "categories", "credential_stores", "mounts"))
     _uuid(document["inventory_id"], "$.inventory_id")
     _source(document["source"], "$.source")
     _label(document["policy_revision"], "$.policy_revision")
@@ -218,8 +218,32 @@ def _inventory(document):
         _boolean(value["adapter_available"], f"{where}.adapter_available")
         return value["id"]
 
+    def share_store(value, where):
+        _object(value, where, ("id", "category"))
+        _label(value["id"], f"{where}.id")
+        _enum(value["category"], f"{where}.category", STORE_CATEGORIES)
+        return value["id"]
+
+    def mount(value, where):
+        # A shared folder: contents are counted only when measured, and the
+        # credential stores found inside it are offered as their own choices.
+        measured = value.get("measured") if isinstance(value, dict) else None
+        _object(value, where, ("id", "linked", "measured")
+                + (("files", "bytes", "share_stores") if measured is True else ()))
+        _label(value["id"], f"{where}.id")
+        _boolean(value["linked"], f"{where}.linked")
+        _boolean(measured, f"{where}.measured")
+        if measured:
+            _integer(value["files"], f"{where}.files")
+            _integer(value["bytes"], f"{where}.bytes")
+            found = _list(value["share_stores"], f"{where}.share_stores", share_store)
+            if len(set(found)) != len(found):
+                _fail("duplicate_item", f"{where}.share_stores")
+        return value["id"]
+
     categories = _list(document["categories"], "$.categories", category, minimum=1)
     stores = _list(document["credential_stores"], "$.credential_stores", store)
+    _list(document["mounts"], "$.mounts", mount, maximum=32)
     if len(set(categories)) != len(categories):
         _fail("duplicate_item", "$.categories")
     if len(set(stores)) != len(stores):
@@ -231,9 +255,15 @@ def _export_request(document):
     _uuid(document["request_id"], "$.request_id")
     _uuid(document["inventory_id"], "$.inventory_id")
     _label(document["policy_revision"], "$.policy_revision")
-    selection = _object(document["selection"], "$.selection", ("categories", "credential_stores"))
+    selection = _object(document["selection"], "$.selection",
+                        ("categories", "credential_stores", "mounts", "share_stores"))
     _list(selection["categories"], "$.selection.categories", _label, minimum=1)
     _list(selection["credential_stores"], "$.selection.credential_stores", _label)
+    mounts = _list(selection["mounts"], "$.selection.mounts", _label, maximum=32)
+    share_stores = _list(selection["share_stores"], "$.selection.share_stores", _label)
+    if share_stores and not mounts:
+        # Stores inside a share can only come along with that share.
+        _fail("inconsistent_fields", "$.selection.share_stores")
 
 
 def _receipt(document):

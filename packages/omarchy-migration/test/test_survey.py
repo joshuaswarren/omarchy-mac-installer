@@ -158,6 +158,29 @@ class SurveyTests(unittest.TestCase):
         lost = {item["path"]: item["lost"] for item in result.outcomes["metadata-not-preserved"]["examples"]}
         self.assertEqual(lost["Documents/disk.img"], "sparse")
 
+    def test_measured_share_counts_files_and_names_stores_without_entering_them(self):
+        share = self.root / "mac-share"
+        for name, data in {"Projects/plan.md": b"plan\n", "photo.jpg": b"jpg", ".ssh/id_ed25519": b"FAKE",
+                           "Library/Keychains/login.keychain-db": b"FAKE"}.items():
+            path = share / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        scanned = os.scandir
+        held = [share / ".ssh", share / "Library/Keychains"]
+
+        def guarded(value):
+            path = Path(f"/proc/self/fd/{value}").resolve() if isinstance(value, int) else Path(value)
+            self.assertFalse(any(path == root or path.is_relative_to(root) for root in held), str(path))
+            return scanned(value)
+
+        result = self.run_survey()
+        with patch.object(survey.os, "scandir", side_effect=guarded):
+            result.measure_share(self.policy.mounts[0], str(share))
+        document = survey.inventory(result, self.home, "4.0.4", uid=1000)
+        mount = document["mounts"][0]
+        self.assertEqual((mount["linked"], mount["measured"], mount["files"]), (True, True, 2))
+        self.assertEqual([store["id"] for store in mount["share_stores"]], ["share-ssh", "share-macos-keychains"])
+
     def test_refuses_a_home_owned_by_someone_else_and_bounds_entries(self):
         with patch.object(survey.os, "geteuid", return_value=os.geteuid() + 1):
             with self.assertRaisesRegex(survey.SurveyError, "another account"):

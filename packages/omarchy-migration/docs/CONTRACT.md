@@ -9,8 +9,8 @@ Every document is a UTF-8 JSON object whose `schema` names exactly one document 
 | Schema | Visibility | Producer → consumer | Purpose |
 | --- | --- | --- | --- |
 | `omarchy-migration/capabilities/1` | public | module → app | Module version, operations, documents, bundle formats, policy revisions and credential adapters |
-| `omarchy-migration/inventory/1` | public | source module → Try → installer | Source identity and per-category counts for review; no paths |
-| `omarchy-migration/export-request/1` | public | app → source module | The user's selection, bound to one inventory and policy revision |
+| `omarchy-migration/inventory/2` | public | source module → Try → installer | Source identity and per-category counts for review; no paths |
+| `omarchy-migration/export-request/2` | public | app → source module | The user's selection, bound to one inventory and policy revision |
 | `omarchy-migration/progress/1` | public | source module → app | One event per line on stdout |
 | `omarchy-migration/receipt/1` | public | source module → installer → staging | Ciphertext identity and size estimates; the only document that travels with the bundle |
 | `omarchy-migration/plan/1` | public | native module → installer UI | Reviewable summary of an import plan |
@@ -33,9 +33,9 @@ Private documents never cross an app boundary in plaintext: the bundle manifest,
 
 **capabilities** lists `module {name: "omarchy-migration", version}`, the supported `operations` (subset of inventory, export, plan, apply, report), the `documents` schemas it reads or writes (including itself), `bundle_formats` (`age-v1-scrypt`), the `policy_revisions` it carries, and `adapters`. An adapter is `{id, category, available}`; an unavailable adapter must give a `reason` code and an available one must not. Unsupported stores are advertised as unavailable instead of falling through to raw copying.
 
-**inventory** binds `inventory_id` to `source {provider, architecture, omarchy_version, account_uid}` and a `policy_revision`. `categories` give `{id, files, bytes, default_selected}`; `credential_stores` give `{id, category, present, adapter_available}`. Stores are never selected by default.
+**inventory** binds `inventory_id` to `source {provider, architecture, omarchy_version, account_uid}` and a `policy_revision`. `categories` give `{id, files, bytes, default_selected}`; `credential_stores` give `{id, category, present, adapter_available}`. Stores are never selected by default. `mounts` lists each shared folder: `{id, linked, measured}`, plus `files`, `bytes` and the `share_stores` found inside it (`{id, category}`) when it was measured. A UI offers the share as its own choice and each store inside it as a further, unticked choice.
 
-**export-request** binds `request_id` to `inventory_id` and `policy_revision`, and selects at least one category plus zero or more credential stores by id. The transfer passphrase reaches the exporter through a terminal or pipe, never in this document, argv, logs or staged files.
+**export-request** binds `request_id` to `inventory_id` and `policy_revision`, and selects at least one category, zero or more credential stores, shared folders (`mounts`) and stores inside them (`share_stores`) by id. Share stores without a selected share are rejected. The transfer passphrase reaches the exporter through a terminal or pipe, never in this document, argv, logs or staged files.
 
 **progress** has `request_id`, `sequence` (from 1 per invocation) and `phase`: preparing, capturing, finalizing, complete, cancelled or failed. `complete` adds `receipt` (whose `request_id` must match) and `reused`; `failed` adds an `error` code. `request_id` is null only on `failed` when the request itself could not be parsed. A reused completed job may emit only `complete`.
 

@@ -157,7 +157,8 @@ class ReviewTests(unittest.TestCase):
         files, links = fixture.examples(policy)
         self.request = {"schema": contract.EXPORT_REQUEST, "request_id": str(uuid.uuid4()),
                         "inventory_id": fixture.inventory_id(policy, files, links), "policy_revision": policy["revision"],
-                        "selection": {"categories": ["files-and-projects", "configuration"], "credential_stores": []}}
+                        "selection": {"categories": ["files-and-projects", "configuration"], "credential_stores": [],
+                                      "mounts": [], "share_stores": []}}
         self.export = self.root / "export"
         self.receipt = fixture.export_fixture(self.request, self.export, self.age, lambda *_a, **_k: None, lambda: False)
         self.target, self.job = self.root / "target", self.root / "job"

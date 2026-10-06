@@ -33,7 +33,8 @@ def export_request(**selection):
     files, links = fixture.examples(policy)
     return {"schema": contract.EXPORT_REQUEST, "request_id": str(uuid.uuid4()),
             "inventory_id": fixture.inventory_id(policy, files, links), "policy_revision": policy["revision"],
-            "selection": {"categories": ["files-and-projects", "configuration"], "credential_stores": [], **selection}}
+            "selection": {"categories": ["files-and-projects", "configuration"], "credential_stores": [],
+                          "mounts": [], "share_stores": [], **selection}}
 
 
 class RequestTests(unittest.TestCase):
@@ -75,6 +76,9 @@ class RequestTests(unittest.TestCase):
         categories = {item["id"]: item for item in inventory["categories"]}
         self.assertEqual((categories["configuration"]["files"], categories["files-and-projects"]["files"]), (5, 2))
         self.assertEqual((categories["caches"]["files"], categories["caches"]["default_selected"]), (0, False))
+        share = inventory["mounts"][0]
+        self.assertEqual((share["id"], share["linked"], share["measured"], share["files"]), ("mac-share", True, True, 2))
+        self.assertEqual(share["share_stores"], [{"id": "share-ssh", "category": "credentials"}])
         stores = {item["id"]: item for item in inventory["credential_stores"]}
         self.assertEqual((stores["ssh"]["present"], stores["ssh"]["adapter_available"]), (True, True))
         self.assertEqual((stores["chromium"]["present"], stores["chromium"]["adapter_available"]), (False, False))
@@ -89,7 +93,10 @@ class RequestTests(unittest.TestCase):
                 (export_request(categories=["photos"]), "unknown_category"),
                 (export_request(credential_stores=["keychain"]), "unknown_credential_store"),
                 (export_request(credential_stores=["chromium"]), "credential_store_unavailable"),
-                (export_request(categories=["files-and-projects"], credential_stores=["ssh"]), "credential_store_outside_selection")):
+                (export_request(categories=["files-and-projects"], credential_stores=["ssh"]), "credential_store_outside_selection"),
+                (export_request(mounts=["dropbox"]), "unknown_mount"),
+                (export_request(mounts=["mac-share"], share_stores=["share-passwords"]), "unknown_share_store"),
+                (export_request(categories=["configuration"], mounts=["mac-share"]), "mount_outside_selection")):
             with self.subTest(error=error), self.assertRaises(fixture.FixtureError) as caught:
                 contract.validate(request)
                 fixture.check_request(request, policy)
@@ -182,6 +189,19 @@ class ExportFixtureTests(unittest.TestCase):
         files, _ = self.decoded_files()
         files = {path for path in files if not path.startswith(fixture.collection.ORIGINALS_ROOT + "/")}
         self.assertEqual(files, EXPORTED_FILES | {".ssh/id_example", ".config/BraveSoftware/Brave-Origin/Default/example"})
+
+    def test_selected_share_arrives_with_its_stores_only_when_ticked(self):
+        self.request = export_request(mounts=["mac-share"])
+        self.request_path.write_text(json.dumps(self.request))
+        self.assertEqual(self.execute()[0], 0)
+        files, _ = self.decoded_files()
+        self.assertTrue({"Work/Projects/plan.md", "Work/photo.jpg"} <= files)
+        self.assertNotIn("Work/.ssh/id_ed25519", files)
+        self.output, self.request = self.root / "job-with-key", export_request(mounts=["mac-share"], share_stores=["share-ssh"])
+        self.request_path.write_text(json.dumps(self.request))
+        self.assertEqual(self.execute()[0], 0)
+        files, _ = self.decoded_files()
+        self.assertIn("Work/.ssh/id_ed25519", files)
 
     def test_category_selection_limits_the_export(self):
         self.request = export_request(categories=["files-and-projects"])

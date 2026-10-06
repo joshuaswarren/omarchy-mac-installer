@@ -17,8 +17,8 @@
   ],
   "documents": [
     "omarchy-migration/capabilities/1",
-    "omarchy-migration/inventory/1",
-    "omarchy-migration/export-request/1",
+    "omarchy-migration/inventory/2",
+    "omarchy-migration/export-request/2",
     "omarchy-migration/progress/1",
     "omarchy-migration/receipt/1",
     "omarchy-migration/plan/1",

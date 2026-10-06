@@ -74,6 +74,20 @@ def examples(policy):
     return files, links
 
 
+# Contents of the synthetic Mac shared folder the Work link points into.
+SHARE_FILES = {
+    "Projects/plan.md": b"SYNTHETIC shared plan\n",
+    "photo.jpg": b"\xff\xd8 SYNTHETIC photo",
+    ".ssh/id_ed25519": b"FAKE-MAC-SSH-KEY\n",
+}
+SHARE_MOUNT = "mac-share"
+
+
+def share_links(links):
+    """Home link names that point at the shared folder's root."""
+    return [name for name, target in links.items() if target.rstrip("/") == "/mnt/mac"]
+
+
 def materialize(directory, files, links):
     for name, content in files.items():
         path = directory / name
@@ -87,7 +101,8 @@ def materialize(directory, files, links):
 def inventory_id(policy, files, links):
     digest = hashlib.sha256(json.dumps(
         {"revision": policy["revision"], "files": {name: hashlib.sha256(data).hexdigest() for name, data in files.items()},
-         "links": links}, sort_keys=True).encode()).hexdigest()
+         "links": links, "share": {name: hashlib.sha256(data).hexdigest() for name, data in SHARE_FILES.items()}},
+        sort_keys=True).encode()).hexdigest()
     return str(uuid.uuid5(INVENTORY_NAMESPACE, digest))
 
 
@@ -118,28 +133,44 @@ def capabilities_document(policy):
     return document
 
 
-def collection_request(request_id, files, links, categories, adapters):
+def collection_request(request_id, files, links, categories, adapters, mounts=(), share_stores=()):
     return {"schema": collection.REQUEST_SCHEMA, "request_id": request_id,
-            "selection": roots(files, links, categories), "selected_adapters": sorted(adapters), "selected_mounts": [],
-            "selected_share_stores": []}
+            "selection": roots(files, links, categories), "selected_adapters": sorted(adapters),
+            "selected_mounts": sorted(mounts), "selected_share_stores": sorted(share_stores)}
+
+
+def materialize_all(temporary, files, links):
+    """Create the synthetic home, its shared folder and a snapshot parent."""
+    home, share, parent = Path(temporary) / "home", Path(temporary) / "share", Path(temporary) / "snapshots"
+    for directory in (home, share, parent):
+        directory.mkdir(mode=0o700)
+    materialize(home, files, links)
+    materialize(share, SHARE_FILES, {})
+    return home, share, parent
 
 
 def inventory_document(policy):
     files, links = examples(policy)
     counts = {name: {"files": 0, "bytes": 0} for name in CATEGORIES}
+    shared = {"files": 0, "bytes": 0}
+    linked = share_links(links)
     with tempfile.TemporaryDirectory(prefix="migration-fixture-inventory-") as temporary:
-        home, parent = Path(temporary) / "home", Path(temporary) / "snapshots"
-        home.mkdir(mode=0o700)
-        parent.mkdir(mode=0o700)
-        materialize(home, files, links)
-        request = collection_request(str(uuid.uuid4()), files, links, CATEGORIES, ())
+        home, share, parent = materialize_all(temporary, files, links)
+        # Measure the share too, without selecting any store inside it.
+        request = collection_request(str(uuid.uuid4()), files, links, CATEGORIES, (), mounts=(SHARE_MOUNT,))
         with collection.collect_fixture(home, request, policy, supported_adapters=SUPPORTED_ADAPTERS,
-                                        snapshot_parent=parent) as snapshot:
+                                        snapshot_parent=parent, share_roots={SHARE_MOUNT: str(share)}) as snapshot:
             for entry in snapshot.manifest["entries"]:
-                # Inventory counts the user's files, not migration-owned copies.
-                if probe.entry_kind(entry) == "file" and not entry["path"].startswith(collection.ORIGINALS_ROOT + "/"):
+                if probe.entry_kind(entry) != "file" or entry["path"].startswith(collection.ORIGINALS_ROOT + "/"):
+                    continue  # Inventory counts the user's files, not migration-owned copies.
+                if any(entry["path"].startswith(name + "/") for name in linked):
+                    shared["files"] += 1
+                    shared["bytes"] += entry["bytes"]
+                else:
                     counts[category(entry["path"])]["files"] += 1
                     counts[category(entry["path"])]["bytes"] += entry["bytes"]
+            found = sorted({item["store"] for item in snapshot.report["entries"]
+                            if item["outcome"] == "held-out" and item["mount"] == SHARE_MOUNT})
         present = {store["id"] for store in policy["credential_stores"]
                    if any((home / root).exists() for root in store["roots"])}
     document = {
@@ -153,6 +184,9 @@ def inventory_document(policy):
         "credential_stores": [{"id": store["id"], "category": store["category"], "present": store["id"] in present,
                                "adapter_available": store["adapter"] in SUPPORTED_ADAPTERS}
                               for store in policy["credential_stores"]],
+        "mounts": [{"id": SHARE_MOUNT, "linked": bool(linked), "measured": True, **shared,
+                    "share_stores": [{"id": store["id"], "category": store["category"]}
+                                     for store in policy["share_stores"] if store["id"] in found]}],
     }
     contract.validate(document)
     return document
@@ -178,6 +212,13 @@ def check_request(request, policy):
         # A store is collected only inside a selected category's roots.
         if any(category(root) not in selection["categories"] for root in stores[name]["roots"]):
             raise FixtureError("credential_store_outside_selection")
+    if not set(selection["mounts"]) <= {mount["id"] for mount in policy["mounts"]}:
+        raise FixtureError("unknown_mount")
+    if not set(selection["share_stores"]) <= {store["id"] for store in policy["share_stores"]}:
+        raise FixtureError("unknown_share_store")
+    if selection["mounts"] and any(category(name) not in selection["categories"] for name in share_links(links)):
+        # The share is copied in place of its home link, so the link's category must be selected.
+        raise FixtureError("mount_outside_selection")
     return files, links, adapters
 
 
@@ -270,14 +311,13 @@ def export_fixture(request, directory, age, emit, cancelled, pause=0):
         time.sleep(max(0, min(0.05, deadline - time.monotonic())))
     check_cancelled()
     with tempfile.TemporaryDirectory(prefix="migration-fixture-source-") as temporary:
-        home, parent = Path(temporary) / "home", Path(temporary) / "snapshots"
-        home.mkdir(mode=0o700)
-        parent.mkdir(mode=0o700)
-        materialize(home, files, links)
+        home, share, parent = materialize_all(temporary, files, links)
         selection = collection_request(request["request_id"], files, links,
-                                       request["selection"]["categories"], adapters)
+                                       request["selection"]["categories"], adapters,
+                                       mounts=request["selection"]["mounts"],
+                                       share_stores=request["selection"]["share_stores"])
         with collection.collect_fixture(home, selection, policy, supported_adapters=SUPPORTED_ADAPTERS,
-                                        snapshot_parent=parent) as snapshot:
+                                        snapshot_parent=parent, share_roots={SHARE_MOUNT: str(share)}) as snapshot:
             manifest = snapshot.manifest
             emit("capturing")
 

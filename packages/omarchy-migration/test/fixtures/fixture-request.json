@@ -1,13 +1,15 @@
 {
-  "schema": "omarchy-migration/export-request/1",
+  "schema": "omarchy-migration/export-request/2",
   "request_id": "780b82aa-3c95-4f88-8c64-859146068e8f",
-  "inventory_id": "44cfa997-6fe8-5cc6-9557-e3d4a23356a0",
+  "inventory_id": "6d1e7879-a73f-5f72-bdde-fb9fb2231ca7",
   "policy_revision": "try-omarchy/82927e9/3/fixture",
   "selection": {
     "categories": [
       "files-and-projects",
       "configuration"
     ],
-    "credential_stores": []
+    "credential_stores": [],
+    "mounts": [],
+    "share_stores": []
   }
 }

@@ -552,6 +552,50 @@
       ],
       "expect": "unsafe_path",
       "value": "../.ssh"
+    },
+    {
+      "name": "share stores without their share",
+      "base": "export-request",
+      "op": "set",
+      "path": [
+        "selection",
+        "mounts"
+      ],
+      "expect": "inconsistent_fields",
+      "value": []
+    },
+    {
+      "name": "measured share without counts",
+      "base": "inventory",
+      "op": "delete",
+      "path": [
+        "mounts",
+        0,
+        "files"
+      ],
+      "expect": "missing_field"
+    },
+    {
+      "name": "unmeasured share with counts",
+      "base": "inventory",
+      "op": "set",
+      "path": [
+        "mounts",
+        0,
+        "measured"
+      ],
+      "expect": "unknown_field",
+      "value": false
+    },
+    {
+      "name": "request without share fields",
+      "base": "export-request",
+      "op": "delete",
+      "path": [
+        "selection",
+        "share_stores"
+      ],
+      "expect": "missing_field"
     }
   ],
   "raw": [

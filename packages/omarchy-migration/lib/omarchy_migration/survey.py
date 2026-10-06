@@ -39,6 +39,8 @@ class Survey:
         self.counts = {name: Counter() for name in CATEGORIES}
         self.stores = {}
         self.outcomes = {}
+        self.linked_mounts = set()
+        self.shares = {}
         self.top_level = Counter()
 
     def note(self, outcome, path, **fields):
@@ -106,6 +108,8 @@ class Survey:
             mount = self.policy.mount(target)
             if mount:
                 self.note("share-link", path, mount=mount["id"])
+                if target.rstrip("/") == mount["path"].rstrip("/"):
+                    self.linked_mounts.add(mount["id"])
             else:
                 self.counts[kind]["links"] += 1
             return
@@ -150,6 +154,62 @@ class Survey:
             return
         self.note("unsupported", path, reason="special-file")
 
+    def measure_share(self, mount, root):
+        """Count a shared folder read-only; credential stores are noted by name, never entered."""
+        fd = os.open(os.path.realpath(root), DIRECTORY_FLAGS)
+        share = {"files": 0, "bytes": 0, "stores": set(), "mount": collection._mount(fd), "device": os.fstat(fd).st_dev}
+        try:
+            self._share_directory(fd, "", share, 0)
+        finally:
+            os.close(fd)
+        self.shares[mount["id"]] = share
+
+    def _share_directory(self, fd, prefix, share, depth):
+        try:
+            with os.scandir(fd) as listing:
+                names = sorted(entry.name for entry in listing)
+        except OSError:
+            return
+        for name in names:
+            path = f"{prefix}/{name}" if prefix else name
+            self.entries += 1
+            if self.entries > self.max_entries:
+                raise SurveyError(f"more than {self.max_entries} entries; survey stopped")
+            store = self.policy.share_store(path)
+            if store:
+                share["stores"].add(store["id"])
+                continue
+            try:
+                metadata = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(metadata.st_mode):
+                share["files"] += 1
+                share["bytes"] += metadata.st_size
+            elif stat.S_ISDIR(metadata.st_mode) and depth + 1 < MAX_DEPTH:
+                try:
+                    child = os.open(name, DIRECTORY_FLAGS, dir_fd=fd)
+                except OSError:
+                    continue
+                try:
+                    if os.fstat(child).st_dev == share["device"] and collection._mount(child) == share["mount"]:
+                        self._share_directory(child, path, share, depth + 1)
+                finally:
+                    os.close(child)
+
+    def mount_documents(self):
+        documents = []
+        for mount in self.policy.mounts:
+            document = {"id": mount["id"], "linked": mount["id"] in self.linked_mounts,
+                        "measured": mount["id"] in self.shares}
+            if document["measured"]:
+                share = self.shares[mount["id"]]
+                document.update(files=share["files"], bytes=share["bytes"],
+                                share_stores=[{"id": store["id"], "category": store["category"]}
+                                              for store in self.policy.share_stores if store["id"] in share["stores"]])
+            documents.append(document)
+        return documents
+
     def store_documents(self):
         documents = []
         for store in self.policy.stores:
@@ -189,6 +249,7 @@ def inventory(survey, home, version, uid=None):
         "categories": [{"id": name, "files": survey.counts[name]["files"], "bytes": survey.counts[name]["bytes"],
                         "default_selected": DEFAULT_SELECTED[name]} for name in CATEGORIES],
         "credential_stores": survey.store_documents(),
+        "mounts": survey.mount_documents(),
     }
     contract.validate(document)
     return document
@@ -209,6 +270,13 @@ def summary(survey, document):
         lines.append(f"  {item['id']:<20} {item['files']:>8} files  {size(item['bytes']):>11}  ({default})")
     present = [store["id"] for store in document["credential_stores"] if store["present"]]
     lines += ["", "Credential stores found (held back; none can be exported yet): " + (", ".join(present) or "none")]
+    for mount in document["mounts"]:
+        if mount["measured"]:
+            stores = ", ".join(store["id"] for store in mount["share_stores"]) or "none"
+            lines += ["", f"Shared folder {mount['id']}: {mount['files']} files, {size(mount['bytes'])}"
+                          f" (only if you select it); credential stores inside, offered separately: {stores}"]
+        elif mount["linked"]:
+            lines += ["", f"Shared folder {mount['id']} is linked from your home; add --measure-shares to size it"]
     labels = {
         "excluded": "Excluded by the Try policy",
         "transform": "Would be cleaned of Try additions (content not checked)",
@@ -241,11 +309,17 @@ def main(argv=None):
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--json", action="store_true", help="print the inventory/1 document instead of a summary")
     parser.add_argument("--omarchy-version", help="override the detected Omarchy version")
+    parser.add_argument("--measure-shares", action="store_true",
+                        help="also count linked shared folders (read-only; credential stores are not entered)")
     arguments = parser.parse_args(argv)
     policy = migration_policy.Policy(json.loads(POLICY_PATH.read_bytes()))
     survey = Survey(policy)
     try:
         survey.run(arguments.home)
+        if arguments.measure_shares:
+            for mount in policy.mounts:
+                if mount["id"] in survey.linked_mounts and os.path.isdir(mount["path"]):
+                    survey.measure_share(mount, mount["path"])
         document = inventory(survey, arguments.home, arguments.omarchy_version)
     except (SurveyError, contract.ContractError, OSError) as error:
         print(f"survey: {error}", file=sys.stderr)
