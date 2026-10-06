@@ -150,6 +150,14 @@ class SurveyTests(unittest.TestCase):
         self.assertEqual(result.top_level["Documents"], len(self.files["Documents/report.md"]))
         self.assertFalse(any(key.startswith(".cache") for key in result.top_level))
 
+    def test_metadata_losses_are_listed_without_opening_files(self):
+        sparse = self.home / "Documents/disk.img"
+        with sparse.open("wb") as output:
+            output.truncate(1024 * 1024)
+        result = self.run_survey()
+        lost = {item["path"]: item["lost"] for item in result.outcomes["metadata-not-preserved"]["examples"]}
+        self.assertEqual(lost["Documents/disk.img"], "sparse")
+
     def test_refuses_a_home_owned_by_someone_else_and_bounds_entries(self):
         with patch.object(survey.os, "geteuid", return_value=os.geteuid() + 1):
             with self.assertRaisesRegex(survey.SurveyError, "another account"):

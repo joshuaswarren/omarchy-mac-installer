@@ -256,6 +256,7 @@ class ProvenanceTests(unittest.TestCase):
         provenance = {
             "policy_revision": "try-omarchy/82927e9/3", "policy_sha256": "a" * 64, "request_sha256": "b" * 64,
             "originals": None,
+            "metadata": [{"archive": ".config/hypr/input.lua", "lost": ["extended-attributes", "sparse"]}],
             "collection": {"counts": {"included": 2, "transformed": 1, "held-out": 1, "excluded": 1,
                                       "unsupported": 0, "inert-link": 0},
                            "exceptions": [
@@ -298,6 +299,10 @@ class ProvenanceTests(unittest.TestCase):
                        {"provenance.collection.exceptions.0.mount": 7},
                        {"provenance.policy_revision": "Try-Omarchy/82927e9/1"},
                        {"provenance.originals": "../elsewhere"}, {"provenance.originals": ""},
+                       {"provenance.metadata.0.archive": "not/in/the/bundle"},
+                       {"provenance.metadata.0.lost": ["sparse", "extended-attributes"]},
+                       {"provenance.metadata.0.lost": ["colour"]}, {"provenance.metadata.0.lost": []},
+                       {"provenance.metadata": KeyError},
                        {"provenance.originals": KeyError},
                        {"provenance.collection.exceptions.1.store": "SSH"},
                        {"provenance.collection.exceptions.2.reason": "Display_Configuration"},

@@ -31,6 +31,8 @@ from . import contract
 SCHEMA = "omarchy-migration-probe/1"
 TREE_SCHEMA = "omarchy-migration/bundle/2"
 PROVENANCE_OUTCOMES = ("included", "transformed", "held-out", "excluded", "unsupported", "inert-link")
+# Metadata an included entry has that the bundle cannot carry.
+METADATA_LOSSES = ("acl", "extended-attributes", "sparse", "special-permission-bits")
 MAX_MANIFEST = contract.MAX_MANIFEST
 MAX_ENTRIES = contract.MAX_ENTRIES
 MAX_TOTAL = contract.MAX_EXPANDED
@@ -205,7 +207,7 @@ def _relative(value):
 def validate_provenance(provenance):
     """Authenticated export provenance: policy, request and collection exceptions."""
     if not isinstance(provenance, dict) or set(provenance) != {"policy_revision", "policy_sha256", "request_sha256",
-                                                               "originals", "collection"}:
+                                                               "originals", "collection", "metadata"}:
         raise Rejected("provenance fields")
     if provenance["originals"] is not None and (not _relative(provenance["originals"]) or provenance["originals"] == ""):
         raise Rejected("provenance originals root")
@@ -232,6 +234,16 @@ def validate_provenance(provenance):
                 or not _reason(item["reason"])
                 or any(item[key] is not None and not _label(item[key]) for key in ("store", "rule", "mount"))):
             raise Rejected("provenance exception")
+    metadata = provenance["metadata"]
+    if not isinstance(metadata, list) or len(metadata) > MAX_ENTRIES:
+        raise Rejected("provenance metadata")
+    for item in metadata:
+        if (not isinstance(item, dict) or set(item) != {"archive", "lost"} or not _relative(item["archive"])
+                or item["archive"] == "" or not isinstance(item["lost"], list) or not item["lost"]
+                or item["lost"] != sorted(set(item["lost"])) or not set(item["lost"]) <= set(METADATA_LOSSES)):
+            raise Rejected("provenance metadata")
+    if [item["archive"] for item in metadata] != sorted({item["archive"] for item in metadata}):
+        raise Rejected("provenance metadata order")
     tally = {outcome: 0 for outcome in PROVENANCE_OUTCOMES}
     for item in exceptions:
         tally[item["outcome"]] += 1
@@ -246,6 +258,8 @@ def _provenance_matches_entries(provenance, entries):
     if counts["included"] + counts["transformed"] + counts["inert-link"] != len(entries):
         raise Rejected("provenance counts disagree with entries")
     paths = {entry["path"] for entry in entries}
+    if any(item["archive"] not in paths for item in provenance["metadata"]):
+        raise Rejected("provenance metadata names a missing entry")
     for item in exceptions:
         # Withheld items never enter the bundle; changed or inert ones always do.
         if (item["archive"] in paths) != (item["outcome"] in ("transformed", "inert-link")):

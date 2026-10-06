@@ -123,6 +123,8 @@ class Survey:
                     self.note("other-filesystem", path)
                     return
                 self.counts[kind]["directories"] += 1
+                if lost := collection.metadata_losses(fd, metadata):
+                    self.note("metadata-not-preserved", path, lost=" ".join(lost))
                 self.directory(fd, path, depth + 1)
             finally:
                 os.close(fd)
@@ -136,6 +138,9 @@ class Survey:
                 return
             self.counts[kind]["files"] += 1
             self.counts[kind]["bytes"] += metadata.st_size
+            # Attribute names only, through the parent descriptor; the file is never opened.
+            if lost := collection.metadata_losses(f"/proc/self/fd/{parent}/{name}", metadata):
+                self.note("metadata-not-preserved", path, lost=" ".join(lost))
             if DEFAULT_SELECTED[kind]:
                 # Unselected categories (caches) are shown only as a total.
                 self.top_level[size_key(path)] += metadata.st_size
@@ -210,6 +215,7 @@ def summary(survey, document):
         "share-link": "Links into the Mac shared folder (not followed)",
         "other-filesystem": "Other filesystems (not entered)",
         "unsupported": "Unsupported (withheld)",
+        "metadata-not-preserved": "Copied without some metadata (extended attributes, ACLs, sparseness, setuid bits)",
         "unreadable": "Unreadable (skipped)",
         "changed-during-survey": "Changed during the survey",
     }

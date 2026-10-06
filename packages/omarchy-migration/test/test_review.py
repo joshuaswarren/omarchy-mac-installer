@@ -87,6 +87,13 @@ class DocumentTests(unittest.TestCase):
         with self.assertRaisesRegex(review.ReviewError, "empty_bundle"):
             review.plan_document(self.bundle, (), self.receipt, 1000, {"job": [1, 2]})
 
+    def test_metadata_losses_are_reported_on_their_category(self):
+        self.bundle._manifest["provenance"]["metadata"] = [{"archive": ".config/app/settings", "lost": ["acl"]}]
+        report = self.report(restore.Action(".config/app/settings", "restored", "new entry published"),
+                             restore.Action("Documents/a", "restored", "new entry published"))
+        reasons = {item["id"]: item["reasons"] for item in report["categories"]}
+        self.assertEqual(reasons, {"configuration": ["metadata_not_preserved"], "files-and-projects": []})
+
     def test_bundle_without_provenance_cannot_be_planned(self):
         del self.bundle._manifest["provenance"]
         with self.assertRaisesRegex(review.ReviewError, "provenance_missing"):

@@ -508,6 +508,37 @@ class CollectionTests(unittest.TestCase):
                 self.assertIn(name, snapshot.paths)
             self.assertEqual(self.entry(snapshot, "readme-link")["mount"], None)
 
+    def test_metadata_the_bundle_cannot_carry_is_recorded(self):
+        tagged = self.write("Documents/tagged.txt", b"tagged\n")
+        try:
+            os.setxattr(tagged, "user.origin", b"mac")
+        except OSError:
+            self.skipTest("this filesystem has no user extended attributes")
+        sparse = self.source / "Documents/disk.img"
+        with sparse.open("wb") as output:
+            output.truncate(1024 * 1024)
+        sparse.chmod(0o600)
+        setuid = self.write("Projects/demo/tool", b"#!/bin/bash\n", 0o4750)
+        self.assertTrue(setuid.stat().st_mode & 0o4000)
+        listed = os.listxattr
+
+        def with_acl(target, *args, **kwargs):
+            names = listed(target, *args, **kwargs)
+            if isinstance(target, int) and os.fstat(target).st_ino == (self.source / ".config/theme/selected").stat().st_ino:
+                return [*names, "system.posix_acl_access"]
+            return names
+
+        with patch.object(collection.os, "listxattr", side_effect=with_acl), self.capture() as snapshot:
+            lost = {item["archive"]: item["lost"] for item in snapshot.manifest["provenance"]["metadata"]}
+            self.assertEqual(lost["Documents/tagged.txt"], ["extended-attributes"])
+            self.assertEqual(lost["Documents/disk.img"], ["sparse"])
+            self.assertEqual(lost["Projects/demo/tool"], ["special-permission-bits"])
+            self.assertEqual(lost[".config/theme/selected"], ["acl"])
+            self.assertNotIn(".config/unknown/settings", lost)
+            # The content still arrives; only the listed metadata does not.
+            self.assertEqual(snapshot.paths["Documents/disk.img"].stat().st_size, 1024 * 1024)
+            probe.validate_manifest(snapshot.manifest)
+
     def test_preserve_rules_are_traceable_without_changing_content(self):
         self.write(".local/state/toggles/hypr/flags.lua", b"blur = false\n")
         with self.capture() as snapshot:

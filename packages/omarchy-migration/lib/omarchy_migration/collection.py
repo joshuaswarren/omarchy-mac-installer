@@ -122,6 +122,28 @@ def _contracts(request, document, supported):
     return loaded
 
 
+def metadata_losses(target, metadata):
+    """Kinds of metadata on an entry that the bundle will not carry.
+
+    `target` is an open descriptor or a path read without following links.
+    Only attribute names are listed; no contents are read.
+    """
+    losses = set()
+    try:
+        names = os.listxattr(target) if isinstance(target, int) else os.listxattr(target, follow_symlinks=False)
+    except OSError:
+        names = []  # Filesystems without extended attributes have none to lose.
+    if any(name in ("system.posix_acl_access", "system.posix_acl_default") for name in names):
+        losses.add("acl")
+    if any(name not in ("system.posix_acl_access", "system.posix_acl_default") for name in names):
+        losses.add("extended-attributes")
+    if stat.S_ISREG(metadata.st_mode) and metadata.st_size and metadata.st_blocks * 512 < metadata.st_size:
+        losses.add("sparse")
+    if metadata.st_mode & 0o7000:
+        losses.add("special-permission-bits")
+    return sorted(losses)
+
+
 def _metadata(value):
     return tuple(getattr(value, key) for key in (
         "st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size",
@@ -147,6 +169,7 @@ class _Snapshot:
         self.share_roots = share_roots
         self.budget = budget
         self.footprint = 0  # whole-block estimate of what the snapshot occupies
+        self.losses = {}  # archive path -> metadata the bundle cannot carry
         # Set only while walking a selected shared folder's contents.
         self.share = None
         self.materialized = set()
@@ -303,6 +326,8 @@ class _Snapshot:
                 # Check before registering, so a skipped directory leaves nothing behind.
                 self._guard(fd)
                 destination.mkdir(mode=0o700)
+                if lost := metadata_losses(fd, before):
+                    self.losses[archive] = lost
                 self.paths[archive], self.metadata[archive] = destination, before
                 self._report(source, archive, "included", "directory", rule=rule_id)
                 self._directory(fd, source, archive, before)
@@ -325,6 +350,7 @@ class _Snapshot:
                 self._guard(fd)
                 if _metadata(os.fstat(fd)) != _metadata(before):
                     raise probe.Rejected("source file replaced before capture")
+                lost = metadata_losses(fd, before)
                 count = 0
                 output_fd = None if transform else os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with contextlib.ExitStack() as stack:
@@ -364,6 +390,8 @@ class _Snapshot:
             self.total += count
             self.footprint += probe.footprint(count)
             self.paths[archive], self.metadata[archive] = destination, before
+            if lost:
+                self.losses[archive] = lost
             self._report(source, archive, outcome, reason, rule=rule_id)
         elif stat.S_ISLNK(before.st_mode):
             target = os.readlink(name, dir_fd=parent)
@@ -542,6 +570,9 @@ class _Snapshot:
             "policy_sha256": self.report["policy_sha256"],
             "request_sha256": self.report["request_sha256"],
             "originals": self.originals_root(),
+            # Only entries that made it into the bundle; skipped ones left with their losses.
+            "metadata": [{"archive": archive, "lost": self.losses[archive]}
+                         for archive in sorted(self.losses) if archive in self.paths],
             "collection": {"counts": dict(self.report["counts"]),
                            "exceptions": [dict(item) for item in self.items if item["outcome"] != "included"]},
         }
