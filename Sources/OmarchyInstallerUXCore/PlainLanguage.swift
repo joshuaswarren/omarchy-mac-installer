@@ -618,6 +618,17 @@
               technicalDetail: technical
             )
           }
+          let startup = ClosedEngineHelperError.macOSStartupNotSet as NSError
+          if domain == startup.domain, code == startup.code {
+            return FailureDisplay(
+              headline: "macOS couldn’t be set as the startup disk",
+              plainDetail:
+                "Reinstall sets macOS as the startup disk before it erases the old Omarchy, and macOS didn’t confirm that change. Nothing was erased.",
+              technicalDetail: technical,
+              remedy:
+                "Choose macOS in System Settings → General → Startup Disk, then try again."
+            )
+          }
           return FailureDisplay(
             headline: "The installation service couldn’t complete the request",
             plainDetail:
