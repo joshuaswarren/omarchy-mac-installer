@@ -1033,12 +1033,19 @@ private final class RangeHTTPServer: @unchecked Sendable {
     let sent = drop ? body.prefix(body.count / 2) : body
     let send = { [weak self] in
       connection.send(
-        content: head + sent, contentContext: drop ? .finalMessage : .defaultMessage,
-        isComplete: true,
+        content: head + sent,
         completion: .contentProcessed { _ in
           guard let self else { return }
           self.lock.withLock { self.activeRequests -= 1 }
-          if !drop {
+          if drop {
+            // Close only after the client has read the half body, like a link
+            // that dies mid-transfer.
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(200)) {
+              connection.send(
+                content: nil, contentContext: .finalMessage, isComplete: true,
+                completion: .contentProcessed { _ in })
+            }
+          } else {
             self.receiveRequest(on: connection, buffer: Data())
           }
         })
