@@ -26,6 +26,11 @@
 
     public static let existingInstallHeadline = "Omarchy is already installed"
     public static let closeInstaller = "Close"
+    public static let reinstallOmarchy = "Reinstall Omarchy"
+    public static let reinstallDetail =
+      "Reinstall erases this Omarchy and everything on it, then installs the new one in the same space. macOS keeps its size, so nothing has to be resized. You review the exact plan before anything changes."
+    public static let removeOmarchyHint =
+      "To remove Omarchy and return its space to macOS instead, select Installation → Remove Omarchy from the menu bar."
 
     // MARK: Screen B — Plan
 
