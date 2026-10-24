@@ -14,8 +14,9 @@ SHASUM=/usr/bin/shasum
 KIT_VERSION="stage0-1"
 MINIMUM_MACOS="27.0.1"
 
-# Keys that identify one Mac or one owner. Their lines are removed.
-DROP_KEYS='"(IOPlatformSerialNumber|IOPlatformUUID|serial-number|system-serial-number|mlb-serial-number|unique-chip-id|ecid|local-mac-address|mac-address|wifi-mac-address|bluetooth-mac-address|ethernet-mac-address|IOMACAddress|boot-uuid|boot-manifest-hash|boot-objects-path|fm-account-identifier|device-uuid|provisioning-udid|hw-uuid)"'
+# Property names that identify one Mac or one owner, matched anywhere in the
+# name (mac-address-wifi0, dram-ecid-ch04, ...). Their lines are removed.
+DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path)[^"]*" *='
 DROP_TEXT='Serial Number|Hardware UUID|Provisioning UDID|Activation Lock|Serial number'
 
 scrub() {
@@ -83,7 +84,7 @@ digest=${digest%% *}
 cat <<EOF
 
 Done. Nothing was installed or changed. The file lists hardware and firmware
-facts. It leaves out the serial number, hardware UUID, chip ID and network
+facts. It leaves out the serial number, hardware UUID, unique chip ID, memory chip IDs and network
 addresses. It holds none of your files.
 
   File:    $out.zip

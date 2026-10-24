@@ -35,6 +35,13 @@ cat <<'TREE'
     "IOPlatformSerialNumber" = "C12345678"
     "local-mac-address" = <aabbccddeeff>
     "mac-text" = "aa:bb:cc:dd:ee:ff"
+    "mac-address-wifi0" = <112233445566>
+    "host-mac-address" = <665544332211>
+    "dram-ecid-ch04" = <0123456789abcdef>
+    "entangle-nonce" = <00112233>
+    "random-seed" = <deadbeef>
+    "IOMACAddress" = <aabbccddeeff>
+    "oslog-uuid" = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
     "gpu-core-count" = 80
 TREE
 EOF
@@ -83,12 +90,13 @@ dir=${dir%% *}
 [[ -s $dir/summary.txt && -s $dir/device-tree.txt && -s $dir/gpu.txt && -s $dir/hardware.txt ]] || fail "all four files are written"
 grep -q "model: Mac15,14" "$dir/summary.txt" || fail "summary names the model"
 for f in "$dir"/*.txt; do
-  if grep -q -i -E 'C12345678|serial-number|local-mac-address|aa:bb:cc|11111111-2222|Hardware UUID' "$f"; then
-    fail "identifying lines remain in $f"
+  if grep -q -i -E 'C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|aa:bb:cc|11111111-2222|Hardware UUID' "$f"; then
+    fail "identifying lines remain in $f: $(grep -i -E "C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|aa:bb:cc|11111111-2222|Hardware UUID" "$f")"
   fi
 done
 grep -q "xx:xx:xx:xx:xx:xx" "$dir/device-tree.txt" || fail "a network address inside another line is masked"
 grep -q "0E6C1493-224F-3E07-8402-67BE342429B4" "$dir/device-tree.txt" || fail "the firmware image uuid is kept"
+grep -q "oslog-uuid" "$dir/device-tree.txt" || fail "other uuid keys are kept"
 grep -q '"gpu-core-count" = 80' "$dir/gpu.txt" || fail "hardware facts are kept"
 [[ -s "$dir.zip" ]] || { zipfile=$(echo "$work"/home/Desktop/*.zip); [[ -s ${zipfile%% *} ]] || fail "the zip is written"; }
 grep -q "SHA-256:" "$work/out" || fail "the digest is printed"
