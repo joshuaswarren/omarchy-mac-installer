@@ -16,12 +16,12 @@ MINIMUM_MACOS="27.0.1"
 
 # Property names that identify one Mac or one owner, matched anywhere in the
 # name (mac-address-wifi0, dram-ecid-ch04, ...). Their lines are removed.
-DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path)[^"]*" *='
+DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path)[^"]*" *='
 DROP_TEXT='Serial Number|Hardware UUID|Provisioning UDID|Activation Lock|Serial number'
 
 scrub() {
-  /usr/bin/grep -v -i -E "$DROP_KEYS|$DROP_TEXT" |
-    /usr/bin/sed -E 's/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/xx:xx:xx:xx:xx:xx/g'
+  LC_ALL=C /usr/bin/grep -a -v -i -E "$DROP_KEYS|$DROP_TEXT" |
+    LC_ALL=C /usr/bin/sed -E 's/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/xx:xx:xx:xx:xx:xx/g'
 }
 
 # True when dotted version $1 is at least $2 (numeric parts; missing parts are 0).

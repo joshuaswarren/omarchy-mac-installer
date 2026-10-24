@@ -41,6 +41,8 @@ cat <<'TREE'
     "entangle-nonce" = <00112233>
     "random-seed" = <deadbeef>
     "unique-device-id" = <0102030405060708>
+    "die-id" = <0102030405060708>
+    "vuid" = "AAAAAAAA-0000-1111-2222-333333333333"
     "IOMACAddress" = <aabbccddeeff>
     "oslog-uuid" = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
     "gpu-core-count" = 80
@@ -91,8 +93,8 @@ dir=${dir%% *}
 [[ -s $dir/summary.txt && -s $dir/device-tree.txt && -s $dir/gpu.txt && -s $dir/hardware.txt ]] || fail "all four files are written"
 grep -q "model: Mac15,14" "$dir/summary.txt" || fail "summary names the model"
 for f in "$dir"/*.txt; do
-  if grep -q -i -E 'C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|unique-device-id|aa:bb:cc|11111111-2222|Hardware UUID' "$f"; then
-    fail "identifying lines remain in $f: $(grep -i -E "C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|unique-device-id|aa:bb:cc|11111111-2222|Hardware UUID" "$f")"
+  if grep -q -i -E 'C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|unique-device-id|die-id|vuid|aa:bb:cc|11111111-2222|Hardware UUID' "$f"; then
+    fail "identifying lines remain in $f: $(grep -i -E "C12345678|serial-number|local-mac-address|mac-address|IOMACAddress|ecid|nonce|random-seed|unique-device-id|die-id|vuid|aa:bb:cc|11111111-2222|Hardware UUID" "$f")"
   fi
 done
 grep -q "xx:xx:xx:xx:xx:xx" "$dir/device-tree.txt" || fail "a network address inside another line is masked"
