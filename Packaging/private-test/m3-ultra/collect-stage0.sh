@@ -17,10 +17,12 @@ MINIMUM_MACOS="27.0.1"
 # Property names that identify one Mac or one owner, matched anywhere in the
 # name (mac-address-wifi0, dram-ecid-ch04, ...). Their lines are removed.
 DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path)[^"]*" *='
+# The same names inside a dictionary value, which ioreg prints on one line as "name"=<value>.
+DROP_NESTED='"[^"]*(mac-?addr|ecid|serial-number|unique-chip-id|unique-device-id|udid|vuid|die-id)[^"]*"='
 DROP_TEXT='Serial Number|Hardware UUID|Provisioning UDID|Activation Lock|Serial number'
 
 scrub() {
-  LC_ALL=C /usr/bin/grep -a -v -i -E "$DROP_KEYS|$DROP_TEXT" |
+  LC_ALL=C /usr/bin/grep -a -v -i -E "$DROP_KEYS|$DROP_NESTED|$DROP_TEXT" |
     LC_ALL=C /usr/bin/sed -E 's/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/xx:xx:xx:xx:xx:xx/g'
 }
 
