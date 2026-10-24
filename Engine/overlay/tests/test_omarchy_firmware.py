@@ -63,9 +63,10 @@ UPSTREAM_IPSWS = [
           "j514map", "j516sap", "j516cap", "j516map"], "14.8.3"),
 ]
 IPSW_VERSIONS = patched_ipsws() + UPSTREAM_IPSWS
-CHIP_MIN_VER = {0x8103: "11.0", 0x8112: "12.4", 0x8122: "14.8.3", 0x8140: "26.6"}
+CHIP_MIN_VER = {0x8103: "11.0", 0x8112: "12.4", 0x8122: "14.8.3", 0x8140: "26.6",
+                0x6032: "27.0.1"}
 DEVICE_MIN = {"j313ap": "11.0", "j413ap": "12.4", "j613ap": "14.8.3",
-              "j615ap": "14.8.3", "j700ap": "26.6"}
+              "j615ap": "14.8.3", "j700ap": "26.6", "j575dap": "27.0.1"}
 TODAY = ["13.5", "14.8.3", "26.6"]
 ON_26_6_2 = dict(sys_firmware="mBoot-18000.161.10", macos_ver="26.6.2",
                  sfr_full_ver="25.7.83.0.0,0")
@@ -209,6 +210,27 @@ class FirmwareRequirementTests(unittest.TestCase):
         with self.assertRaises(FirmwareRequirementError) as raised:
             require(sysinfo, device, ["26.6.2"])
         self.assertEqual(str(raised.exception), "system firmware is older than macOS 26.6.2")
+
+    def test_an_m3_ultra_needs_the_27_0_1_system_firmware(self):
+        # Mac15,14 has no macOS 14 image; its only entry is 27.0.1 (26A434).
+        for firmware, macos, sfr in (
+            ("iBoot-11881.81.2", "15.3.2", "24.4.82.2.0,0"),
+            ("mBoot-18000.161.10", "26.6.2", "25.7.83.0.0,0"),
+            ("mBoot-20457.1.29", "27.0", "26.1.428.0.0,0"),
+        ):
+            sysinfo, device = mac("j575dap", 0x6032, sys_firmware=firmware,
+                                  macos_ver=macos, sfr_full_ver=sfr)
+            with self.assertRaises(FirmwareRequirementError) as raised:
+                require(sysinfo, device, ["27.0.1"])
+            self.assertEqual(str(raised.exception), "system firmware is older than macOS 27.0.1")
+
+    def test_an_m3_ultra_on_27_0_1_or_later_passes_and_gets_the_larger_stub(self):
+        sysinfo, device = mac("j575dap", 0x6032, sys_firmware="mBoot-20457.1.29",
+                              macos_ver="27.0.1", sfr_full_ver="26.1.434.0.0,0")
+        require(sysinfo, device, ["27.0.1"])
+        size = stub_size(IPSW_VERSIONS, CHIP_MIN_VER, sysinfo, device, metadata(["27.0.1"]),
+                         split_ver, default_size=STUB_SIZE, macos26_size=STUB_SIZE_MACOS26)
+        self.assertEqual(size, STUB_SIZE_MACOS26)
 
     def test_an_expert_only_entry_is_no_reason_to_update(self):
         expert = IPSW("26.6.2", "26.0", "mBoot-18000.161.10", "25.7.83.0.0,0", True,

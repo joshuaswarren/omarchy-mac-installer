@@ -75,6 +75,7 @@
       "apple,j475c": mac("Mac Studio (M2 Max, 2023)", "Mac Studio", "M2"),
       "apple,j475d": mac("Mac Studio (M2 Ultra, 2023)", "Mac Studio", "M2"),
       "apple,j180d": mac("Mac Pro (M2 Ultra, 2023)", "Mac Pro", "M2"),
+      "apple,j575d": mac("Mac Studio (M3 Ultra, 2025)", "Mac Studio", "M3"),
       "apple,j433": mac("iMac 24-inch (M3, 2023)", "iMac", "M3"),
       "apple,j434": mac("iMac 24-inch (M3, 2023)", "iMac", "M3"),
       "apple,j504": mac("MacBook Pro 14-inch (M3, 2023)", "MacBook Pro", "M3"),

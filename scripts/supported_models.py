@@ -69,9 +69,12 @@ def coverage_errors(identifiers: list[str]) -> list[str]:
             "every supported Mac must be enabled; missing "
             + ", ".join(missing)
         )
+    developer = developer_boards()
     for identifier in identifiers:
         if identifier in refused:
             errors.append(f"{identifier} is refused: {refused[identifier]}")
+        elif identifier in developer:
+            errors.append(f"{identifier} is a developer board: {developer[identifier]}")
         elif identifier not in supported:
             errors.append(
                 f"{identifier} is not in scripts/supported-models.json; "
