@@ -50,7 +50,7 @@ b = os.path.expanduser("~/code/probe-build-20261025")
 pins = {
     "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz": os.path.join(b, "assets", "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz"),
     "probe-installer_data.json": os.path.join(b, "assets", "probe-installer_data.json"),
-    "omarchy-probe-${board}-os-package.zip": os.path.join(b, "pkg", "omarchy-probe-${board}-os-package.zip"),
+    "omarchy-probe-%s-os-package.zip" % os.environ["board"]: os.path.join(b, "pkg", "omarchy-probe-%s-os-package.zip" % os.environ["board"]),
 }
 def sha(path):
     h = hashlib.sha256()
