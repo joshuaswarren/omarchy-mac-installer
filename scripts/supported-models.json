@@ -35,13 +35,14 @@
     "apple,j516s",
     "apple,j516c",
     "apple,j516m",
-    "apple,j575d",
     "apple,j700"
   ],
   "refused": {
     "apple,j614s": "MacBook Pro 14-inch (M4 Pro, 2024): M4 and later Macs are not supported"
   },
-  "developer": {},
+  "developer": {
+    "apple,j575d": "Developer bring-up only: the engine can inspect and plan the M3 Ultra Mac Studio, but no Omarchy image supports it yet"
+  },
   "untested": {
     "apple,j433": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
     "apple,j434": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
@@ -54,7 +55,6 @@
     "apple,j516s": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
     "apple,j516c": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
     "apple,j516m": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
-    "apple,j575d": "Untested: Omarchy Mac previews are not yet qualified on the M3 Ultra Mac Studio",
     "apple,j700": "Untested: MacBook Neo support is new; the testing team qualifies it on real hardware on edge"
   }
 }

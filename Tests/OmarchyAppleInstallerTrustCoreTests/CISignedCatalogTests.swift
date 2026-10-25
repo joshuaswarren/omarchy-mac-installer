@@ -24,7 +24,7 @@
         payload: documents.payload, signature: documents.signature,
         trustRoot: trustRoot, now: Date())
 
-      XCTAssertEqual(catalog.deviceIdentifiers.count, 36)
+      XCTAssertEqual(catalog.deviceIdentifiers.count, 35)
       // An M1, an M2, an M3 and the MacBook Neo (the last two marked untested,
       // a key the app ignores), all from the one image.
       for model in ["apple,j274", "apple,j413", "apple,j613", "apple,j700"] {
