@@ -99,6 +99,8 @@ def build(output: Path, stage1: bool) -> None:
         "stage2.bin": b"dummy-probe-m1n1-stage2" * 512,
         "BOOTAA64.EFI": b"dummy-efi-loader" * 512,
         "stage1.bin": dummy_stage1(),
+        "baseline-payload.zip": b"dummy-baseline-payload" * 512,
+        "baseline-installer_data.json": b"{}\n",
     }.items():
         paths[name] = bin_dir / name
         paths[name].write_bytes(data)
@@ -109,6 +111,8 @@ def build(output: Path, stage1: bool) -> None:
         "--output", str(output),
         "--device-class", DEVICE_CLASS,
         "--os-firmware", OS_FIRMWARE,
+        "--catalog-baseline-payload", str(paths["baseline-payload.zip"]),
+        "--catalog-baseline-metadata", str(paths["baseline-installer_data.json"]),
     ]
     if stage1:
         argv[1:1] = ["--stage1", str(paths["stage1.bin"])]
@@ -181,9 +185,19 @@ class ProbePackageTest(unittest.TestCase):
                 metadata["os_list"][0]["allowed_device_classes"], [DEVICE_CLASS]
             )
             inputs = json.loads((output / "catalog-inputs.json").read_text())
+            # The main group pins the baseline payload, only the developer
+            # group offers the probe: other Macs are never offered the probe.
+            self.assertEqual(inputs["payload_name"], "baseline-payload.zip")
+            self.assertEqual(
+                inputs["developer_models"][0]["payload_name"], self.PACKAGE
+            )
+            self.assertEqual(
+                inputs["developer_models"][0]["metadata_name"], probe.GROUP_METADATA
+            )
             self.assertEqual(
                 inputs["developer_models"][0]["device_identifiers"], ["apple,j575d"]
             )
+            self.assertTrue((output / probe.GROUP_METADATA).is_file())
 
     def test_probe_package_without_stage1_keeps_stub_boot_object(self):
         with tempfile.TemporaryDirectory() as tmp:

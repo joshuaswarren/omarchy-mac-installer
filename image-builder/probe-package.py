@@ -49,6 +49,9 @@ DEFAULT_IMAGE_MIB = 8
 EFI_SIZE = 524288000
 ESP_VOLUME_ID = "0x4f4d5801"
 ZIP_EPOCH = (2026, 1, 1, 0, 0, 0)
+# The developer group's own metadata name: distinct from the baseline
+# metadata the main group pins, so one assets dir holds both.
+GROUP_METADATA = "probe-installer_data.json"
 
 
 def digest(path: Path) -> str:
@@ -115,11 +118,20 @@ def build_catalog_inputs(args, package_name: str) -> dict:
     """Inputs for scripts/make-unsigned-catalog.py --developer.
 
     The probe payload rides in a developer group: the main group keeps every
-    supported Mac, the group takes the probe board with its own payload and
-    metadata. j575d must be in scripts/supported-models.json (supported or
-    developer) and the engine asset in the assets dir must match
-    Engine/source-lock.json before that command runs.
+    other supported Mac on the baseline release payload this build pins, the
+    group takes the probe board with its own payload and metadata.
+    make-unsigned-catalog refuses anything but exact coverage, and the
+    manifest (scripts/supported-models.json) must admit the board.
     """
+    if args.catalog_baseline_payload is None:
+        raise SystemExit(
+            "--catalog-baseline-payload is required: the main group must pin "
+            "the real release payload the other supported Macs get; the probe "
+            "payload must never be offered to them"
+        )
+    for path in (args.catalog_baseline_payload, args.catalog_baseline_metadata):
+        if not path.is_file() or path.is_symlink():
+            raise SystemExit(f"missing baseline artifact: {path}")
     lock = json.loads(SOURCE_LOCK.read_text())
     supported = json.loads(SUPPORTED_MODELS.read_text())["supported"]
     # The main group keeps every supported Mac the developer groups do not
@@ -134,8 +146,8 @@ def build_catalog_inputs(args, package_name: str) -> dict:
         capture_output=True, text=True,
     ).stdout.strip()
     inputs = {
-        "payload_name": package_name,
-        "metadata_name": "installer_data.json",
+        "payload_name": args.catalog_baseline_payload.name,
+        "metadata_name": args.catalog_baseline_metadata.name,
         "evidence_revision": f"probe-{args.device_identifier.removeprefix('apple,').removesuffix('ap')}-{datetime.now(timezone.utc).strftime('%Y.%m.%d')}",
         "asahi_installer_tag": lock["upstream_installer"]["tag"],
         "asahi_installer_revision": lock["upstream_installer"]["commit"],
@@ -150,7 +162,7 @@ def build_catalog_inputs(args, package_name: str) -> dict:
         "developer_models": [
             {
                 "payload_name": package_name,
-                "metadata_name": "probe-installer_data.json",
+                "metadata_name": GROUP_METADATA,
                 "device_identifiers": group_boards,
             }
         ],
@@ -269,6 +281,12 @@ def main() -> None:
     parser.add_argument("--downstream-revision", default=None,
                         help="downstream overlay source revision for the catalog inputs "
                              "(default: this checkout's HEAD)")
+    parser.add_argument("--catalog-baseline-payload", type=Path, default=None,
+                        help="release payload the main catalog group pins for the "
+                             "other supported Macs (required for catalog inputs)")
+    parser.add_argument("--catalog-baseline-metadata", type=Path,
+                        default=Path("installer_data.json"),
+                        help="the baseline payload's installer_data.json")
     args = parser.parse_args()
 
     if not args.package_name:
@@ -306,6 +324,11 @@ def main() -> None:
     metadata_path.write_text(json.dumps(metadata, indent=1) + "\n")
     # The engine refuses metadata writable by group or others.
     os.chmod(metadata_path, 0o644)
+    # The same document under the developer group's name, for the assets dir
+    # that also holds the baseline metadata.
+    group_metadata_path = output / GROUP_METADATA
+    group_metadata_path.write_text(metadata_path.read_text())
+    os.chmod(group_metadata_path, 0o644)
 
     inputs = build_catalog_inputs(args, args.package_name)
     (output / "catalog-inputs.json").write_text(json.dumps(inputs, indent=2) + "\n")
