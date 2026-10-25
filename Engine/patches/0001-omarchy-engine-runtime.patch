@@ -60,12 +60,14 @@ index 88dd2ab..b14de4c 100644
      0x6030: "14.8.3",   # T6030, M3 Pro
      0x6031: "14.8.3",   # T6031, M3 Max (16-core)
 +    0x6032: "27.0.1",   # T6032, M3 Ultra
+    0x8152: "27.0.1",   # T8152, M6
      0x6034: "14.8.3",   # T6034, M3 Max (14-core)
 +    0x8140: "26.6",     # T8140, A18 Pro
  }
  
  DEVICES = {
 +    "j575dap":  Device("27.0.1", False),  # Mac Studio (M3 Ultra, 2025)
+    "j873gap":  Device("27.0.1", False),  # Mac mini (M6, 2026)
 +    "j700ap":   Device("26.6", False),  # MacBook Neo (A18 Pro, 2026)
      "j274ap":   Device("11.0", False),  # Mac mini (M1, 2020)
      "j293ap":   Device("11.0", False),  # MacBook Pro (13-inch, M1, 2020)
@@ -81,7 +83,7 @@ index 88dd2ab..b14de4c 100644
 +         "mBoot-20457.1.29",
 +         "26.1.434.0.0,0",
 +         False,
-+         ["j575dap"],
++         ["j575dap", "j873gap"],
 +         "https://updates.cdn-apple.com/2026FallFCS/59241290-5d51-4ca8-9df4-31624b9a4eac/UniversalMac_27.0.1_26A434_Restore.ipsw"),
 +    IPSW("26.6",
 +         "26.0",
