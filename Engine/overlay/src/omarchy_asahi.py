@@ -393,20 +393,28 @@ echo "${BOLD}Done.${RST} Press Enter to restart into $os_name."
 read -r _
 reboot
 """
-
 # The startup_policy "picker" tail: after the boot loader is installed, the
 # startup disk goes back to the macOS it was, so a restart boots macOS and the
 # user reaches the installed system once through Apple's startup picker.
+# Every diskutil and bless answer is read from its plist form with plutil;
+# human output varies between releases and names devices, not mount paths.
 PICKER_BLOCK = """\\
 STARTUP_POLICY="picker"
 PRESTARTUP_VGID="##PRESTARTUP_VGID##"
 PRESTARTUP_VOLUME="##PRESTARTUP_VOLUME##"
 
+prestartup_field() {
+    plutil -extract "$1" raw -o - - 2>/dev/null
+}
+
+# The startup disk must name a volume of the pre-startup macOS group. A
+# sealed-root snapshot device resolves to the same group and is accepted;
+# a wrong group never passes, whatever its device.
 prestartup_is_startup() {
-    boot="$(bless --getBoot 2>/dev/null)" || return 1
+    boot="$(bless --getBoot --plist 2>/dev/null | prestartup_field 'Boot Volume')"
     [ -n "$boot" ] || return 1
-    diskutil info "$boot" 2>/dev/null | grep -Eiq "^ *APFS Volume Group: +$PRESTARTUP_VGID *\\$" && return 0
-    [ "$boot" = "$(diskutil info "$prestartup_mount" 2>/dev/null | sed -n 's/^ *Device Node: *//p')" ]
+    [ "$(diskutil info -plist "$boot" 2>/dev/null | prestartup_field APFSVolumeGroupID)" \\
+        = "$PRESTARTUP_VGID" ]
 }
 
 if [ -z "$PRESTARTUP_VGID" ] || [ -z "$PRESTARTUP_VOLUME" ]; then
@@ -419,9 +427,19 @@ if [ -z "$PRESTARTUP_VGID" ] || [ -z "$PRESTARTUP_VOLUME" ]; then
     exit 1
 fi
 printf "Pointing the startup disk back at macOS..."
-prestartup_mount="$(diskutil mount "$PRESTARTUP_VOLUME" 2>/dev/null | sed -e 's/^Volume .* on //' -e 's/ mounted$//')"
-blessed=no
+prestartup_mount="$(diskutil mount "$PRESTARTUP_VOLUME" >/dev/null 2>&1 \\
+    && diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
+prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
+prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
+prestartup_mounted=no
 if [ -n "$prestartup_mount" ]; then
+    # Only a volume this script mounted gets unmounted again.
+    prestartup_mounted=yes
+fi
+blessed=no
+if [ -n "$prestartup_mount" ] \\
+    && [ "$prestartup_group" = "$PRESTARTUP_VGID" ] \\
+    && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ]; then
     tries=0
     while :; do
         read_password
@@ -443,7 +461,9 @@ if [ -n "$prestartup_mount" ]; then
     done
     PASSWORD=""
 fi
-diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
+if [ "$prestartup_mounted" = yes ]; then
+    diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
+fi
 if [ "$blessed" != yes ]; then
     echo
     echo "The startup disk could not be switched back to macOS. Nothing was"
@@ -465,23 +485,26 @@ exit 0
 """
 
 
-def _prestartup_identity(installer):
-    """The macOS that was the startup disk: its volume group and volume UUID.
+def _prestartup_identity(dutil):
+    """The macOS that was the startup disk: its group and System volume UUID.
 
-    Stage one runs on the running macOS, so its root volume is the startup
-    disk the user came from.
+    Stage one runs on the running macOS, whose root may be a sealed-root
+    snapshot: diskutil reports the snapshot's UUID for it, and a snapshot
+    cannot be mounted by UUID later. Recovery's System-volume resolver
+    walks the captured group instead and returns the underlying System
+    volume, and refuses anything ambiguous.
     """
-    info = installer.dutil.get("info", "-plist", "/")
-    group = info.get("APFSVolumeGroupID", "")
-    volume = info.get("VolumeUUID", "")
-    if (
-        VOLUME_GROUP_PATTERN.fullmatch(group or "") is None
-        or VOLUME_GROUP_PATTERN.fullmatch(volume or "") is None
-    ):
+    running = dutil.get("info", "-plist", "/")
+    source_os = collections.namedtuple("Source", "vgid sys_volume")(
+        running.get("APFSVolumeGroupID"), "/"
+    )
+    try:
+        info = omarchy_recovery.source_system_volume(dutil, source_os)
+    except omarchy_recovery.RecoveryError as error:
         raise AsahiAdapterError(
             "the picker startup policy could not identify the macOS that was the startup disk"
-        )
-    return group, volume
+        ) from error
+    return info["APFSVolumeGroupID"], info["VolumeUUID"]
 
 
 def _write_step2(installer):
@@ -505,11 +528,20 @@ def _write_step2(installer):
         if allow_custom_args else ""
     )
     startup_policy = getattr(installer, "startup_policy", "default")
-    prestartup_group, prestartup_volume = "", ""
     if startup_policy == "picker":
-        prestartup_group, prestartup_volume = _prestartup_identity(installer)
+        prestartup = getattr(installer, "prestartup", None)
+        if (
+            not isinstance(prestartup, tuple)
+            or len(prestartup) != 2
+            or not all(isinstance(value, str) and value for value in prestartup)
+        ):
+            raise AsahiAdapterError(
+                "the picker startup policy lost the pre-startup macOS identity"
+            )
+        prestartup_group, prestartup_volume = prestartup
         restart_block = PICKER_BLOCK
     else:
+        prestartup_group = prestartup_volume = ""
         restart_block = DEFAULT_RESTART
     script = (
         STEP2_SCRIPT.replace("##RESTART_BLOCK##", restart_block)
@@ -1429,6 +1461,7 @@ class AsahiStage1Adapter:
             self.installer.osinfo,
         )
         self.installer.ins.startup_policy = self.startup_policy
+        self.installer.ins.prestartup = (self.prestartup_group, self.prestartup_volume)
         required = self.template.get("required_neo_peripherals", [])
         if not isinstance(required, list) or any(item not in ("radio", "touch-id") for item in required):
             raise AsahiAdapterError("unknown required Neo peripheral contract")
@@ -2218,13 +2251,36 @@ class AsahiStage1Adapter:
             "esp/" + omarchy_recovery.PAYLOAD_DIRECTORY + "/" + omarchy_recovery.MANIFEST_NAME
         )
         recovery_mode = self.template.get("recovery_gui")
-        if recovery_mode not in (None, "omarchy-native-v1"):
+        if recovery_mode not in (None, "omarchy-native-v1", "shell-v1"):
             raise AsahiAdapterError("unknown Recovery GUI contract")
-        self.native_recovery_gui = self.use_helper_recovery or recovery_mode is not None
+        if recovery_mode == "shell-v1":
+            # The plain shell step2 script is the whole Recovery setup: no
+            # helper app may be staged over it.
+            if self.use_helper_recovery or any(
+                value is not None
+                for value in (self.recovery_app, self.recovery_manifest, self.recovery_requirement)
+            ):
+                raise AsahiAdapterError("the shell Recovery setup takes no Recovery app")
+            self.native_recovery_gui = False
+        else:
+            self.native_recovery_gui = self.use_helper_recovery or recovery_mode is not None
         startup_policy = self.template.get("startup_policy")
         if startup_policy not in (None, "default", "picker"):
             raise AsahiAdapterError("unknown Omarchy startup policy")
         self.startup_policy = startup_policy or "default"
+        self.prestartup_group = self.prestartup_volume = None
+        if self.startup_policy == "picker":
+            if recovery_mode != "shell-v1":
+                # The native Recovery launcher replaces step2.sh entirely and
+                # has no startup policy, so picker needs the shell contract.
+                raise AsahiAdapterError(
+                    "the picker startup policy needs recovery_gui shell-v1"
+                )
+            # Before any mutation: the identity rides into the rendered
+            # script, and an unresolvable one stops the install here.
+            self.prestartup_group, self.prestartup_volume = _prestartup_identity(
+                self.installer.dutil
+            )
         if not self.use_helper_recovery and self.native_recovery_gui:
             try:
                 omarchy_recovery.validate_payload(self.osins.pkg)

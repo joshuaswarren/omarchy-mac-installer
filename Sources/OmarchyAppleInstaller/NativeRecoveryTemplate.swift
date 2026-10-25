@@ -60,6 +60,9 @@
       let targets = entries.filter { $0["omarchy_target"] as? String == "apple-silicon-full-os" }
       guard targets.count == 1 else { throw NativeRecoveryTemplateError.unsafeTemplate }
       guard let mode = targets[0]["recovery_gui"] else { return true }
+      // The plain shell step2 script is the whole Recovery setup: the app
+      // stages no native template archive for it.
+      if mode as? String == "shell-v1" { return false }
       guard mode as? String == "omarchy-native-v1" else {
         throw NativeRecoveryTemplateError.unsafeTemplate
       }

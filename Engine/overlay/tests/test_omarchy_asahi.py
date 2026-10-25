@@ -401,16 +401,94 @@ class AsahiStage1AdapterTests(unittest.TestCase):
         adapter.preflight(self.plan)
         self.assertEqual(adapter.startup_policy, "default")
         self.assertEqual(installer.ins.startup_policy, "default")
+        self.assertIsNone(installer.ins.prestartup[0])
 
     def test_the_picker_policy_reaches_the_stub_installer(self):
         metadata = self._target_metadata()
+        metadata["recovery_gui"] = "shell-v1"
         metadata["startup_policy"] = "picker"
         self._write_metadata([metadata])
-        installer = FakeInstaller(FakeDiskUtil([[self.free]]))
+        dutil = PickerFakeDiskUtil(
+            [[self.free]],
+            group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+            snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+        )
+        installer = FakeInstaller(dutil)
         adapter = self._adapter(installer)
         adapter.preflight(self.plan)
         self.assertEqual(adapter.startup_policy, "picker")
-        self.assertEqual(installer.ins.startup_policy, "picker")
+        self.assertFalse(adapter.native_recovery_gui)
+        self.assertEqual(adapter.prestartup_group, "AAAA0000-1111-4222-8333-BBBBBBBBBBBB")
+        self.assertEqual(adapter.prestartup_volume, "CCCC0000-2222-4333-8444-DDDDDDDDDDDD")
+        self.assertEqual(
+            installer.ins.prestartup, (adapter.prestartup_group, adapter.prestartup_volume)
+        )
+
+    def test_the_shell_contract_admitted_without_a_recovery_app(self):
+        metadata = self._target_metadata()
+        metadata["recovery_gui"] = "shell-v1"
+        self._write_metadata([metadata])
+        adapter = self._adapter(FakeInstaller(FakeDiskUtil([[self.free]])))
+        adapter.preflight(self.plan)
+        self.assertFalse(adapter.native_recovery_gui)
+
+    def test_the_shell_contract_takes_no_recovery_app(self):
+        metadata = self._target_metadata()
+        metadata["recovery_gui"] = "shell-v1"
+        self._write_metadata([metadata])
+        adapter = self._adapter(FakeInstaller(FakeDiskUtil([[self.free]])))
+        adapter.recovery_app = "/private/job/Recovery.app"
+        adapter.recovery_manifest = "/private/job/recovery.json"
+        adapter.recovery_requirement = 'cdhash H"' + 'a' * 40 + '"'
+        adapter.authorized_owner = "mina"
+        with self.assertRaisesRegex(
+            AsahiAdapterError, "shell Recovery setup takes no Recovery app"
+        ):
+            adapter.preflight(self.plan)
+
+    def test_picker_needs_the_shell_contract(self):
+        for recovery_gui in (None, "omarchy-native-v1"):
+            metadata = self._target_metadata()
+            if recovery_gui is not None:
+                metadata["recovery_gui"] = recovery_gui
+            metadata["startup_policy"] = "picker"
+            self._write_metadata([metadata])
+            dutil = PickerFakeDiskUtil(
+                [[self.free]],
+                group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+                system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+                snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+            )
+            adapter = self._adapter(FakeInstaller(dutil))
+            with self.assertRaisesRegex(
+                AsahiAdapterError, "needs recovery_gui shell-v1"
+            ):
+                adapter.preflight(self.plan)
+            self.assertEqual(dutil.resize_calls, [])
+            self.assertEqual(dutil.add_calls, [])
+
+    def test_picker_without_a_prestartup_macos_mutates_nothing(self):
+        metadata = self._target_metadata()
+        metadata["recovery_gui"] = "shell-v1"
+        metadata["startup_policy"] = "picker"
+        self._write_metadata([metadata])
+        dutil = PickerFakeDiskUtil(
+            [[self.free]],
+            group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+            snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+        )
+        # The identity queries answer nothing: the startup macOS cannot be
+        # resolved, so preflight must stop before any persistent mutation.
+        dutil.picker = SimpleNamespace(get=lambda *command: {})
+        adapter = self._adapter(FakeInstaller(dutil))
+        with self.assertRaisesRegex(
+            AsahiAdapterError, "could not identify the macOS"
+        ):
+            adapter.preflight(self.plan)
+        self.assertEqual(dutil.resize_calls, [])
+        self.assertEqual(dutil.add_calls, [])
 
     def test_preflight_rejects_an_extent_below_the_partition_floor(self):
         metadata = self._target_metadata()
@@ -1273,6 +1351,74 @@ class FakeInstaller:
         self.check_cur_os_calls += 1
 
 
+class PickerDiskUtil:
+    """diskutil answers shaped like the real plists, including a sealed-root
+    snapshot boot: diskutil reports the snapshot's UUID for /, and only the
+    apfs tree names the underlying System volume."""
+
+    def __init__(self, group, system_volume, snapshot_uuid):
+        self.group = group
+        self.system_volume = system_volume
+        self.snapshot_uuid = snapshot_uuid
+
+    def get(self, *command):
+        if command[:2] == ("apfs", "list"):
+            return {"Containers": [{"Volumes": [
+                {"Roles": ["System"], "APFSVolumeUUID": self.system_volume},
+                {"Roles": ["Data"],
+                 "APFSVolumeUUID": "77770000-3333-4444-8555-EEEEEEEEEEEE"},
+            ]}]}
+        target = command[2]
+        if target == "/":
+            # The retained shape of a snapshot-booted root volume.
+            return {
+                "APFSSnapshot": True,
+                "APFSSnapshotUUID": self.snapshot_uuid,
+                "APFSVolumeGroupID": self.group,
+                "VolumeUUID": self.snapshot_uuid,
+                "DeviceIdentifier": "disk3s1s1",
+            }
+        if target == self.system_volume:
+            return {"APFSVolumeGroupID": self.group, "VolumeUUID": self.system_volume}
+        return {}
+
+
+class PickerFakeDiskUtil(FakeDiskUtil):
+    """FakeDiskUtil with the picker identity queries answered."""
+
+    def __init__(self, partition_rounds, group, system_volume, snapshot_uuid):
+        super().__init__(partition_rounds)
+        self.picker = PickerDiskUtil(group, system_volume, snapshot_uuid)
+
+    def get(self, *command):
+        return self.picker.get(*command)
+
+
+def plist_xml(pairs):
+    body = "".join(
+        f"<key>{key}</key><string>{value}</string>" for key, value in pairs
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        f'<plist version="1.0"><dict>{body}</dict></plist>'
+    )
+
+
+# A faithful plutil -extract KEY raw -o - -: parse the plist, print the
+# string value, print nothing for a missing one.
+PLUTIL_FAKE = """#!/usr/bin/env python3
+import plistlib, sys
+try:
+    value = plistlib.loads(sys.stdin.buffer.read()).get(sys.argv[2])
+except Exception:
+    sys.exit(1)
+if isinstance(value, str) and value:
+    print(value)
+"""
+
+
 # A kmutil that prints each prompt before reading its answer, and echoes what
 # a terminal would show: the confirmation and the user name, but never the
 # password, which a real terminal reads with echo off.
@@ -1297,7 +1443,8 @@ class Step2ScriptTests(unittest.TestCase):
     # The fake recoveryOS tools' interpreter.
     fake_shell = "/bin/sh"
 
-    def make(self, owner, device_class="j314sap", dutil=None, startup_policy=None):
+    def make(self, owner, device_class="j314sap", dutil=None, startup_policy=None,
+             prestartup=None):
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
         step2 = Path(root.name) / "step2.sh"
@@ -1328,6 +1475,8 @@ class Step2ScriptTests(unittest.TestCase):
             installer = stub_installer("sysinfo", dutil, "osinfo")
             if startup_policy is not None:
                 installer.startup_policy = startup_policy
+            if prestartup is not None:
+                installer.prestartup = prestartup
             installer.install_files("cur-os")
         return step2
 
@@ -1373,44 +1522,119 @@ class Step2ScriptTests(unittest.TestCase):
         self.assertIn("Press Enter to restart into $os_name.", text)
 
     def test_the_picker_policy_switches_the_startup_disk_back(self):
-        dutil = SimpleNamespace()
-        dutil.get = lambda *command: {
-            "APFSVolumeGroupID": "AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
-            "VolumeUUID": "CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
-        }
-        step2 = self.make("scott", dutil=dutil, startup_policy="picker")
+        dutil = PickerDiskUtil(
+            group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+            snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+        )
+        step2 = self.make("scott", dutil=dutil, startup_policy="picker", prestartup=self.PRESTARTUP)
         text = step2.read_text()
         self.assertEqual(re.findall(r"##[A-Z]+##", text), [])
         self.assertIn('STARTUP_POLICY="picker"', text)
+        # The underlying System volume, never the root snapshot's UUID.
         self.assertIn('PRESTARTUP_VGID="AAAA0000-1111-4222-8333-BBBBBBBBBBBB"', text)
         self.assertIn('PRESTARTUP_VOLUME="CCCC0000-2222-4333-8444-DDDDDDDDDDDD"', text)
-        self.assertIn('prestartup_is_startup', text)
+        self.assertNotIn("D00D0000", text)
+        self.assertIn("prestartup_field", text)
+        self.assertIn("plutil -extract", text)
+        self.assertIn('bless --getBoot --plist', text)
+        self.assertIn("APFSVolumeGroupID", text)
+        self.assertIn("MountPoint", text)
         self.assertIn('bless --setBoot --mount "$prestartup_mount" --user "$OWNER" --stdinpass', text)
-        self.assertIn("APFS Volume Group: +$PRESTARTUP_VGID", text)
         self.assertIn("Press Enter to restart into macOS. To start the probe:", text)
         self.assertIn("It runs once. A normal restart returns", text)
         self.assertIn("to macOS by itself.", text)
         # The default handover text is gone: the Mac restarts into macOS.
         self.assertNotIn("Press Enter to restart into $os_name.", text)
+        # No human-output parsing in the picker tail: the mount line names a
+        # device, not a path, and identity comes from plist fields only.
+        tail = text.split('STARTUP_POLICY="picker"', 1)[1]
+        self.assertNotIn("s/^Volume .* on //", tail)
+        self.assertNotIn("Device Node", tail)
         result = subprocess.run([*self.shell, "-n", str(step2)])
         self.assertEqual(result.returncode, 0)
 
-    def test_the_picker_policy_needs_the_prestartup_macos(self):
-        for info in ({}, {"APFSVolumeGroupID": "not-a-uuid"}, {"VolumeUUID": "also-not"}):
-            dutil = SimpleNamespace()
-            dutil.get = lambda *command, info=info: info
-            with self.assertRaisesRegex(AsahiAdapterError, "could not identify the macOS"):
-                self.make("scott", dutil=dutil, startup_policy="picker")
+    def test_the_picker_render_needs_the_baked_identity(self):
+        # Identity is resolved and validated in preflight; the render refuses
+        # to run without it, so a resumed or stale caller cannot drop it.
+        dutil = PickerDiskUtil(
+            group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+            snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+        )
+        for prestartup in (None, (), ("AAAA0000-1111-4222-8333-BBBBBBBBBBBB",), ("", "")):
+            with self.assertRaisesRegex(
+                AsahiAdapterError, "lost the pre-startup macOS identity"
+            ):
+                self.make(
+                    "scott", dutil=dutil, startup_policy="picker", prestartup=prestartup
+                )
+
+    def test_the_picker_identity_resolves_the_system_volume_not_the_snapshot(self):
+        # w7X's reproduction: on a snapshot-booted Mac, diskutil reports the
+        # snapshot's UUID for /, and that UUID cannot be mounted later.
+        group = "AAAA0000-1111-4222-8333-BBBBBBBBBBBB"
+        system = "CCCC0000-2222-4333-8444-DDDDDDDDDDDD"
+        snapshot = "D00D0000-2222-4333-8444-DDDDDDDDDDDA"
+        dutil = PickerDiskUtil(group, system, snapshot)
+        step2 = self.make("scott", dutil=dutil, startup_policy="picker", prestartup=self.PRESTARTUP)
+        text = step2.read_text()
+        self.assertIn(f'PRESTARTUP_VOLUME="{system}"', text)
+        self.assertNotIn(snapshot, text)
+        self.assertIn(f'PRESTARTUP_VGID="{group}"', text)
+
+    def run_read_back(self, boot_device, boot_group):
+        """prestartup_is_startup alone, with faithful plist-shaped tools."""
+        dutil = PickerDiskUtil(
+            group="AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            system_volume="CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+            snapshot_uuid="D00D0000-2222-4333-8444-DDDDDDDDDDDA",
+        )
+        step2 = self.make("scott", dutil=dutil, startup_policy="picker", prestartup=self.PRESTARTUP)
+        function = step2.read_text().split("prestartup_is_startup() {", 1)[1].split("\n}\n", 1)[0]
+        script = f"""
+PRESTARTUP_VGID=AAAA0000-1111-4222-8333-BBBBBBBBBBBB
+prestartup_mount=/Volumes/Macintosh\\ HD
+bless() {{
+    printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Boot Volume</key><string>{boot_device}</string></dict></plist>'
+}}
+diskutil() {{
+    [ "$2" = -plist ] && printf '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>APFSVolumeGroupID</key><string>{boot_group}</string></dict></plist>'
+}}
+plutil() {{
+    python3 -c 'import plistlib, sys
+value = plistlib.loads(sys.stdin.buffer.read()).get(sys.argv[1], "")
+if isinstance(value, str) and value:
+    print(value)' "$2"
+}}
+prestartup_field() {{
+    plutil -extract "$1" raw -o - - 2>/dev/null
+}}
+prestartup_is_startup() {{{function}
+}}
+prestartup_is_startup
+"""
+        return subprocess.run([*self.shell, "-c", script], capture_output=True, text=True)
+
+    def test_the_picker_read_back_accepts_a_root_snapshot_device(self):
+        # A sealed-root snapshot device of the right group passes by group.
+        result = self.run_read_back("/dev/disk3s1s1", "AAAA0000-1111-4222-8333-BBBBBBBBBBBB")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_picker_read_back_never_accepts_a_wrong_group(self):
+        # w7X's reproduction: a wrong group fails even when the boot device
+        # is the mounted volume's own device, which the old fallback passed.
+        result = self.run_read_back("/dev/disk3s1", "EEEE0000-1111-4222-8333-FFFFFFFFFFFF")
+        self.assertNotEqual(result.returncode, 0)
 
     def step2_with_fakes(self, kmutil_body, paired=True, bputil_mode="ok", password="secret",
                          startup="macos", startup_policy=None, prestartup=None, mount_fails=False):
         """step2.sh in place, with fake recoveryOS tools first on PATH."""
         if startup_policy == "picker":
             group, volume = prestartup
-            dutil = SimpleNamespace()
-            dutil.get = lambda *command: {
-                "APFSVolumeGroupID": group, "VolumeUUID": volume}
-            step2 = self.make("scott", dutil=dutil, startup_policy="picker")
+            dutil = PickerDiskUtil(
+                group, volume, "D00D0000-2222-4333-8444-DDDDDDDDDDDA")
+            step2 = self.make("scott", dutil=dutil, startup_policy="picker", prestartup=self.PRESTARTUP)
         else:
             step2 = self.make("scott")
         root = Path(step2).parent
@@ -1460,43 +1684,87 @@ class Step2ScriptTests(unittest.TestCase):
             # Like macOS's bless, it exits 0 whatever the password, and only
             # a right one changes the startup disk. For the picker policy it
             # blesses whatever --mount names: macOS or the Omarchy stub.
-            "bless": "\n".join((
-                '[ "$1" = --getBoot ] && { cat "$CALLS.boot"; exit 0; }',
+            "bless": ("\n".join((
+                '[ "$1" = --getBoot ] && { boot="$(cat "$CALLS.boot")"; '
+                "printf '<plist version=\"1.0\"><dict><key>Boot Volume</key>"
+                "<string>%s</string></dict></plist>' \"$boot\"; exit 0; }",
                 'echo "$*" >>"$CALLS.bless"',
-                'case "$3" in /Volumes/Macintosh\\ HD) boot=/dev/disk0s2 ;; *) boot=/dev/omarchy ;; esac'
-                if startup_policy == "picker" else 'boot=/dev/omarchy',
+                'case "$3" in /Volumes/Macintosh\\ HD) boot=/dev/disk0s2 ;; *) boot=/dev/omarchy ;; esac',
                 'case "$*" in',
                 '*--stdinpass) IFS= read -r pw; echo "$pw" >>"$CALLS.bless"',
                 '    [ "$pw" = "$EXPECTED_PASSWORD" ] && echo "$boot" >"$CALLS.boot" ;;',
                 # Without --stdinpass, bless asks the owner itself.
                 '*) echo "$boot" >"$CALLS.boot" ;;',
                 'esac',
-                "exit 0",
-            )),
-            "diskutil": "\n".join((
-                # The picker policy mounts the macOS that was the startup disk.
+                'exit 0',
+            )) if startup_policy == "picker" else "\n".join((
+                '[ "$1" = --getBoot ] && { cat "$CALLS.boot"; exit 0; }',
+                'echo "$*" >>"$CALLS.bless"',
+                'case "$*" in',
+                '*--stdinpass) IFS= read -r pw; echo "$pw" >>"$CALLS.bless"',
+                '    [ "$pw" = "$EXPECTED_PASSWORD" ] && echo /dev/omarchy >"$CALLS.boot" ;;',
+                # Without --stdinpass, bless asks the owner itself.
+                '*) echo /dev/omarchy >"$CALLS.boot" ;;',
+                'esac',
+                'exit 0',
+            ))),
+            "diskutil": ("\n".join((
+                # Real mount output names a device; the script reads the
+                # mount path from the plist instead of parsing this line.
                 ('[ "$1" = mount ] && { '
                  + ('exit 1' if mount_fails else
-                    'echo "Volume Macintosh HD on /Volumes/Macintosh HD mounted"')
-                 + '; exit 0; }')
-                if startup_policy == "picker" else '[ "$1" = mount ] || true',
+                    'echo "Volume Macintosh HD on disk3s1 mounted"')
+                 + '; exit 0; }'),
+                '[ "$1" = unmount ] && exit 0',
+                '[ "$1" = info ] && [ "$2" = -plist ] || exit 1',
+                'case "$3" in',
+                '  "$PRESTARTUP_VOLUME") cat "$PLIST_VOLUME" ;;',
+                '  /dev/disk0s2) cat "$PLIST_MACOS_BOOT" ;;',
+                '  /dev/disk3s1s1) cat "$PLIST_SNAPSHOT" ;;',
+                '  /dev/omarchy) cat "$PLIST_STUB" ;;',
+                '  *) exit 1 ;;',
+                'esac',
+            )) if startup_policy == "picker" else "\n".join((
+                '[ "$1" = mount ] || true',
                 '[ "$1" = unmount ] && exit 0',
                 '[ "$1" = info ] || exit 0',
                 'case "$2" in',
                 "/dev/omarchy|*/Omarchy) printf '   Device Node:  /dev/omarchy\\n   APFS Volume Group:  0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0\\n' ;;",
-                "*) printf '   Device Node:  /dev/disk0s2\\n   APFS Volume Group:  "
-                + (prestartup[0] if startup_policy == "picker" else "MACOS-VG") + "\\n' ;;",
+                "*) printf '   Device Node:  /dev/disk0s2\\n   APFS Volume Group:  MACOS-VG\\n' ;;",
                 'esac',
-            )),
+            ))),
             "kmutil": 'n=$(($(cat "$CALLS" 2>/dev/null || echo 0) + 1)); echo "$n" >"$CALLS"\n' + kmutil_body,
         }
         for name, body in fakes.items():
             (bin_dir / name).write_text(f"#!{self.fake_shell}\n" + body + "\n")
             (bin_dir / name).chmod(0o755)
+        group, volume = prestartup or (None, None)
+        if startup_policy == "picker":
+            (bin_dir / "plutil").write_text(PLUTIL_FAKE)
+            (bin_dir / "plutil").chmod(0o755)
+            volume_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group)]
+            if not mount_fails:
+                # The mounted volume's plist carries the mount path.
+                volume_plist.append(("MountPoint", "/Volumes/Macintosh HD"))
+            (root / "plist-volume.xml").write_text(plist_xml(volume_plist))
+            (root / "plist-macos-boot.xml").write_text(
+                plist_xml([("APFSVolumeGroupID", group), ("DeviceNode", "/dev/disk0s2")]))
+            (root / "plist-snapshot.xml").write_text(
+                plist_xml([("APFSVolumeGroupID", group), ("DeviceNode", "/dev/disk3s1s1")]))
+            (root / "plist-stub.xml").write_text(plist_xml([
+                ("APFSVolumeGroupID", "0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0")]))
         calls = root / "kmutil-calls"
         Path(f"{calls}.boot").write_text("/dev/omarchy\n" if startup == "omarchy" else "/dev/disk0s2\n")
         env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", CALLS=str(calls),
                    PIPED=str(root / "piped"), EXPECTED_PASSWORD=password, BPUTIL_MODE=bputil_mode)
+        if startup_policy == "picker":
+            env.update(
+                PLIST_VOLUME=str(root / "plist-volume.xml"),
+                PLIST_MACOS_BOOT=str(root / "plist-macos-boot.xml"),
+                PLIST_SNAPSHOT=str(root / "plist-snapshot.xml"),
+                PLIST_STUB=str(root / "plist-stub.xml"),
+                PRESTARTUP_VOLUME=volume,
+            )
         return script, env, calls
 
     def run_step2(self, kmutil_body, stdin="y\nsecret\n\n", **options):

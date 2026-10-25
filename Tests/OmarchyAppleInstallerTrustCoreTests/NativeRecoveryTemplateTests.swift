@@ -19,6 +19,13 @@
       try Data(#"{"os_list":[{"omarchy_target":"apple-silicon-full-os"}]}"#.utf8)
         .write(to: metadata)
       XCTAssertTrue(try NativeRecoveryTemplate.imageNeedsTemplate(metadataURL: metadata))
+      // The plain shell Recovery setup: no native template is staged.
+      try Data(
+        #"{"os_list":[{"omarchy_target":"apple-silicon-full-os","recovery_gui":"shell-v1"}]}"#
+          .utf8
+      )
+      .write(to: metadata)
+      XCTAssertFalse(try NativeRecoveryTemplate.imageNeedsTemplate(metadataURL: metadata))
       try Data(
         #"{"os_list":[{"omarchy_target":"apple-silicon-full-os","recovery_gui":"unknown"}]}"#.utf8
       )
