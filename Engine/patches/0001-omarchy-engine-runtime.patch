@@ -35,7 +35,7 @@ index 21031fd..76c0935 100755
  
  echo "Packaging installer..."
 diff --git a/src/main.py b/src/main.py
-index 88dd2ab..b14de4c 100644
+index 88dd2ab..63f78fa 100644
 --- a/src/main.py
 +++ b/src/main.py
 @@ -4,11 +4,16 @@ import os, os.path, shlex, subprocess, sys, time, termios, json, getpass, report
@@ -55,24 +55,24 @@ index 88dd2ab..b14de4c 100644
  
  # Minimum free space to leave when resizing, to allow for OS upgrades
  MIN_FREE_OS = psize("38GB")
-@@ -48,10 +53,14 @@ CHIP_MIN_VER = {
+@@ -48,10 +53,16 @@ CHIP_MIN_VER = {
      0x8122: "14.8.3",   # T8122, M3
      0x6030: "14.8.3",   # T6030, M3 Pro
      0x6031: "14.8.3",   # T6031, M3 Max (16-core)
 +    0x6032: "27.0.1",   # T6032, M3 Ultra
-    0x8152: "27.0.1",   # T8152, M6
++    0x8152: "27.0.1",   # T8152, M6
      0x6034: "14.8.3",   # T6034, M3 Max (14-core)
 +    0x8140: "26.6",     # T8140, A18 Pro
  }
  
  DEVICES = {
 +    "j575dap":  Device("27.0.1", False),  # Mac Studio (M3 Ultra, 2025)
-    "j873gap":  Device("27.0.1", False),  # Mac mini (M6, 2026)
++    "j873gap":  Device("27.0.1", False),  # Mac mini (M6, 2026)
 +    "j700ap":   Device("26.6", False),  # MacBook Neo (A18 Pro, 2026)
      "j274ap":   Device("11.0", False),  # Mac mini (M1, 2020)
      "j293ap":   Device("11.0", False),  # MacBook Pro (13-inch, M1, 2020)
      "j313ap":   Device("11.0", False),  # MacBook Air (M1, 2020)
-@@ -95,6 +104,31 @@ if os.environ.get("ALLOW_VM", None):
+@@ -95,6 +106,31 @@ if os.environ.get("ALLOW_VM", None):
      DEVICES["vma2macosap"] = Device("12.0", False)
  
  IPSW_VERSIONS = [
@@ -104,7 +104,7 @@ index 88dd2ab..b14de4c 100644
      IPSW("12.3.1",
           "12.1",
           "iBoot-7459.101.3",
-@@ -128,7 +162,10 @@ IPSW_VERSIONS = [
+@@ -128,7 +164,10 @@ IPSW_VERSIONS = [
  class InstallerMain:
      def __init__(self, version):
          self.version = version
@@ -115,7 +115,7 @@ index 88dd2ab..b14de4c 100644
          self.credentials_validated = False
          self.expert = False
          self.ipsw = None
-@@ -585,20 +622,11 @@ class InstallerMain:
+@@ -585,20 +624,11 @@ class InstallerMain:
          self.step2(report=True)
  
      def choose_ipsw(self, supported_fw=None):
@@ -141,7 +141,7 @@ index 88dd2ab..b14de4c 100644
  
          minver.sort(key=lambda ipsw: split_ver(ipsw.version))
  
-@@ -812,18 +840,15 @@ class InstallerMain:
+@@ -812,18 +842,15 @@ class InstallerMain:
          else:
              target = resizable[0]
  
@@ -169,7 +169,7 @@ index 88dd2ab..b14de4c 100644
  
          min_perc = 100 * min_size / total
  
-@@ -922,6 +947,25 @@ class InstallerMain:
+@@ -922,6 +949,25 @@ class InstallerMain:
  
          return True
  
@@ -195,7 +195,7 @@ index 88dd2ab..b14de4c 100644
      def action_select_disk(self):
          choices = {"1": "Internal storage"}
  
-@@ -939,21 +983,22 @@ class InstallerMain:
+@@ -939,21 +985,22 @@ class InstallerMain:
          return True
  
      def main(self):
@@ -231,7 +231,7 @@ index 88dd2ab..b14de4c 100644
              p_message("By default, this installer will hide certain advanced options that")
              p_message("are only useful for Asahi Linux developers. You can enable expert mode")
              p_message("to show them. Do not enable this unless you know what you are doing.")
-@@ -970,7 +1015,19 @@ class InstallerMain:
+@@ -970,7 +1017,19 @@ class InstallerMain:
  
          self.chip_min_ver = CHIP_MIN_VER.get(self.sysinfo.chip_id, None)
          self.device = DEVICES.get(self.sysinfo.device_class, None)
@@ -252,7 +252,7 @@ index 88dd2ab..b14de4c 100644
              p_error("This device is not supported yet!")
              p_error("Please check out the Asahi Linux Blog for updates on device support:")
              print()
-@@ -1126,6 +1183,19 @@ class InstallerMain:
+@@ -1126,6 +1185,19 @@ class InstallerMain:
  
          if self.cur_os is None and self.sysinfo.boot_mode != "macOS":
              self.cur_os = default_os
@@ -272,7 +272,7 @@ index 88dd2ab..b14de4c 100644
          self.check_cur_os()
  
          actions = {}
-@@ -1226,7 +1296,11 @@ if __name__ == "__main__":
+@@ -1226,7 +1298,11 @@ if __name__ == "__main__":
          logging.exception("Process execution failed")
          p_warning("If you need to file a bug report, please attach the log file:")
          p_warning(f"  {os.getcwd()}/installer.log")
@@ -301,9 +301,10 @@ index d99a1e1..76f9a94 100644
              osi.sys_vol_bootable = fsctl_is_bootable(mounts["System"])
          except Exception as e:
 diff --git a/src/osinstall.py b/src/osinstall.py
+index c721fcb..c6eb9a7 100644
 --- a/src/osinstall.py
 +++ b/src/osinstall.py
-@@ -127,6 +127,13 @@
+@@ -127,6 +127,13 @@ class OSInstaller(PackageInstaller):
                  fd.write(data)
              ucache.flush_progress()
  
@@ -317,7 +318,7 @@ diff --git a/src/osinstall.py b/src/osinstall.py
      def install(self, stub_ins):
          p_progress("Installing OS...")
          logging.info("OSInstaller.install()")
-@@ -146,12 +153,7 @@
+@@ -146,12 +153,7 @@ class OSInstaller(PackageInstaller):
              if image:
                  p_plain(f"  Extracting {image} into {info.name} partition...")
                  logging.info(f"Extract: {image}")
