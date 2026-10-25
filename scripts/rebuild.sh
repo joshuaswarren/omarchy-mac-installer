@@ -32,13 +32,15 @@ rev=$(cat .downstream-revision)
 total0=$(date +%s)
 
 t() { local name=$1 shift_secs; shift; local t0=$(date +%s); "$@"; local rc=$?; local t1=$(date +%s)
-  printf '%-28s %ss\n' "$name" "$((t1 - t0))" | tee -a timings.txt; return $rc; }
+  printf '%-28s %ss\n' "$name" "$((t1 - t0))" | tee -a timings.txt
+  if (( rc != 0 )); then printf '%-28s FAILED rc=%s\n' "$name" "$rc" | tee -a timings.txt; exit $rc; fi; }
 
 t probe-package bash -c "cd repo && python3 image-builder/probe-package.py \
   --stage2 '$stage2' --stage1 '$stage1' --bootaa64 ../BOOTAA64.EFI --output ../pkg \
   --catalog-baseline-payload ../assets/edge-payload.zip \
   --catalog-baseline-metadata ../assets/installer_data.json \
-  --downstream-revision '$rev' > ../pkg-build.log 2>&1"
+  --downstream-revision '$rev' --device-class "$device_class" \
+  --device-identifier "$device_identifier" --name "$probe_name" > ../pkg-build.log 2>&1"
 
 t restage-assets bash -c "cp pkg/omarchy-probe-${board}-os-package.zip pkg/probe-installer_data.json assets/"
 
