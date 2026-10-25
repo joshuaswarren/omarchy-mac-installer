@@ -86,7 +86,7 @@ t app bash -c "rm -rf '$b/app-final-r4' && cd repo && OMARCHY_PRIVATE_PLAIN_TEST
 t narrow-preinstall bash <<'NARROW'
 set -euo pipefail
 cd repo
-sed -i.bak 's/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/$gate_board/' Packaging/private-test/scripts/preinstall
+sed -i.bak "s/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/$gate_board/" Packaging/private-test/scripts/preinstall
 python3 - <<'PYGATE'
 gate = """ver_ge() {
   local IFS=.
@@ -138,16 +138,14 @@ def sha(path):
             h.update(block)
     return h.hexdigest()
 manifest = {
-  "bundle": "omarchy probe test, Mac Studio (M3 Ultra, j575dap)",
+  "bundle": "omarchy probe test, %s (%s)" % (os.environ["probe_name"], os.environ["device_class"]),
   "installs": "loader-chain diagnostic only: the Mac boots into the m1n1 USB proxy and never boots any OS",
-  "admitted_hardware": ["j575d"],
-  "package": "${tester_pkg}",
+  "admitted_hardware": [os.environ["gate_board"]],
+  "package": os.environ["tester_pkg"],
   "staged_assets": {
     "engine": "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
     "metadata": "probe-assets/probe-installer_data.json",
     "payload": "probe-assets/omarchy-probe-${board}-os-package.zip"},
-  "probe_kit": {"name": "omarchy-m3-ultra-probe-kit.zip", "delivered_separately": True,
-                "note": "see the separate kit sha256 line"},
   "sealed_catalog_sha256": sha(os.path.join(b, "release-inputs", "catalog.json")),
   "trust_root_fingerprint": "sha256:" + sha(os.path.join(b, "release-inputs", "trust-root.ed25519.pub")),
   "files": {f: {"bytes": os.path.getsize(os.path.join(tester, f)), "sha256": sha(os.path.join(tester, f))} for f in files},
@@ -157,7 +155,7 @@ with open(os.path.join(tester, "manifest.json"), "w") as out:
 with open(os.path.join(tester, "SHA256SUMS"), "w") as out:
     for f in files:
         out.write(sha(os.path.join(tester, f)) + "  " + f + "\n")
-zpath = os.path.join(b, "omarchy-probe-j575d-tester-bundle.zip")
+zpath = os.path.join(b, os.environ["tester_pkg"].replace(".pkg", "-bundle.zip"))
 if os.path.exists(zpath):
     os.unlink(zpath)
 with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
@@ -187,6 +185,10 @@ def sha(path):
 # 1. every pin in the extracted Stage assets must match the shipped file.
 stage = open(os.path.join(extracted, "Stage assets.command")).read()
 pins = re.findall(r"^([0-9a-f]{64}) (\d+) (\S+)$", stage.split("<<'PINS'\n", 1)[1].split("\nPINS\n", 1)[0], re.M)
+for name in ("manifest.json", "Stage assets.command", "Preflight.command", "Remove helper.command", "README.md", "Feedback.md"):
+    text = open(os.path.join(extracted, name)).read()
+    for bad in ("${", "$gate_board", "@HELPER_", "@APP_", "probe-${board}"):
+        assert bad not in text, "unresolved placeholder %r in %s" % (bad, name)
 assert pins, "no pins found"
 for digest, size, name in pins:
     path = os.path.join(extracted, "probe-assets", name)
