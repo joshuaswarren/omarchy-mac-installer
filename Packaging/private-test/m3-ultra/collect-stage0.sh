@@ -11,19 +11,28 @@ IOREG=/usr/sbin/ioreg
 SYSTEM_PROFILER=/usr/sbin/system_profiler
 DITTO=/usr/bin/ditto
 SHASUM=/usr/bin/shasum
-KIT_VERSION="stage0-1"
+KIT_VERSION="stage0-2"
 MINIMUM_MACOS="27.0.1"
 
 # Property names that identify one Mac or one owner, matched anywhere in the
-# name (mac-address-wifi0, dram-ecid-ch04, ...). Their lines are removed.
-DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path)[^"]*" *='
+# name (mac-address-wifi0, dram-ecid-ch04, ...). Their lines are removed. This
+# also covers the console user (IOConsoleUsers: account name, user id, session),
+# the lock-screen contact text (good-samaritan-message), the storage controller's
+# unique id, the running programs' names (IOUserClientCreator), and per-Mac factory or
+# pairing data (Bluetooth device records, calibration blobs, installer and boot manifest data).
+DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path|IOConsoleUsers|good-samaritan|controller-unique-id|IOUserClientCreator|bluetooth|IDInstallerData|calibration|manifest-data|manifest-hash|sidp-rom|rom-panic|Tunnel Endpoint GUID)[^"]*" *=|^[[:space:]|+-]*"CEPO" *='
 # The same names inside a dictionary value, which ioreg prints on one line as "name"=<value>.
-DROP_NESTED='"[^"]*(mac-?addr|ecid|serial-number|unique-chip-id|unique-device-id|udid|vuid|die-id)[^"]*"='
+DROP_NESTED='"[^"]*(mac-?addr|ecid|serial-number|unique-chip-id|unique-device-id|udid|vuid|die-id|UserName|UniqueSessionUUID|controller-unique-id|IOUserClientCreator|good-samaritan)[^"]*"='
 DROP_TEXT='Serial Number|Hardware UUID|Provisioning UDID|Activation Lock|Serial number'
+# A UUID value names one volume, disk or session of this Mac. It is masked everywhere
+# except on a line whose property name starts with "firmware" (the firmware image uuid is
+# a fact about the firmware, not the Mac).
+UUID_RE='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
 
 scrub() {
   LC_ALL=C /usr/bin/grep -a -v -i -E "$DROP_KEYS|$DROP_NESTED|$DROP_TEXT" |
-    LC_ALL=C /usr/bin/sed -E 's/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/xx:xx:xx:xx:xx:xx/g'
+    LC_ALL=C /usr/bin/sed -E -e 's/[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}/xx:xx:xx:xx:xx:xx/g' \
+      -e "/^[ |+-]*\"firmware[^\"]*\" *=/!s/$UUID_RE/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/g"
 }
 
 # True when dotted version $1 is at least $2 (numeric parts; missing parts are 0).
@@ -86,8 +95,9 @@ digest=${digest%% *}
 cat <<EOF
 
 Done. Nothing was installed or changed. The file lists hardware and firmware
-facts. It leaves out the serial number, hardware UUID, unique chip ID, memory chip IDs and network
-addresses. It holds none of your files.
+facts. It leaves out the serial number, hardware UUID, unique chip ID, memory chip IDs, network
+addresses, your account name, your lock-screen contact text, the names of running programs and the
+ID numbers of your disks. It holds none of your files.
 
   File:    $out.zip
   SHA-256: $digest

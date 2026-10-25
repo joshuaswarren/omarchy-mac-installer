@@ -30,7 +30,7 @@ If your Mac is not a Mac Studio (M3 Ultra), or macOS is too old, the kit says so
 
 ## 4. Send the result
 
-Send us the zip and the SHA-256 line. The zip holds four text files: a short summary, a hardware list, GPU facts and the hardware tree. The kit removes the serial number, hardware UUID, unique chip ID, DRAM chip IDs and network addresses (Wi-Fi, Ethernet, Bluetooth). It holds none of your files. You can open the zip and read every file before you send it. The kit version is the first line of `summary.txt`.
+Send us the zip and the SHA-256 line. The zip holds four text files: a short summary, a hardware list, GPU facts and the hardware tree. The kit removes the serial number, hardware UUID, unique chip ID, DRAM chip IDs and network addresses (Wi-Fi, Ethernet, Bluetooth). It also removes the name and user ID of the account that is logged in, any text you set for a lost Mac (the contact line on the lock screen), the names of programs that were running, the storage controller's unique ID, and the ID numbers of your volumes and disks. It holds none of your files. You can open the zip and read every file before you send it. Please do: search it for your name and your contact details first. The kit version is the first line of `summary.txt`.
 
 ## 5. Remove it
 

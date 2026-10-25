@@ -47,6 +47,15 @@ cat <<'TREE'
     "vuid" = "AAAAAAAA-0000-1111-2222-333333333333"
     "IOMACAddress" = <aabbccddeeff>
     "oslog-uuid" = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"
+    "IOConsoleUsers" = ({"kCGSSessionUserNameKey"="testowner","kCGSSessionUserIDKey"=501,"CGSSessionUniqueSessionUUID"="1A2B3C4D-1111-2222-3333-444455556666"})
+    "good-samaritan-message" = <"If found call +99 555 0100 or testowner@example.invalid">
+    "controller-unique-id" = "TESTCTRLID0123456789"
+    "Controller Characteristics" = {"default-bits-per-cell"=3,"firmware-version"="241.0.12","controller-unique-id"="TESTNESTEDCTRL99    ","capacity"=1}
+    "BluetoothUHEDevices" = <0011223344556677>
+    "wifi-calibration-msf" = <8899aabbccddeeff>
+    "sfr-manifest-data" = <0123456789abcdef>
+    "uuid" = <"ABCDEF01-2222-3333-4444-555566667777">
+    "IOUserClientCreator" = "pid 321, TestPrivateApp"
     "gpu-core-count" = 80
 TREE
 EOF
@@ -103,6 +112,13 @@ grep -q "xx:xx:xx:xx:xx:xx" "$dir/device-tree.txt" || fail "a network address in
 grep -q "0E6C1493-224F-3E07-8402-67BE342429B4" "$dir/device-tree.txt" || fail "the firmware image uuid is kept"
 grep -q "ApplePowerCounter" "$dir/device-tree.txt" || fail "a nested name that is not an identifier is kept"
 grep -q "oslog-uuid" "$dir/device-tree.txt" || fail "other uuid keys are kept"
+if grep -q -E 'testowner|555 0100|example.invalid|TESTCTRLID|TESTNESTEDCTRL|1A2B3C4D-1111|ABCDEF01-2222|TestPrivateApp|AAAAAAAA-BBBB' "$dir/device-tree.txt" "$dir/gpu.txt"; then
+  fail "owner name, contact text, controller id, volume uuid and app names are removed or masked"
+fi
+if grep -q -i -E 'bluetooth|calibration|manifest-data' "$dir/device-tree.txt" "$dir/gpu.txt"; then
+  fail "pairing and factory calibration blobs are removed"
+fi
+grep -q '"uuid" = <"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' "$dir/device-tree.txt" || fail "a uuid value is masked and its key kept"
 grep -q '"gpu-core-count" = 80' "$dir/gpu.txt" || fail "hardware facts are kept"
 [[ -s "$dir.zip" ]] || { zipfile=$(echo "$work"/home/Desktop/*.zip); [[ -s ${zipfile%% *} ]] || fail "the zip is written"; }
 grep -q "SHA-256:" "$work/out" || fail "the digest is printed"
