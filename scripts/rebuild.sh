@@ -51,7 +51,7 @@ def sha(path):
 lines = "".join(f"{sha(p)} {os.path.getsize(p)} {n}\n" for n, p in pins.items())
 stage = os.path.join(b, "tester", "Stage assets.command")
 text = open(stage).read()
-text = re.sub(r"(<<'PINS'\n).*?(\nPINS\n)", lambda m: m.group(1) + lines + m.group(2), text, flags=re.S)
+text = re.sub(r"(<<'PINS'\n).*?(\nPINS\n)", lambda m: m.group(1) + lines + "PINS\n", text, flags=re.S)
 open(stage, "w").write(text)
 print("pins derived:", lines.splitlines())
 PYPINS
