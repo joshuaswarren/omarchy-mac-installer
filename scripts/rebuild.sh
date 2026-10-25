@@ -34,6 +34,28 @@ t probe-package bash -c "cd repo && python3 image-builder/probe-package.py \
 
 t restage-assets bash -c "cp pkg/omarchy-probe-j575d-os-package.zip pkg/probe-installer_data.json assets/"
 
+t derive-pins python3 - <<'PYPINS'
+import hashlib, os, re
+b = os.path.expanduser("~/code/probe-build-20261025")
+pins = {
+    "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz": os.path.join(b, "assets", "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz"),
+    "probe-installer_data.json": os.path.join(b, "assets", "probe-installer_data.json"),
+    "omarchy-probe-j575d-os-package.zip": os.path.join(b, "pkg", "omarchy-probe-j575d-os-package.zip"),
+}
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+lines = "".join(f"{sha(p)} {os.path.getsize(p)} {n}\n" for n, p in pins.items())
+stage = os.path.join(b, "tester", "Stage assets.command")
+text = open(stage).read()
+text = re.sub(r"(<<'PINS'\n).*?(\nPINS\n)", lambda m: m.group(1) + lines + m.group(2), text, flags=re.S)
+open(stage, "w").write(text)
+print("pins derived:", lines.splitlines())
+PYPINS
+
 t catalog bash -c "cd repo && python3 scripts/make-unsigned-catalog.py --developer \
   --base-url https://mac.omarchy.org/v1/releases/probe-j575d-2026.10.25 \
   --assets-dir ../assets --inputs ../pkg/catalog-inputs.json \
@@ -50,7 +72,32 @@ t app bash -c "rm -rf '$b/app-final-r4' && cd repo && OMARCHY_PRIVATE_PLAIN_TEST
   $b/release-inputs \
   $b/app-final-r4 > ../app-build.log 2>&1"
 
-t narrow-preinstall bash -c "cd repo && sed -i.bak 's/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/j575d/' Packaging/private-test/scripts/preinstall && bash -n Packaging/private-test/scripts/preinstall && rm -f Packaging/private-test/scripts/preinstall.bak"
+t narrow-preinstall bash <<'NARROW'
+set -euo pipefail
+cd repo
+sed -i.bak 's/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/j575d/' Packaging/private-test/scripts/preinstall
+python3 - <<'PYGATE'
+gate = """ver_ge() {
+  local IFS=.
+  local -a a=($1) b=($2)
+  local i
+  for i in 0 1 2; do
+    (( ${a[i]:-0} > ${b[i]:-0} )) && return 0
+    (( ${a[i]:-0} < ${b[i]:-0} )) && return 1
+  done
+  return 0
+}
+ver_ge "$version" "27.0.1" || { echo 'This probe needs macOS 27.0.1 or later: update to 27.0.1 first.' >&2; exit 1; }"""
+anchor = "[[ $major =~ ^[0-9]+$ ]] && (( major >= 15 )) || { echo 'macOS 15 or later is required.' >&2; exit 1; }"
+path = 'Packaging/private-test/scripts/preinstall'
+src = open(path).read()
+if '27.0.1 first' not in src:
+    assert anchor in src, 'preinstall version anchor missing'
+    src = src.replace(anchor, anchor + '\n' + gate)
+    open(path, 'w').write(src)
+PYGATE
+bash -n Packaging/private-test/scripts/preinstall && rm -f Packaging/private-test/scripts/preinstall.bak
+NARROW
 
 t tester-pkg bash -c "cd repo && rm -f ../omarchy-probe-j575d-tester.pkg && bash Packaging/private-test/build-tester-pkg.sh \
   '$b/app-final-r4/Omarchy Installer.app' \
@@ -71,7 +118,7 @@ files = ["omarchy-probe-j575d-tester.pkg",
          "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
          "probe-assets/probe-installer_data.json", "probe-assets/omarchy-probe-j575d-os-package.zip",
          "Preflight.command", "Stage assets.command", "Remove helper.command",
-         "Remove everything.command", "README.md", "Feedback.md", "manifest.json"]
+         "README.md", "Feedback.md"]
 def sha(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -79,7 +126,7 @@ def sha(path):
             h.update(block)
     return h.hexdigest()
 manifest = {
-  "bundle": "omarchy probe test, Mac Studio (M3 Ultra, j575dap), dry-run build",
+  "bundle": "omarchy probe test, Mac Studio (M3 Ultra, j575dap)",
   "installs": "loader-chain diagnostic only: the Mac boots into the m1n1 USB proxy and never boots any OS",
   "admitted_hardware": ["j575d"],
   "package": "omarchy-probe-j575d-tester.pkg",
@@ -110,6 +157,52 @@ print("bundle=" + zpath)
 print("bundle_sha256=" + sha(zpath))
 print("bundle_bytes=" + str(os.path.getsize(zpath)))
 PYBUNDLE
+
+t bundle-pin-check python3 - <<'PYCHECK'
+import hashlib, os, re, shutil, subprocess, sys, tempfile, zipfile
+b = os.path.expanduser("~/code/probe-build-20261025")
+zpath = os.path.join(b, "omarchy-probe-j575d-tester-bundle.zip")
+work = tempfile.mkdtemp(prefix="bundle-check-")
+with zipfile.ZipFile(zpath) as z:
+    z.extractall(work)
+extracted = os.path.join(work, "tester")
+def sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+# 1. every pin in the extracted Stage assets must match the shipped file.
+stage = open(os.path.join(extracted, "Stage assets.command")).read()
+pins = re.findall(r"^([0-9a-f]{64}) (\d+) (\S+)$", stage.split("<<'PINS'\n", 1)[1].split("\nPINS\n", 1)[0], re.M)
+assert pins, "no pins found"
+for digest, size, name in pins:
+    path = os.path.join(extracted, "probe-assets", name)
+    assert os.path.getsize(path) == int(size), f"size pin mismatch: {name}"
+    assert sha(path) == digest, f"sha pin mismatch: {name}"
+print(f"pin-check: {len(pins)} pins match the shipped files")
+# 2. SHA256SUMS in the bundle must match the extracted files.
+for line in open(os.path.join(extracted, "SHA256SUMS")):
+    digest, name = line.rstrip("\n").split("  ", 1)
+    assert sha(os.path.join(extracted, name)) == digest, f"SHA256SUMS mismatch: {name}"
+print("sha256sums-check: all entries match")
+# 3. the staging function must finish against the extracted bundle in a temp HOME.
+home = tempfile.mkdtemp(prefix="stage-home-")
+env = dict(os.environ, OMARCHY_STAGE_SOURCE_ONLY="1", HOME=home)
+script = os.path.join(extracted, "Stage assets.command")
+subprocess.run(
+    ["bash", "-c", 'set -euo pipefail; source "$1"; stage_bundle "$2" "$3"',
+     "_", script, extracted, home],
+    check=True, env=env,
+)
+staged = os.path.join(home, "Library", "Application Support",
+                      "org.omarchy.installer.private-m3-20260922", "staging",
+                      "probe-j575d-2026.10.25")
+staged_files = sorted(os.listdir(staged))
+assert len(staged_files) == 3, staged_files
+print("stage_bundle-run: OK ->", staged_files)
+shutil.rmtree(work)
+PYCHECK
 
 total1=$(date +%s)
 printf '%-28s %ss\n' TOTAL "$((total1 - total0))" | tee -a timings.txt
