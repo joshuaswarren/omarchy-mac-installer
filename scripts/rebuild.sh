@@ -10,6 +10,14 @@
 set -euo pipefail
 (( $# == 2 )) || { echo 'usage: rebuild.sh STAGE1_BIN STAGE2_BIN' >&2; exit 64; }
 b="$HOME/code/probe-build-20261025"
+board="${BOARD:-j575d}"
+case $board in
+  j575d) device_class=j575dap; device_identifier=apple,j575d; probe_name="Omarchy Probe (M3 Ultra)"; tester_pkg=${tester_pkg}; gate_board=j575d ;;
+  j873g) device_class=j873gap; device_identifier=apple,j873g; probe_name="Omarchy Probe (M6)"; tester_pkg=omarchy-probe-j873g-tester.pkg; gate_board=j873g ;;
+  *) echo "unknown board: $board" >&2; exit 64 ;;
+esac
+export board device_class device_identifier probe_name tester_pkg gate_board
+export EVIDENCE_LEAF="probe-${board}-2026.10.25"
 cd "$b"
 stage1=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 stage2=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
@@ -32,7 +40,7 @@ t probe-package bash -c "cd repo && python3 image-builder/probe-package.py \
   --catalog-baseline-metadata ../assets/installer_data.json \
   --downstream-revision '$rev' > ../pkg-build.log 2>&1"
 
-t restage-assets bash -c "cp pkg/omarchy-probe-j575d-os-package.zip pkg/probe-installer_data.json assets/"
+t restage-assets bash -c "cp pkg/omarchy-probe-${board}-os-package.zip pkg/probe-installer_data.json assets/"
 
 t derive-pins python3 - <<'PYPINS'
 import hashlib, os, re
@@ -40,7 +48,7 @@ b = os.path.expanduser("~/code/probe-build-20261025")
 pins = {
     "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz": os.path.join(b, "assets", "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz"),
     "probe-installer_data.json": os.path.join(b, "assets", "probe-installer_data.json"),
-    "omarchy-probe-j575d-os-package.zip": os.path.join(b, "pkg", "omarchy-probe-j575d-os-package.zip"),
+    "omarchy-probe-${board}-os-package.zip": os.path.join(b, "pkg", "omarchy-probe-${board}-os-package.zip"),
 }
 def sha(path):
     h = hashlib.sha256()
@@ -51,13 +59,14 @@ def sha(path):
 lines = "".join(f"{sha(p)} {os.path.getsize(p)} {n}\n" for n, p in pins.items())
 stage = os.path.join(b, "tester", "Stage assets.command")
 text = open(stage).read()
+text = text.replace("probe-j575d-2026.10.25", os.environ["EVIDENCE_LEAF"])
 text = re.sub(r"(<<'PINS'\n).*?(\nPINS\n)", lambda m: m.group(1) + lines + "PINS\n", text, flags=re.S)
 open(stage, "w").write(text)
 print("pins derived:", lines.splitlines())
 PYPINS
 
 t catalog bash -c "cd repo && python3 scripts/make-unsigned-catalog.py --developer \
-  --base-url https://mac.omarchy.org/v1/releases/probe-j575d-2026.10.25 \
+  --base-url https://mac.omarchy.org/v1/releases/probe-${board}-2026.10.25 \
   --assets-dir ../assets --inputs ../pkg/catalog-inputs.json \
   --output ../assets/probe-catalog-unsigned.json > ../catalog.log 2>&1"
 
@@ -75,7 +84,7 @@ t app bash -c "rm -rf '$b/app-final-r4' && cd repo && OMARCHY_PRIVATE_PLAIN_TEST
 t narrow-preinstall bash <<'NARROW'
 set -euo pipefail
 cd repo
-sed -i.bak 's/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/j575d/' Packaging/private-test/scripts/preinstall
+sed -i.bak 's/j433|j434|j504|j613|j615|j514s|j514c|j514m|j516s|j516c|j516m|j575d/$gate_board/' Packaging/private-test/scripts/preinstall
 python3 - <<'PYGATE'
 gate = """ver_ge() {
   local IFS=.
@@ -99,24 +108,24 @@ PYGATE
 bash -n Packaging/private-test/scripts/preinstall && rm -f Packaging/private-test/scripts/preinstall.bak
 NARROW
 
-t tester-pkg bash -c "cd repo && rm -f ../omarchy-probe-j575d-tester.pkg && bash Packaging/private-test/build-tester-pkg.sh \
+t tester-pkg bash -c "cd repo && rm -f ../${tester_pkg} && bash Packaging/private-test/build-tester-pkg.sh \
   '$b/app-final-r4/Omarchy Installer.app' \
-  $b/omarchy-probe-j575d-tester.pkg > ../pkg-build.log 2>&1"
+  $b/${tester_pkg} > ../pkg-build.log 2>&1"
 
 t package-test bash -c "cd repo && bash test/macos-private-package.sh \
   '$b/app-final-r4/Omarchy Installer.app' \
-  $b/omarchy-probe-j575d-tester.pkg > ../package-test.log 2>&1 && tail -1 ../package-test.log"
+  $b/${tester_pkg} > ../package-test.log 2>&1 && tail -1 ../package-test.log"
 
 t bundle python3 - <<'PYBUNDLE'
 import hashlib, json, os, shutil, zipfile
 b = os.path.expanduser("~/code/probe-build-20261025")
 tester = os.path.join(b, "tester")
-shutil.copy2(os.path.join(b, "omarchy-probe-j575d-tester.pkg"), os.path.join(tester, "omarchy-probe-j575d-tester.pkg"))
-for name in ("omarchy-probe-j575d-os-package.zip", "probe-installer_data.json"):
+shutil.copy2(os.path.join(b, "${tester_pkg}"), os.path.join(tester, "${tester_pkg}"))
+for name in ("omarchy-probe-${board}-os-package.zip", "probe-installer_data.json"):
     shutil.copy2(os.path.join(b, "assets", name), os.path.join(tester, "probe-assets", name))
-files = ["omarchy-probe-j575d-tester.pkg",
+files = ["${tester_pkg}",
          "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
-         "probe-assets/probe-installer_data.json", "probe-assets/omarchy-probe-j575d-os-package.zip",
+         "probe-assets/probe-installer_data.json", "probe-assets/omarchy-probe-${board}-os-package.zip",
          "Preflight.command", "Stage assets.command", "Remove helper.command",
          "README.md", "Feedback.md"]
 def sha(path):
@@ -129,11 +138,11 @@ manifest = {
   "bundle": "omarchy probe test, Mac Studio (M3 Ultra, j575dap)",
   "installs": "loader-chain diagnostic only: the Mac boots into the m1n1 USB proxy and never boots any OS",
   "admitted_hardware": ["j575d"],
-  "package": "omarchy-probe-j575d-tester.pkg",
+  "package": "${tester_pkg}",
   "staged_assets": {
     "engine": "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
     "metadata": "probe-assets/probe-installer_data.json",
-    "payload": "probe-assets/omarchy-probe-j575d-os-package.zip"},
+    "payload": "probe-assets/omarchy-probe-${board}-os-package.zip"},
   "probe_kit": {"name": "omarchy-m3-ultra-probe-kit.zip", "delivered_separately": True,
                 "note": "see the separate kit sha256 line"},
   "sealed_catalog_sha256": sha(os.path.join(b, "release-inputs", "catalog.json")),
@@ -197,7 +206,7 @@ subprocess.run(
 )
 staged = os.path.join(home, "Library", "Application Support",
                       "org.omarchy.installer.private-m3-20260922", "staging",
-                      "probe-j575d-2026.10.25")
+                      "probe-${board}-2026.10.25")
 staged_files = sorted(os.listdir(staged))
 assert len(staged_files) == 3, staged_files
 print("stage_bundle-run: OK ->", staged_files)
