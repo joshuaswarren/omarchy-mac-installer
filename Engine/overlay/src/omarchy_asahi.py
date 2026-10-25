@@ -427,19 +427,46 @@ if [ -z "$PRESTARTUP_VGID" ] || [ -z "$PRESTARTUP_VOLUME" ]; then
     exit 1
 fi
 printf "Pointing the startup disk back at macOS..."
-prestartup_mount="$(diskutil mount "$PRESTARTUP_VOLUME" >/dev/null 2>&1 \\
-    && diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
-prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
-prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
+prestartup_mount=""
 prestartup_mounted=no
-if [ -n "$prestartup_mount" ]; then
-    # Only a volume this script mounted gets unmounted again.
-    prestartup_mounted=yes
+prestartup_ok=no
+# Only a volume this script mounted is unmounted again, on every way out.
+picker_cleanup() {
+    if [ "$prestartup_mounted" = yes ]; then
+        diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
+    fi
+}
+trap 'picker_cleanup; cleanup' EXIT
+
+# Read the volume's state before touching anything: identity first, then
+# whether it is already mounted by someone else.
+prestartup_info="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null)" || prestartup_info=""
+if [ -n "$prestartup_info" ] \\
+    && [ "$(printf '%s' "$prestartup_info" | prestartup_field VolumeUUID)" = "$PRESTARTUP_VOLUME" ] \\
+    && [ "$(printf '%s' "$prestartup_info" | prestartup_field APFSVolumeGroupID)" = "$PRESTARTUP_VGID" ]; then
+    if [ "$(printf '%s' "$prestartup_info" | prestartup_field Mounted)" = "1" ] \\
+        && [ -n "$(printf '%s' "$prestartup_info" | prestartup_field MountPoint)" ]; then
+        # Already mounted by something else: use that path, never unmount.
+        prestartup_mount="$(printf '%s' "$prestartup_info" | prestartup_field MountPoint)"
+        prestartup_ok=yes
+    else
+        if diskutil mount "$PRESTARTUP_VOLUME" >/dev/null 2>&1; then
+            # Owned from this point: cleaned up on every way out, even if
+            # the identity re-check below fails.
+            prestartup_mounted=yes
+            prestartup_mount="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
+            prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
+            prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
+            if [ -n "$prestartup_mount" ] \\
+                && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ] \\
+                && [ "$prestartup_group" = "$PRESTARTUP_VGID" ]; then
+                prestartup_ok=yes
+            fi
+        fi
+    fi
 fi
 blessed=no
-if [ -n "$prestartup_mount" ] \\
-    && [ "$prestartup_group" = "$PRESTARTUP_VGID" ] \\
-    && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ]; then
+if [ "$prestartup_ok" = yes ]; then
     tries=0
     while :; do
         read_password
@@ -461,9 +488,8 @@ if [ -n "$prestartup_mount" ] \\
     done
     PASSWORD=""
 fi
-if [ "$prestartup_mounted" = yes ]; then
-    diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
-fi
+picker_cleanup
+prestartup_mounted=no
 if [ "$blessed" != yes ]; then
     echo
     echo "The startup disk could not be switched back to macOS. Nothing was"

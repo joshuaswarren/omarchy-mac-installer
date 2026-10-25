@@ -1395,9 +1395,14 @@ class PickerFakeDiskUtil(FakeDiskUtil):
 
 
 def plist_xml(pairs):
-    body = "".join(
-        f"<key>{key}</key><string>{value}</string>" for key, value in pairs
-    )
+    body = ""
+    for key, value in pairs:
+        if value is True:
+            body += f"<key>{key}</key><true/>"
+        elif value is False:
+            body += f"<key>{key}</key><false/>"
+        else:
+            body += f"<key>{key}</key><string>{value}</string>"
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -1414,7 +1419,11 @@ try:
     value = plistlib.loads(sys.stdin.buffer.read()).get(sys.argv[2])
 except Exception:
     sys.exit(1)
-if isinstance(value, str) and value:
+if value is True:
+    print(1)
+elif value is False:
+    print(0)
+elif isinstance(value, str) and value:
     print(value)
 """
 
@@ -1628,7 +1637,8 @@ prestartup_is_startup
         self.assertNotEqual(result.returncode, 0)
 
     def step2_with_fakes(self, kmutil_body, paired=True, bputil_mode="ok", password="secret",
-                         startup="macos", startup_policy=None, prestartup=None, mount_fails=False):
+                         startup="macos", startup_policy=None, prestartup=None, mount_fails=False,
+                         already_mounted=False, identity="ok"):
         """step2.sh in place, with fake recoveryOS tools first on PATH."""
         if startup_policy == "picker":
             group, volume = prestartup
@@ -1710,15 +1720,16 @@ prestartup_is_startup
             ))),
             "diskutil": ("\n".join((
                 # Real mount output names a device; the script reads the
-                # mount path from the plist instead of parsing this line.
-                ('[ "$1" = mount ] && { '
-                 + ('exit 1' if mount_fails else
-                    'echo "Volume Macintosh HD on disk3s1 mounted"')
-                 + '; exit 0; }'),
-                '[ "$1" = unmount ] && exit 0',
+                # mount path from the plist. The fake tracks mounted state
+                # in $MOUNTED and logs every mount/unmount call.
+                '[ "$1" = mount ] && { echo "mount $*" >>"$CALLS.diskutil"; '
+                + ('exit 1' if mount_fails else
+                   ': >"$MOUNTED"; echo "Volume Macintosh HD on disk3s1 mounted"')
+                + ' ; exit 0; }',
+                '[ "$1" = unmount ] && { echo "unmount $*" >>"$CALLS.diskutil"; rm -f "$MOUNTED"; exit 0; }',
                 '[ "$1" = info ] && [ "$2" = -plist ] || exit 1',
                 'case "$3" in',
-                '  "$PRESTARTUP_VOLUME") cat "$PLIST_VOLUME" ;;',
+                '  "$PRESTARTUP_VOLUME") if [ -e "$MOUNTED" ]; then cat "$PLIST_VOLUME_MOUNTED"; else cat "$PLIST_VOLUME"; fi ;;',
                 '  /dev/disk0s2) cat "$PLIST_MACOS_BOOT" ;;',
                 '  /dev/disk3s1s1) cat "$PLIST_SNAPSHOT" ;;',
                 '  /dev/omarchy) cat "$PLIST_STUB" ;;',
@@ -1742,17 +1753,25 @@ prestartup_is_startup
         if startup_policy == "picker":
             (bin_dir / "plutil").write_text(PLUTIL_FAKE)
             (bin_dir / "plutil").chmod(0o755)
-            volume_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group)]
-            if not mount_fails:
-                # The mounted volume's plist carries the mount path.
-                volume_plist.append(("MountPoint", "/Volumes/Macintosh HD"))
+            volume_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group),
+                            ("Mounted", False)]
+            mounted_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group),
+                             ("Mounted", True), ("MountPoint", "/Volumes/Macintosh HD")]
+            if identity == "wrong":
+                volume_plist[1] = ("APFSVolumeGroupID", "EEEE0000-1111-4222-8333-FFFFFFFFFFFF")
+            if identity in ("wrong", "wrong-after-mount"):
+                mounted_plist[1] = ("APFSVolumeGroupID", "EEEE0000-1111-4222-8333-FFFFFFFFFFFF")
             (root / "plist-volume.xml").write_text(plist_xml(volume_plist))
+            (root / "plist-volume-mounted.xml").write_text(plist_xml(mounted_plist))
             (root / "plist-macos-boot.xml").write_text(
                 plist_xml([("APFSVolumeGroupID", group), ("DeviceNode", "/dev/disk0s2")]))
             (root / "plist-snapshot.xml").write_text(
                 plist_xml([("APFSVolumeGroupID", group), ("DeviceNode", "/dev/disk3s1s1")]))
             (root / "plist-stub.xml").write_text(plist_xml([
                 ("APFSVolumeGroupID", "0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0")]))
+            if already_mounted:
+                # The macOS System volume is mounted before the script runs.
+                (root / "mounted").touch()
         calls = root / "kmutil-calls"
         Path(f"{calls}.boot").write_text("/dev/omarchy\n" if startup == "omarchy" else "/dev/disk0s2\n")
         env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", CALLS=str(calls),
@@ -1760,10 +1779,12 @@ prestartup_is_startup
         if startup_policy == "picker":
             env.update(
                 PLIST_VOLUME=str(root / "plist-volume.xml"),
+                PLIST_VOLUME_MOUNTED=str(root / "plist-volume-mounted.xml"),
                 PLIST_MACOS_BOOT=str(root / "plist-macos-boot.xml"),
                 PLIST_SNAPSHOT=str(root / "plist-snapshot.xml"),
                 PLIST_STUB=str(root / "plist-stub.xml"),
                 PRESTARTUP_VOLUME=volume,
+                MOUNTED=str(root / "mounted"),
             )
         return script, env, calls
 
@@ -1777,6 +1798,11 @@ prestartup_is_startup
     def assert_nothing_left_in_tmp(self):
         for name in STEP2_LOGS:
             self.assertFalse(os.path.exists(f"/tmp/{name}"), name)
+
+    def diskutil_calls(self, calls):
+        path = Path(f"{calls}.diskutil")
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [line.split()[0] for line in lines]
 
     PRESTARTUP = ("AAAA0000-1111-4222-8333-BBBBBBBBBBBB", "CCCC0000-2222-4333-8444-DDDDDDDDDDDD")
 
@@ -1797,6 +1823,25 @@ prestartup_is_startup
         self.assertIn("It runs once. A normal restart returns", out)
         self.assertIn("to macOS by itself.", out)
         self.assertNotIn("Press Enter to restart into $os_name.", out)
+        # The volume was mounted by the script, so the script unmounted it.
+        self.assertEqual(self.diskutil_calls(calls), ["mount", "unmount"])
+        self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_never_touches_an_already_mounted_volume(self):
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+            already_mounted=True,
+        )
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/disk0s2")
+        self.assertIn("Press Enter to restart into macOS. To start the probe:", out)
+        # Someone else's mount: the script mounts and unmounts nothing.
+        self.assertEqual(self.diskutil_calls(calls), [])
         self.assert_nothing_left_in_tmp()
 
     def test_the_picker_run_fails_closed_when_macos_cannot_be_mounted(self):
@@ -1814,6 +1859,42 @@ prestartup_is_startup
         self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
         self.assertIn("could not be switched back to macOS", out)
         self.assertIn("Nothing was", out)
+        self.assertEqual(self.diskutil_calls(calls), ["mount"])
+        self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_never_mounts_a_wrong_group_volume(self):
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+            identity="wrong",
+        )
+        out = result.stdout
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
+        self.assertIn("could not be switched back to macOS", out)
+        # The wrong group is refused from the first plist: no mount at all.
+        self.assertEqual(self.diskutil_calls(calls), [])
+        self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_cleans_its_own_mount_on_a_wrong_identity(self):
+        # The volume reads right, changes identity after the mount: the
+        # script's own mount is cleaned up even though the identity failed.
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+            identity="wrong-after-mount",
+        )
+        out = result.stdout
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
+        self.assertIn("could not be switched back to macOS", out)
+        self.assertEqual(self.diskutil_calls(calls), ["mount", "unmount"])
         self.assert_nothing_left_in_tmp()
 
     def test_kmutil_is_answered_out_of_sight(self):
