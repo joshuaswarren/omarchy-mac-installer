@@ -387,6 +387,31 @@ class AsahiStage1AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(AsahiAdapterError, "unknown Recovery GUI contract"):
             adapter.preflight(self.plan)
 
+    def test_unknown_startup_policy_is_not_silently_ignored(self):
+        metadata = self._target_metadata()
+        metadata["startup_policy"] = "permanent"
+        self._write_metadata([metadata])
+        adapter = self._adapter(FakeInstaller(FakeDiskUtil([[self.free]])))
+        with self.assertRaisesRegex(AsahiAdapterError, "unknown Omarchy startup policy"):
+            adapter.preflight(self.plan)
+
+    def test_absent_startup_policy_stays_default(self):
+        installer = FakeInstaller(FakeDiskUtil([[self.free]]))
+        adapter = self._adapter(installer)
+        adapter.preflight(self.plan)
+        self.assertEqual(adapter.startup_policy, "default")
+        self.assertEqual(installer.ins.startup_policy, "default")
+
+    def test_the_picker_policy_reaches_the_stub_installer(self):
+        metadata = self._target_metadata()
+        metadata["startup_policy"] = "picker"
+        self._write_metadata([metadata])
+        installer = FakeInstaller(FakeDiskUtil([[self.free]]))
+        adapter = self._adapter(installer)
+        adapter.preflight(self.plan)
+        self.assertEqual(adapter.startup_policy, "picker")
+        self.assertEqual(installer.ins.startup_policy, "picker")
+
     def test_preflight_rejects_an_extent_below_the_partition_floor(self):
         metadata = self._target_metadata()
         metadata["floor_size"] = 40 * GIB
@@ -1272,7 +1297,7 @@ class Step2ScriptTests(unittest.TestCase):
     # The fake recoveryOS tools' interpreter.
     fake_shell = "/bin/sh"
 
-    def make(self, owner, device_class="j314sap"):
+    def make(self, owner, device_class="j314sap", dutil=None, startup_policy=None):
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)
         step2 = Path(root.name) / "step2.sh"
@@ -1283,6 +1308,7 @@ class Step2ScriptTests(unittest.TestCase):
                 self.osi = SimpleNamespace(vgid="0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0", preboot_vgid="1A2B3C4D-5E6F-7081-92A3-B4C5D6E7F809", recovery=root.name)
                 self.sysinfo = SimpleNamespace(device_class=device_class)
                 self.step2_sh = str(step2)
+                self.dutil = dutil
 
             def load_identity(self):
                 pass
@@ -1299,7 +1325,9 @@ class Step2ScriptTests(unittest.TestCase):
         with patch("omarchy_asahi.stub.StubInstaller", Stub), patch.dict(
             os.environ, {"OMARCHY_MACHINE_OWNER": owner, "OMARCHY_INSTALLER_NAME": self.title}
         ):
-            installer = stub_installer("sysinfo", "dutil", "osinfo")
+            installer = stub_installer("sysinfo", dutil, "osinfo")
+            if startup_policy is not None:
+                installer.startup_policy = startup_policy
             installer.install_files("cur-os")
         return step2
 
@@ -1337,10 +1365,54 @@ class Step2ScriptTests(unittest.TestCase):
         self.assertNotIn('bputil -nca', legacy)
         self.assertNotIn('including USB proxy mode', legacy)
 
+    def test_the_default_policy_keeps_todays_script(self):
+        text = self.make("scott").read_text()
+        self.assertNotIn("STARTUP_POLICY", text)
+        self.assertNotIn("prestartup", text)
+        self.assertNotIn("##PICKER_BLOCK##", text)
+        self.assertIn("Press Enter to restart into $os_name.", text)
+
+    def test_the_picker_policy_switches_the_startup_disk_back(self):
+        dutil = SimpleNamespace()
+        dutil.get = lambda *command: {
+            "APFSVolumeGroupID": "AAAA0000-1111-4222-8333-BBBBBBBBBBBB",
+            "VolumeUUID": "CCCC0000-2222-4333-8444-DDDDDDDDDDDD",
+        }
+        step2 = self.make("scott", dutil=dutil, startup_policy="picker")
+        text = step2.read_text()
+        self.assertEqual(re.findall(r"##[A-Z]+##", text), [])
+        self.assertIn('STARTUP_POLICY="picker"', text)
+        self.assertIn('PRESTARTUP_VGID="AAAA0000-1111-4222-8333-BBBBBBBBBBBB"', text)
+        self.assertIn('PRESTARTUP_VOLUME="CCCC0000-2222-4333-8444-DDDDDDDDDDDD"', text)
+        self.assertIn('prestartup_is_startup', text)
+        self.assertIn('bless --setBoot --mount "$prestartup_mount" --user "$OWNER" --stdinpass', text)
+        self.assertIn("APFS Volume Group: +$PRESTARTUP_VGID", text)
+        self.assertIn("Press Enter to restart into macOS. To start the probe:", text)
+        self.assertIn("It runs once. A normal restart returns", text)
+        self.assertIn("to macOS by itself.", text)
+        # The default handover text is gone: the Mac restarts into macOS.
+        self.assertNotIn("Press Enter to restart into $os_name.", text)
+        result = subprocess.run([*self.shell, "-n", str(step2)])
+        self.assertEqual(result.returncode, 0)
+
+    def test_the_picker_policy_needs_the_prestartup_macos(self):
+        for info in ({}, {"APFSVolumeGroupID": "not-a-uuid"}, {"VolumeUUID": "also-not"}):
+            dutil = SimpleNamespace()
+            dutil.get = lambda *command, info=info: info
+            with self.assertRaisesRegex(AsahiAdapterError, "could not identify the macOS"):
+                self.make("scott", dutil=dutil, startup_policy="picker")
+
     def step2_with_fakes(self, kmutil_body, paired=True, bputil_mode="ok", password="secret",
-                         startup="macos"):
+                         startup="macos", startup_policy=None, prestartup=None, mount_fails=False):
         """step2.sh in place, with fake recoveryOS tools first on PATH."""
-        step2 = self.make("scott")
+        if startup_policy == "picker":
+            group, volume = prestartup
+            dutil = SimpleNamespace()
+            dutil.get = lambda *command: {
+                "APFSVolumeGroupID": group, "VolumeUUID": volume}
+            step2 = self.make("scott", dutil=dutil, startup_policy="picker")
+        else:
+            step2 = self.make("scott")
         root = Path(step2).parent
         resources = root / "Omarchy" / "Finish Installation.app" / "Contents" / "Resources"
         resources.mkdir(parents=True)
@@ -1386,23 +1458,34 @@ class Step2ScriptTests(unittest.TestCase):
             # Every sleep lasts 50 ms, so the one-minute deadline is twelve seconds.
             "sleep": f"exec {sleep} 0.05",
             # Like macOS's bless, it exits 0 whatever the password, and only
-            # a right one changes the startup disk.
+            # a right one changes the startup disk. For the picker policy it
+            # blesses whatever --mount names: macOS or the Omarchy stub.
             "bless": "\n".join((
                 '[ "$1" = --getBoot ] && { cat "$CALLS.boot"; exit 0; }',
                 'echo "$*" >>"$CALLS.bless"',
+                'case "$3" in /Volumes/Macintosh\\ HD) boot=/dev/disk0s2 ;; *) boot=/dev/omarchy ;; esac'
+                if startup_policy == "picker" else 'boot=/dev/omarchy',
                 'case "$*" in',
                 '*--stdinpass) IFS= read -r pw; echo "$pw" >>"$CALLS.bless"',
-                '    [ "$pw" = "$EXPECTED_PASSWORD" ] && echo /dev/omarchy >"$CALLS.boot" ;;',
+                '    [ "$pw" = "$EXPECTED_PASSWORD" ] && echo "$boot" >"$CALLS.boot" ;;',
                 # Without --stdinpass, bless asks the owner itself.
-                '*) echo /dev/omarchy >"$CALLS.boot" ;;',
+                '*) echo "$boot" >"$CALLS.boot" ;;',
                 'esac',
                 "exit 0",
             )),
             "diskutil": "\n".join((
+                # The picker policy mounts the macOS that was the startup disk.
+                ('[ "$1" = mount ] && { '
+                 + ('exit 1' if mount_fails else
+                    'echo "Volume Macintosh HD on /Volumes/Macintosh HD mounted"')
+                 + '; exit 0; }')
+                if startup_policy == "picker" else '[ "$1" = mount ] || true',
+                '[ "$1" = unmount ] && exit 0',
                 '[ "$1" = info ] || exit 0',
                 'case "$2" in',
                 "/dev/omarchy|*/Omarchy) printf '   Device Node:  /dev/omarchy\\n   APFS Volume Group:  0B1C2D3E-4F50-6172-8394-A5B6C7D8E9F0\\n' ;;",
-                "*) printf '   Device Node:  /dev/disk0s2\\n   APFS Volume Group:  MACOS-VG\\n' ;;",
+                "*) printf '   Device Node:  /dev/disk0s2\\n   APFS Volume Group:  "
+                + (prestartup[0] if startup_policy == "picker" else "MACOS-VG") + "\\n' ;;",
                 'esac',
             )),
             "kmutil": 'n=$(($(cat "$CALLS" 2>/dev/null || echo 0) + 1)); echo "$n" >"$CALLS"\n' + kmutil_body,
@@ -1426,6 +1509,44 @@ class Step2ScriptTests(unittest.TestCase):
     def assert_nothing_left_in_tmp(self):
         for name in STEP2_LOGS:
             self.assertFalse(os.path.exists(f"/tmp/{name}"), name)
+
+    PRESTARTUP = ("AAAA0000-1111-4222-8333-BBBBBBBBBBBB", "CCCC0000-2222-4333-8444-DDDDDDDDDDDD")
+
+    def test_the_picker_run_switches_back_and_hands_to_the_picker(self):
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+        )
+        out = result.stdout
+        self.assertEqual(result.returncode, 0, out + result.stderr)
+        # The startup disk is macOS again, not the Omarchy stub it started as.
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/disk0s2")
+        self.assertIn("Pointing the startup disk back at macOS...", out)
+        self.assertIn("Press Enter to restart into macOS. To start the probe:", out)
+        self.assertIn("It runs once. A normal restart returns", out)
+        self.assertIn("to macOS by itself.", out)
+        self.assertNotIn("Press Enter to restart into $os_name.", out)
+        self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_fails_closed_when_macos_cannot_be_mounted(self):
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+            mount_fails=True,
+        )
+        out = result.stdout
+        self.assertNotEqual(result.returncode, 0)
+        # The stub stays the startup disk, and the script says so out loud.
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
+        self.assertIn("could not be switched back to macOS", out)
+        self.assertIn("Nothing was", out)
+        self.assert_nothing_left_in_tmp()
 
     def test_kmutil_is_answered_out_of_sight(self):
         result, kmutil_calls, calls = self.run_step2(PROMPTING_KMUTIL)

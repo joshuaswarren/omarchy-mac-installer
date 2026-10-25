@@ -384,11 +384,104 @@ if [ -e "$system_dir/System/Library/CoreServices/SystemVersion-disabled.plist" ]
 fi
 cleanup
 
-echo
+##RESTART_BLOCK##"""
+
+
+# The default restart: the Omarchy volume stays the startup disk.
+DEFAULT_RESTART = """echo
 echo "${BOLD}Done.${RST} Press Enter to restart into $os_name."
 read -r _
 reboot
 """
+
+# The startup_policy "picker" tail: after the boot loader is installed, the
+# startup disk goes back to the macOS it was, so a restart boots macOS and the
+# user reaches the installed system once through Apple's startup picker.
+PICKER_BLOCK = """\\
+STARTUP_POLICY="picker"
+PRESTARTUP_VGID="##PRESTARTUP_VGID##"
+PRESTARTUP_VOLUME="##PRESTARTUP_VOLUME##"
+
+prestartup_is_startup() {
+    boot="$(bless --getBoot 2>/dev/null)" || return 1
+    [ -n "$boot" ] || return 1
+    diskutil info "$boot" 2>/dev/null | grep -Eiq "^ *APFS Volume Group: +$PRESTARTUP_VGID *\\$" && return 0
+    [ "$boot" = "$(diskutil info "$prestartup_mount" 2>/dev/null | sed -n 's/^ *Device Node: *//p')" ]
+}
+
+if [ -z "$PRESTARTUP_VGID" ] || [ -z "$PRESTARTUP_VOLUME" ]; then
+    echo
+    echo "The macOS that was the startup disk could not be identified, so the"
+    echo "startup disk was not switched back. Nothing was restarted. Ask the"
+    echo "maintainer to check this installer before using this Mac again."
+    read -r _
+    shutdown -h now
+    exit 1
+fi
+printf "Pointing the startup disk back at macOS..."
+prestartup_mount="$(diskutil mount "$PRESTARTUP_VOLUME" 2>/dev/null | sed -e 's/^Volume .* on //' -e 's/ mounted$//')"
+blessed=no
+if [ -n "$prestartup_mount" ]; then
+    tries=0
+    while :; do
+        read_password
+        printf '%s\\n' "$PASSWORD" | bless --setBoot --mount "$prestartup_mount" --user "$OWNER" --stdinpass >/tmp/bless.log 2>&1 || true
+        if prestartup_is_startup; then blessed=yes; break; fi
+        tries=$((tries + 1))
+        if [ "$tries" -ge 3 ]; then
+            echo
+            echo "macOS asks itself now. Type your user name and password."
+            until bless --setBoot --mount "$prestartup_mount" && prestartup_is_startup; do
+                echo "That didn't work. Press Enter to try again."
+                read -r _
+            done
+            blessed=yes
+            break
+        fi
+        echo
+        echo "That password didn't work for $OWNER. Try again."
+    done
+    PASSWORD=""
+fi
+diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
+if [ "$blessed" != yes ]; then
+    echo
+    echo "The startup disk could not be switched back to macOS. Nothing was"
+    echo "restarted, so $os_name stays the startup disk. Ask the maintainer to"
+    echo "check this installer before using this Mac again."
+    read -r _
+    shutdown -h now
+    exit 1
+fi
+echo
+echo "${BOLD}Done.${RST} Press Enter to restart into macOS. To start the probe:"
+echo "shut down, hold the power button until you see startup options, choose"
+echo "\\"$os_name\\", then press Continue. It runs once. A normal restart returns"
+echo "to macOS by itself."
+read -r _
+reboot
+exit 0
+
+"""
+
+
+def _prestartup_identity(installer):
+    """The macOS that was the startup disk: its volume group and volume UUID.
+
+    Stage one runs on the running macOS, so its root volume is the startup
+    disk the user came from.
+    """
+    info = installer.dutil.get("info", "-plist", "/")
+    group = info.get("APFSVolumeGroupID", "")
+    volume = info.get("VolumeUUID", "")
+    if (
+        VOLUME_GROUP_PATTERN.fullmatch(group or "") is None
+        or VOLUME_GROUP_PATTERN.fullmatch(volume or "") is None
+    ):
+        raise AsahiAdapterError(
+            "the picker startup policy could not identify the macOS that was the startup disk"
+        )
+    return group, volume
 
 
 def _write_step2(installer):
@@ -411,13 +504,23 @@ def _write_step2(installer):
         'echo "Custom Aura boot arguments, including USB proxy mode, will be allowed."'
         if allow_custom_args else ""
     )
+    startup_policy = getattr(installer, "startup_policy", "default")
+    prestartup_group, prestartup_volume = "", ""
+    if startup_policy == "picker":
+        prestartup_group, prestartup_volume = _prestartup_identity(installer)
+        restart_block = PICKER_BLOCK
+    else:
+        restart_block = DEFAULT_RESTART
     script = (
-        STEP2_SCRIPT.replace("##TITLE##", title)
+        STEP2_SCRIPT.replace("##RESTART_BLOCK##", restart_block)
+        .replace("##TITLE##", title)
         .replace("##VGID##", installer.osi.vgid)
         .replace("##PREBOOT##", installer.osi.preboot_vgid)
         .replace("##OWNER##", owner)
         .replace("##BOOT_POLICY_DISCLOSURE##", disclosure)
         .replace("##BOOT_POLICY##", "-nca" if allow_custom_args else "-nc")
+        .replace("##PRESTARTUP_VGID##", prestartup_group)
+        .replace("##PRESTARTUP_VOLUME##", prestartup_volume)
     )
     with open(installer.step2_sh, "w") as fd:
         fd.write(script)
@@ -1241,6 +1344,7 @@ class AsahiStage1Adapter:
         self.authorized_owner = authorized_owner
         self.source_bootstrap = None
         self.template = None
+        self.startup_policy = "default"
         self.osins = None
         self.os_firmware = None
         self.target_part = None
@@ -1324,6 +1428,7 @@ class AsahiStage1Adapter:
             self.installer.dutil,
             self.installer.osinfo,
         )
+        self.installer.ins.startup_policy = self.startup_policy
         required = self.template.get("required_neo_peripherals", [])
         if not isinstance(required, list) or any(item not in ("radio", "touch-id") for item in required):
             raise AsahiAdapterError("unknown required Neo peripheral contract")
@@ -2116,6 +2221,10 @@ class AsahiStage1Adapter:
         if recovery_mode not in (None, "omarchy-native-v1"):
             raise AsahiAdapterError("unknown Recovery GUI contract")
         self.native_recovery_gui = self.use_helper_recovery or recovery_mode is not None
+        startup_policy = self.template.get("startup_policy")
+        if startup_policy not in (None, "default", "picker"):
+            raise AsahiAdapterError("unknown Omarchy startup policy")
+        self.startup_policy = startup_policy or "default"
         if not self.use_helper_recovery and self.native_recovery_gui:
             try:
                 omarchy_recovery.validate_payload(self.osins.pkg)
