@@ -222,17 +222,31 @@ def engine_validate(output: Path, package_name: str) -> None:
     sys.modules.setdefault("util", SimpleNamespace(align_down=lambda value, align: value - value % align))
     sys.path.insert(0, str(HERE.parent / "Engine" / "overlay" / "src"))
     import omarchy_asahi  # noqa: E402
+    import omarchy_recovery  # noqa: E402
 
     metadata_path = output / "installer_data.json"
     payload_path = output / package_name
     metadata = omarchy_asahi.load_metadata(metadata_path)
     template = metadata["os_list"][0]
+    class BuildDutil:
+        """Offline stand-in for the pre-startup identity read; the build host
+        has no diskutil and the admission only needs a resolvable identity."""
+
+        def get(self, *args):
+            return {"APFSVolumeGroupID": "00000000-0000-0000-0000-000000000000",
+                    "VolumeUUID": "00000000-0000-0000-0000-000000000000"}
+
     adapter = omarchy_asahi.AsahiStage1Adapter(
-        installer=SimpleNamespace(sysinfo=SimpleNamespace(device_class="")),
+        installer=SimpleNamespace(sysinfo=SimpleNamespace(device_class=""),
+                                  dutil=BuildDutil()),
         metadata_path=metadata_path,
         payload_path=payload_path,
         stub_size=0,
     )
+    # Offline stand-in: on a Mac this read walks the running macOS; the build
+    # host has no diskutil, so the zero identity stands in for admission only.
+    omarchy_recovery.source_system_volume = lambda dutil, source_os: {
+        "APFSVolumeGroupID": source_os.vgid, "VolumeUUID": source_os.vgid}
     adapter.template = template
     adapter.use_helper_recovery = template.get("recovery_gui") is None
     with zipfile.ZipFile(payload_path) as pkg:
