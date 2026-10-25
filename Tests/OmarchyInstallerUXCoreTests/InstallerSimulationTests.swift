@@ -6,6 +6,29 @@
 
   @MainActor
   final class InstallerSimulationTests: XCTestCase {
+    func testExistingInstallReinstallUsesFixedExtentWithoutResizingMacOS() async {
+      let session = InstallerSession(
+        environment: InstallerSimulationEnvironment(scenario: .existingInstall, delay: .zero))
+      await session.inspect()
+      XCTAssertTrue(session.canReinstallOverExisting)
+      await session.reinstallOverExisting()
+      session.continueToPlanReview()
+      for requested: UInt64 in [137_438_953_472, 600_000_000_000] {
+        if requested != 137_438_953_472 { await session.replan(omarchyBytes: requested) }
+        guard case .planReview(let plan, _) = session.phase else {
+          return XCTFail("Expected replacement plan review")
+        }
+        XCTAssertFalse(plan.isResizable)
+        XCTAssertEqual(plan.omarchyBytes, 137_438_953_472)
+        XCTAssertEqual(plan.minimumBytes, plan.omarchyBytes)
+        XCTAssertEqual(plan.maximumBytes, plan.omarchyBytes)
+        XCTAssertEqual(plan.fixedMacOSBytes, 994_662_584_320 - 137_438_953_472)
+        XCTAssertEqual(plan.unallocatedBytes(for: plan.omarchyBytes), 0)
+        XCTAssertEqual(
+          plan.targetDescription, "Simulated internal disk · Replace the existing Omarchy")
+      }
+    }
+
     func testReserveColorPreviewCrossesBoundaryAndClearsAgain() async {
       let session = InstallerSession(
         environment: InstallerSimulationEnvironment(scenario: .reserveColorPreview, delay: .zero))
