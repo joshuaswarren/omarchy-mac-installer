@@ -65,6 +65,7 @@ sys.path.insert(0, str(ROOT.parent / "Engine" / "overlay" / "src"))
 sys.path.insert(0, str(ROOT.parent / "scripts"))
 
 import omarchy_asahi  # noqa: E402
+import omarchy_recovery  # noqa: E402
 
 _loader = importlib.machinery.SourceFileLoader(
     "probe_package", str(ROOT / "probe-package.py")
@@ -120,11 +121,27 @@ def build(output: Path, stage1: bool) -> None:
     probe.main()
 
 
+class FakeDutil:
+    def get(self, *args):
+        return {"APFSVolumeGroupID": "11111111-2222-3333-4444-555555555555",
+                "VolumeUUID": "99999999-8888-7777-6666-555555555555"}
+
+
+CAPTURED = {}
+
+
+def fake_source_system_volume(dutil, source_os):
+    CAPTURED["vgid"] = source_os.vgid
+    return {"APFSVolumeGroupID": source_os.vgid,
+                "VolumeUUID": source_os.vgid}
+
+
 def engine_adapter(output: Path, package_name: str):
     metadata_path = output / "installer_data.json"
     metadata = omarchy_asahi.load_metadata(metadata_path)
     adapter = omarchy_asahi.AsahiStage1Adapter(
-        installer=SimpleNamespace(sysinfo=SimpleNamespace(device_class=DEVICE_CLASS)),
+        installer=SimpleNamespace(sysinfo=SimpleNamespace(device_class=DEVICE_CLASS),
+                                  dutil=FakeDutil()),
         metadata_path=metadata_path,
         payload_path=output / package_name,
         stub_size=0,
@@ -132,6 +149,10 @@ def engine_adapter(output: Path, package_name: str):
     adapter.template = metadata["os_list"][0]
     adapter.use_helper_recovery = adapter.template.get("recovery_gui") is None
     adapter.osins = SimpleNamespace(pkg=zipfile.ZipFile(output / package_name))
+    real = omarchy_recovery.source_system_volume
+    omarchy_recovery.source_system_volume = fake_source_system_volume
+    adapter._restore_source_system_volume = lambda: setattr(
+        omarchy_recovery, "source_system_volume", real)
     return adapter
 
 
@@ -197,15 +218,26 @@ class ProbePackageTest(unittest.TestCase):
             # the contract once its shell-v1 work lands; until then this
             # assertion skips instead of failing the whole suite.
             self.assertEqual(adapter.template["recovery_gui"], "shell-v1")
-            self.assertEqual(adapter2.template["startup_policy"], "picker")
-            self.assertFalse(getattr(adapter2, "use_helper_recovery", False))
-            self.assertFalse(getattr(adapter2, "native_recovery_gui", False))
-            rendered_step2 = omarchy_asahi.STEP2_SCRIPT
-            self.assertIn("startup_policy", rendered_step2)
-            self.assertIn("##BOOT_POLICY##", rendered_step2)
+            # The pre-startup macOS identity was captured before any mutation
+            # and is what the rendered step2 verifies at restart time.
+            self.assertEqual(adapter.prestartup_group,
+                             "11111111-2222-3333-4444-555555555555")
+            self.assertEqual(CAPTURED["vgid"],
+                             "11111111-2222-3333-4444-555555555555")
+            self.assertIn("##VGID##", omarchy_asahi.STEP2_SCRIPT)
+            self.assertIn("##BOOT_POLICY##", omarchy_asahi.STEP2_SCRIPT)
+            overlay = open(omarchy_asahi.__file__).read()
+            self.assertIn('recovery_mode == "shell-v1"', overlay)
+            self.assertIn("the shell Recovery setup takes no Recovery app", overlay)
+            self.assertIn("the picker startup policy lost the pre-startup macOS identity", overlay)
+            picker_block = omarchy_asahi.__dict__.get("PICKER_BLOCK")
+            self.assertIsNotNone(picker_block)
+            self.assertIn("PRESTARTUP_VGID", picker_block)
+            self.assertIn("PRESTARTUP_VOLUME", picker_block)
             self.assertEqual(
                 metadata["os_list"][0]["allowed_device_classes"], [DEVICE_CLASS]
             )
+            adapter._restore_source_system_volume()
             inputs = json.loads((output / "catalog-inputs.json").read_text())
             # The main group pins the baseline payload, only the developer
             # group offers the probe: other Macs are never offered the probe.
@@ -242,6 +274,7 @@ class ProbePackageTest(unittest.TestCase):
             )
             layout = omarchy_asahi.esp_board_layout(DEVICE_CLASS, esp)
             self.assertEqual(layout["esp/m1n1/boot.bin"], "m1n1/boot.bin")
+            adapter._restore_source_system_volume()
 
 
 if __name__ == "__main__":
