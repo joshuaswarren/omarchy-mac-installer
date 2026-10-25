@@ -1,6 +1,6 @@
 # Layout and experience review
 
-Status: **Approved and implemented locally** in `feature/installer-audit-simulation`.
+Status: **Implemented.**
 
 | Priority | Current issue | Proposed improvement | Acceptance check |
 | --- | --- | --- | --- |
@@ -17,4 +17,4 @@ Status: **Approved and implemented locally** in `feature/installer-audit-simulat
 
 The authorization proposal should be reviewed in normal, rejected-credential, working and Recovery-retry states at both 640×600 and 780×850 window sizes, with keyboard navigation and VoiceOver. The simulator now uses the same field layout, with read-only dummy values. Dark and light authorization sheets were visually inspected; the window minimum enforced a 640×632 outer size when 640×600 was requested. Native accessibility inspection confirmed account labels and inline credential rejection. VoiceOver speech and physical installation were not exercised.
 
-The authorization layout, message changes, technical-details disclosure and copyable installation record are implemented. See [the full message table](Message-review.md) for the approved baseline and implementation notes.
+The authorization layout, message changes, technical-details disclosure and copyable installation record are implemented. The approved wording lives in `Sources/OmarchyInstallerUXCore/PlainLanguage.swift`.

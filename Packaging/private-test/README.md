@@ -14,7 +14,7 @@ Open Terminal, type `cd `, drag the extracted folder into the window, and press 
 bash Preflight.command
 ```
 
-This verifies the bundle checksums and checks the Mac model, macOS version and existing installer files. It does not install anything or change partitions. macOS 15 or later is required. If it reports existing installer/helper files or an unsupported model, stop and send the exact result to Scott. If another Linux installation is already present, tell Scott before proceeding; do not use an old removal script.
+This verifies the bundle checksums and checks the Mac model, macOS version and existing installer files. It does not install anything or change partitions. macOS 15 or later is required. If it reports existing installer/helper files or an unsupported model, stop and report the exact result before continuing. If another Linux installation is already present, stop before proceeding; do not use an old removal script.
 
 Keep the extracted folder available until installation finishes. Allow space for the extracted image and another staging copy, in addition to the Linux size shown in the app. The preflight reports the current free space.
 
@@ -38,7 +38,7 @@ The macOS Installer asks for administrator approval. The package installs the ap
 
 Open **Omarchy Installer** from Applications. If macOS blocks the app too, use the same per-item **Open Anyway** process for the app. This package's Gatekeeper approval and helper installation are part of the private test; their end-to-end behavior on a downloaded copy has not yet been physically validated.
 
-Check the model, available space and proposed Linux size. The app must say that this private test installs Linux **without disk encryption**. Keep the default Asahi image; this build does not offer a channel switch. If the helper cannot be reached or any check fails, stop and send Scott the exact error instead of using sudo or an older installer.
+Check the model, available space and proposed Linux size. The app must say that this private test installs Linux **without disk encryption**. Keep the default image; this build does not offer a channel switch. If the helper cannot be reached or any check fails, stop and record the exact error instead of using sudo or an older installer.
 
 Choosing **Install** and confirming the requested authorization begins disk changes. Review the plan before doing so. Follow the app's Recovery handoff and startup instructions. Do not repeat a failed disk-operation step just to reproduce an error.
 
@@ -46,4 +46,4 @@ Choosing **Install** and confirming the requested authorization begins disk chan
 
 Use `Feedback.md`. First boot, Wi-Fi, display responsiveness, audio, explicit microphone selection, lid suspend/resume and a second normal boot are the initial checks. GPU acceleration, camera, Bluetooth, external displays, encryption and snapshots are not qualified by this image. Omit passwords, recovery keys and serial numbers from feedback.
 
-This package refuses to replace an existing installer/helper. Ask Scott before installing a later installer version or removing the helper; this private build installs it under `/Library/PrivilegedHelperTools`.
+This package refuses to replace an existing installer/helper. Ask the maintainer before installing a later installer version or removing the helper; this private build installs it under `/Library/PrivilegedHelperTools`.

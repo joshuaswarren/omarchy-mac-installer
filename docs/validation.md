@@ -14,18 +14,19 @@ The Linux source checks are `bash test/all`. They compile Python, check shell sy
 
 - **Portable checks** runs `bash test/all` on Ubuntu 24.04 with Python 3.12, including shell syntax, Python compilation, engine/catalog tests and packaging/publication fixtures.
 - **macOS checks** runs strict Swift formatting and debug/release Swift tests on an Apple Silicon macOS 15 runner using Xcode 26.2 and the same checksum-pinned XcodeBuildMCP 2.7.0 used for the initial Mac validation.
+- **Image builder source checks** runs `bash image-builder/test/all` on Ubuntu 24.04 with Python 3.12 plus `libarchive-tools`, `jq`, `gnupg`, `zstd` and `xz-utils`; it needs no container, network or root.
 
 The read-only live physical-Mac inspection test explicitly skips `VirtualMac` hosts. Hosted CI cannot assert a physical Mac model or internal disk; the fixture-based inspection and blocked-model tests still run in both configurations, and the live check remains enabled on real Macs.
 
-Both jobs record the checked-out commit and tool versions and retain logs as Actions artifacts for 14 days, including failures. Pull requests test GitHub's proposed merge revision. GitHub Actions are pinned to commit hashes; tool updates should change the pin and its version comment together. Explicit Bash execution enables `errexit` and `pipefail`, so collecting logs through `tee` does not hide test failures.
+All jobs record the checked-out commit and tool versions and retain logs as Actions artifacts for 14 days, including failures. Pull requests test GitHub's proposed merge revision. GitHub Actions are pinned to commit hashes; tool updates should change the pin and its version comment together. Explicit Bash execution enables `errexit` and `pipefail`, so collecting logs through `tee` does not hide test failures.
 
-CI uses hosted runners, read-only repository access and no release secrets. It performs source checks and fixture tests; app assembly with an authenticated engine, production signing, visual review and physical installation remain separate validation steps. Require both named checks along with the existing independent review before merging to `main`.
+CI uses hosted runners, read-only repository access and no release secrets. It performs source checks and fixture tests; app assembly with an authenticated engine, production signing, visual review and physical installation remain separate validation steps. Require all three named checks along with the existing independent review before merging to `main`.
 
 ## Local evidence
 
-The extraction was checked on 2026-09-20 as the non-root `scott` user on aarch64 Linux with Python 3.14.7. The portable suite passed: 37 engine tooling tests, 104 engine overlay tests and 17 catalog tests (158 Python tests), plus all existing preclean and three extracted packaging/publication shell tests. Python compilation and shell syntax checks passed.
+The extraction was checked on 2026-09-20 as a non-root user on aarch64 Linux with Python 3.14.7. The portable suite passed: 37 engine tooling tests, 104 engine overlay tests and 17 catalog tests (158 Python tests), plus all existing preclean and three extracted packaging/publication shell tests. Python compilation and shell syntax checks passed.
 
-The same source revision, `3f1e30bb265e77da04ce03533be0a7dddaa8c84c`, was then validated on Scott's M4 Pro (`Mac16,7`, arm64), running macOS 26.6.2 (25G83), Xcode 27.0 (27A266a) and Swift 6.4. XcodeBuildMCP 2.7.0 was staged inside the validation workspace from its official standalone archive, verified against the publisher's SHA-256 `bd724a2c0e6ffe027b3f46257e66d626149a64cd045f4867124bd683b3cf081a`.
+The same source revision, `3f1e30bb265e77da04ce03533be0a7dddaa8c84c`, was then validated on an M4 Pro (`Mac16,7`, arm64) running macOS 26.6.2 (25G83), Xcode 27.0 (27A266a) and Swift 6.4. XcodeBuildMCP 2.7.0 was staged inside the validation workspace from its official standalone archive, verified against the publisher's SHA-256 `bd724a2c0e6ffe027b3f46257e66d626149a64cd045f4867124bd683b3cf081a`.
 
 | Check | Result |
 | --- | --- |
@@ -36,8 +37,8 @@ The same source revision, `3f1e30bb265e77da04ce03533be0a7dddaa8c84c`, was then v
 | Development app assembly | Passed with the exact pinned inspection engine |
 | Ad-hoc app and helper signatures | Deep/strict verification and reciprocal code requirements passed |
 | Bundle structure | Executables, helper plist, release inputs and engine verified |
-| Debug simulation launch | Scott confirmed the simulation window is visible |
-| Successful installation → Recovery simulation | Scott completed the flow and shutdown confirmation; the app displayed “Simulation complete: shutdown would begin now. Your Mac stays on.” |
+| Debug simulation launch | The simulation window was confirmed visible |
+| Successful installation → Recovery simulation | The flow and shutdown confirmation completed; the app displayed "Simulation complete: shutdown would begin now. Your Mac stays on." |
 
 The app was assembled with a separate development copy of the release descriptor using an ad-hoc helper requirement. The tracked production descriptor, public key and source code were unchanged. No production signing credentials, helper registration or installation operation were used.
 
@@ -47,7 +48,7 @@ The Python/shell suite was not repeated on macOS: its installed Python 3.9.6 and
 
 ## macOS build handoff
 
-Scott has an M3 Air and an M4 Pro available with macOS. Either can be the primary build machine. Build once against the recorded revision and use the second machine for a separate UI or host-support check when useful; do not run duplicate qualification jobs for the same inputs.
+An M3 Air and an M4 Pro are available with macOS; either can be the primary build machine. Build once against the recorded revision and use the second machine for a separate UI or host-support check when useful; do not run duplicate qualification jobs for the same inputs.
 
 1. Copy or clone the standalone repository and check out the candidate revision. Record `git rev-parse HEAD`, `sw_vers`, `uname -m`, `xcodebuild -version` and `xcrun swift --version` with the results. The package requires macOS 15+ and Swift 6.2+; use an Xcode toolchain meeting those requirements and XcodeBuildMCP.
 2. Run the portable suite with Bash 5 and its listed dependencies.
@@ -66,7 +67,7 @@ These steps require no helper registration, real machine-owner credentials, prod
 
 ## Before packaging or installation
 
-For another app assembly, supply the exact authenticated inspection engine described in [extraction.md](extraction.md#inherited-prerequisites-and-open-issues) and review the resulting app structure and code-signing requirements. The initial ad-hoc assembly passed; a complete native engine rebuild remains a separate unvalidated path. The current publisher's catalog, public key and signing identity are not interchangeable with a new Omacom release identity.
+For another app assembly, supply the exact authenticated inspection engine described in [extraction.md](extraction.md#build-prerequisites) and review the resulting app structure and code-signing requirements. The initial ad-hoc assembly passed; a complete native engine rebuild remains a separate unvalidated path. The current publisher's catalog, public key and signing identity are not interchangeable with a new Omacom release identity.
 
 An M3 Air may be a physical validation candidate only after its exact model, engine support and intended payload are checked. The M4 Pro is available for macOS development; `apple,j614s` remains explicitly blocked. No hardware restriction is relaxed by this extraction.
 
