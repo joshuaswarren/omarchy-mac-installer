@@ -54,6 +54,9 @@ cat <<'TREE'
     "BluetoothUHEDevices" = <0011223344556677>
     "wifi-calibration-msf" = <8899aabbccddeeff>
     "sfr-manifest-data" = <0123456789abcdef>
+    "fmm-mobileme-token-FMM" = <5445535446414b45>
+    "computer-name" = "TestOwnerMac"
+    "host-name" = "testowner-studio"
     "uuid" = <"ABCDEF01-2222-3333-4444-555566667777">
     "IOUserClientCreator" = "pid 321, TestPrivateApp"
     "gpu-core-count" = 80
@@ -115,7 +118,7 @@ grep -q "oslog-uuid" "$dir/device-tree.txt" || fail "other uuid keys are kept"
 if grep -q -E 'testowner|555 0100|example.invalid|TESTCTRLID|TESTNESTEDCTRL|1A2B3C4D-1111|ABCDEF01-2222|TestPrivateApp|AAAAAAAA-BBBB' "$dir/device-tree.txt" "$dir/gpu.txt"; then
   fail "owner name, contact text, controller id, volume uuid and app names are removed or masked"
 fi
-if grep -q -i -E 'bluetooth|calibration|manifest-data' "$dir/device-tree.txt" "$dir/gpu.txt"; then
+if grep -q -i -E 'bluetooth|calibration|manifest-data|fmm-|computer-name|host-name|TestOwnerMac|testowner-studio' "$dir/device-tree.txt" "$dir/gpu.txt"; then
   fail "pairing and factory calibration blobs are removed"
 fi
 grep -q '"uuid" = <"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' "$dir/device-tree.txt" || fail "a uuid value is masked and its key kept"

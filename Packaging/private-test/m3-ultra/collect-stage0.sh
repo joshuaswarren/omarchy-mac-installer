@@ -20,7 +20,7 @@ MINIMUM_MACOS="27.0.1"
 # the lock-screen contact text (good-samaritan-message), the storage controller's
 # unique id, the running programs' names (IOUserClientCreator), and per-Mac factory or
 # pairing data (Bluetooth device records, calibration blobs, installer and boot manifest data).
-DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path|IOConsoleUsers|good-samaritan|controller-unique-id|IOUserClientCreator|bluetooth|IDInstallerData|calibration|manifest-data|manifest-hash|sidp-rom|rom-panic|Tunnel Endpoint GUID)[^"]*" *=|^[[:space:]|+-]*"CEPO" *='
+DROP_KEYS='^[[:space:]|+-]*"[^"]*(mac-?addr|ecid|serial|unique-chip-id|unique-device-id|die-id|vuid|udid|IOPlatformUUID|boot-uuid|device-uuid|hw-uuid|random-seed|nonce|fm-account-identifier|boot-manifest-hash|boot-objects-path|IOConsoleUsers|good-samaritan|controller-unique-id|IOUserClientCreator|bluetooth|IDInstallerData|calibration|manifest-data|manifest-hash|sidp-rom|rom-panic|Tunnel Endpoint GUID|fmm-|computer-name|host-?name)[^"]*" *=|^[[:space:]|+-]*"CEPO" *='
 # The same names inside a dictionary value, which ioreg prints on one line as "name"=<value>.
 DROP_NESTED='"[^"]*(mac-?addr|ecid|serial-number|unique-chip-id|unique-device-id|udid|vuid|die-id|UserName|UniqueSessionUUID|controller-unique-id|IOUserClientCreator|good-samaritan)[^"]*"='
 DROP_TEXT='Serial Number|Hardware UUID|Provisioning UDID|Activation Lock|Serial number'
