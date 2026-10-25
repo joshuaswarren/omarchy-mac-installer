@@ -5,6 +5,9 @@ Usage: python3 run-probe.py [--power-gpu]
 
 Waits up to two minutes for the Mac's boot loader to appear as a USB serial device, then runs the probe
 once and writes ./probe-out-<time>/. SEND probe.txt AND SHA256SUMS ONLY. Never send the private folder.
+
+On a computer that has other USB serial devices plugged in, pick the Mac's port yourself:
+set M1N1DEVICE=/dev/... (for example /dev/ttyACM0 or /dev/cu.usbmodem...01) before running.
 """
 import glob
 import os
@@ -46,7 +49,13 @@ def main():
     args = [sys.executable, os.path.join(HERE, "proxyclient", "tools", "stage1_probe_t6032.py"), out]
     args += [a for a in sys.argv[1:] if a == "--power-gpu"]
     rc = subprocess.call(args, env=env)
-    print(f"\nDone (exit {rc}). Send {out}/probe.txt and {out}/SHA256SUMS only. Do NOT send {out}/private.")
+    if rc == 0:
+        print(f"\nDone. Send {out}/probe.txt and {out}/SHA256SUMS only. Do NOT send {out}/private.")
+    else:
+        print(f"\nFAILED (exit {rc}). Copy ALL the text above from this window and send it, with a photo of the Mac's screen.")
+        if os.path.exists(os.path.join(out, "probe.txt")):
+            print(f"Also send {out}/probe.txt (partial). Do NOT send {out}/private.")
+        print("If this computer has other USB serial devices, set M1N1DEVICE=/dev/... to the Mac's port and run again.")
     sys.exit(rc)
 
 
