@@ -31,7 +31,7 @@ rev=$(cat .downstream-revision)
 : > timings.txt
 total0=$(date +%s)
 
-t() { local name=$1 shift_secs; shift; local t0=$(date +%s); "$@"; local rc=$?; local t1=$(date +%s)
+t() { local name=$1 shift_secs rc=0; shift; local t0=$(date +%s); "$@" || rc=$?; local t1=$(date +%s)
   printf '%-28s %ss\n' "$name" "$((t1 - t0))" | tee -a timings.txt
   if (( rc != 0 )); then printf '%-28s FAILED rc=%s\n' "$name" "$rc" | tee -a timings.txt; exit $rc; fi; }
 
