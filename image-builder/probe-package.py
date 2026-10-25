@@ -102,6 +102,12 @@ def build_metadata(args, package_name: str, image_bytes: int) -> dict:
         "package": package_name,
         "supported_fw": [args.os_firmware],
         "allowed_device_classes": [args.device_class],
+        # The shell Recovery contract: the stub keeps the rendered step2 (which
+        # carries the picker startup policy and the captured macOS volume
+        # group), and no native launcher replaces it. Admitted by the engine
+        # overlay once its shell-v1 contract lands.
+        "recovery_gui": "shell-v1",
+        "startup_policy": "picker",
         "partitions": partitions,
     }
     if args.stage1:
