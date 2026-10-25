@@ -1,53 +1,112 @@
 # Omarchy Mac Installer
 
-Development source for the Apple Silicon macOS installer, extracted from [maralcbr/omarchy-mx-mac](https://github.com/maralcbr/omarchy-mx-mac) into [omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer).
+Source for a macOS app that installs Omarchy Linux alongside macOS on Apple
+Silicon. This fork tracks
+[omacom/omarchy-mac-installer](https://github.com/omacom/omarchy-mac-installer),
+extracted from [maralcbr/omarchy-mx-mac](https://github.com/maralcbr/omarchy-mx-mac).
 
-This first extraction preserves the installer behavior and Git attribution. The app is now named **Omarchy Installer**; it keeps the original `com.omarchy.mx.*` identifiers, download keys and release configuration, and the package removes a copy left under the old name, Omarchy MX Mac Installer. Integration with the shared Omarchy packages and Linux installation image is the next, separate change. This candidate is not an installation release.
+The app is called Omarchy Installer. It keeps the `com.omarchy.mx.*` app IDs
+and the original release settings. The package also removes a copy with the
+old name, Omarchy MX Mac Installer.
 
-## Source layout
+This source snapshot is not a tested installation release. Building the app
+does not establish that it is safe to install on a real Mac. The inherited
+release tools still target the original publisher's services.
 
-| Directory | Responsibility |
-| --- | --- |
-| `Sources/`, `Tests/`, `Package.swift` | Swift macOS app, trust core, helper, simulation and tests |
-| `Engine/` | Pinned Asahi source lock, Python overlay, build tooling and tests |
-| `Packaging/` | App and macOS package assembly |
-| `Release/` | Inherited public trust root and release descriptor |
-| `scripts/` | Catalog and release tools, with fixture tests |
-| `test/` | Portable aggregate runner and extracted packaging tests |
-| `evidence/` | Recorded journal fixture required by the Swift tests and preview |
+## Mac support
 
-## Supported Macs
+The [model list](scripts/supported-models.json) names 34 M1, M2 and M3 boards.
+Check that list before building a catalog. A release must enable all supported
+boards, not a subset.
 
-Every catalog that offers a Mac release enables every M1, M2 and M3 Mac: the 34 boards in [`scripts/supported-models.json`](scripts/supported-models.json). `make-unsigned-catalog.py` refuses inputs that miss, add or refuse one, and `publish-channels envelope` refuses to wrap a catalog that lists a Mac but leaves any of them out or disabled; only an empty "No Mac release yet" catalog lists none. `os-promote` does not re-check an envelope staged before this rule, so a rollback to an older catalog stays possible. The file also names the boards that stay refused and why: the M3 Ultra Mac Studio (`apple,j575d`), which the pinned v0.9.2 engine cannot inspect, and M4 and later (`apple,j614s`). M3 Macs run with software rendering (llvmpipe) until their GPU driver lands.
+- M3 Ultra Mac Studio (`apple,j575d`) is refused. The pinned engine has no
+  entry for it and cannot inspect or plan its disk.
+- M4 and newer Macs are refused, including `apple,j614s`.
+- M3 uses software rendering (llvmpipe), not an accelerated GPU driver.
 
-## Start with the tests
+These are this snapshot's limits, not a claim about all Linux installers.
+See [the release guide](Release/README.md) for catalog rules.
 
-The portable suite requires Bash 5+, Python 3.12+, Git and standard Unix tools, including GNU `sha256sum`. It runs on Linux and can run on macOS with those tools installed:
+## Install flow
 
-```bash
+Back up macOS before changing the disk. The app works through these steps:
+
+1. Check the Mac model and the bundled inspection engine.
+2. Download and verify the payload. Propose the disk layout. Confirm your
+   backup, choose the Linux size and choose whether to encrypt it.
+3. Enter a macOS admin account and password. The app keeps them in memory,
+   uses them once, and starts the disk changes only after approval.
+4. Write the install, with checkpoints and a journal for recovery.
+5. Shut down. Hold the power button until Loading startup options appears.
+   Choose Omarchy > Finish Installation. Sign in once with your macOS account.
+6. Confirm the new system can boot.
+
+The layout uses free space for an APFS container, EFI, Linux boot and Linux
+root partitions. The APFS container is at most 4 GiB. The engine reserves
+38,000,000,000 bytes for macOS, regardless of disk size.
+
+Encryption is on by default. You can turn it off on the plan screen. The
+Omarchy password you create at first boot also unlocks the disk. There is no
+separate recovery key. Keep that password safe.
+
+This version refuses to install over an existing Omarchy install. Use
+Installation > Remove Omarchy first. Removal requires the exact phrase
+`delete omarchy installation and data` and gives the space back to macOS.
+Read [the removal guide](Development/Removal.md) before using it.
+
+A failed or interrupted step blocks a new install until its journal is
+resolved. Do not assume that a failed operation left the disk unchanged.
+
+## Build and test
+
+The portable tests need Bash 5+, Python 3.12+, Git and standard Unix tools,
+including GNU `sha256sum`. They use fixtures and install nothing:
+
+```sh
 bash test/all
 ```
 
-On macOS, use a Bash 5 installation explicitly if the system Bash is older. The suite uses temporary fixtures and mocked publishing/SSH commands; it does not install anything. The source directory is sufficient; no desktop checkout or engine binary is needed for these tests. The Linux suite passed, followed by strict Swift formatting, 402 debug tests, 396 release tests and ad-hoc app assembly on an M4 Pro. The debug simulation also launched successfully; see the [recorded validation and limits](docs/validation.md#local-evidence).
+The Swift app needs macOS 15+ and Swift 6.2+. Start with strict format checks:
 
-The Swift package requires macOS 15+ and Swift 6.2+. Follow [validation.md](docs/validation.md) for Xcode checks and a simulation-only review. App packaging additionally requires an authenticated engine archive; see [the extraction prerequisites](docs/extraction.md#inherited-prerequisites-and-open-issues) before following the inherited [packaging guide](Packaging/README.md).
+```sh
+xcrun swift-format lint --strict --recursive Package.swift Sources Plugins Tests
+```
 
-## Review and next steps
+Then run the debug and release tests. The
+[validation guide](docs/validation.md) lists the commands and prior results.
+Use its simulation path to review the UI without disk changes.
 
-Start by reviewing the [standalone adaptations against the unchanged extraction](https://github.com/omacom/omarchy-mac-installer/compare/0d6f8661a5ad7b263d6167f0afea7cae033419a0...main). The original commit mapping and validation evidence are linked below.
+[Packaging/build-app.sh](Packaging/README.md) builds the app without
+installing it. It needs the release inputs and the exact pinned engine archive.
+Read [the engine guide](docs/extraction.md) before packaging.
 
-Changes to `main` go through pull requests with approval from someone other than the author. The [CI checks](docs/validation.md#continuous-integration) cover portable tests, Swift formatting and both Swift build configurations. Define the Linux image and shared package inputs in separate changes. Physical installation qualification follows the assembled image/package integration.
+CI checks the portable suite, Swift formatting and tests, and image-builder
+sources. Swift runs on an Apple Silicon macOS 15 runner. CI logs stay available
+for 14 days. A passing build is not a physical install test.
 
-- [Extraction provenance and boundaries](docs/extraction.md): original revision, preserved history, inherited build issues and future shared-package integration.
-- [Validation and macOS handoff](docs/validation.md): what has been checked and what remains.
-- [Simulation guide](Development/Simulation.md): debug-only UI scenarios that avoid real installation.
+## Engine and Linux image
 
-The preserved release and cutover tools target the original publisher's infrastructure. They are not a release procedure for Omacom. Publishing, signing, privileged helper registration and physical installation require separate preparation and authorization.
+`Engine/` holds the engine source lock, Python overlay and rebuild tools.
+[The engine guide](docs/extraction.md) records its versions, hashes and
+reproduction steps.
+
+`image-builder/` produces the Apple Silicon Linux image. Start with its
+[build guide](image-builder/README.md); see also
+[entry points and checks](docs/image-builder.md) and
+[component sources](docs/image-producer.md).
+
+## More documentation
+
+- [Validation and test results](docs/validation.md)
+- [Removing Omarchy](Development/Removal.md)
+- [Debug simulations](Development/Simulation.md)
+- [Staging and read-back behavior](Development/Installation-performance.md)
+- [App packaging and notarization](Packaging/README.md)
+- [Release descriptors, trust and channels](Release/README.md)
+- [Private tester build](Packaging/private-test/README.md)
 
 ## License
 
-The original [MIT license](LICENSE), copyright notice and Git attribution are retained. External engine dependencies retain their own licenses; their exact revisions are recorded in `Engine/source-lock.json`.
-
-## Linux image producer
-
-The Apple Silicon image producer is `image-builder/`: mx-mac's `build-mac-image`, building from a signed candidate set with the authenticated candidate importer, and inspecting each image before it is packaged. See [checks and entrypoints](docs/image-builder.md), [how to build](image-builder/README.md) and [one image producer](docs/image-producer.md).
+The original [MIT license](LICENSE), copyright notice and Git history are
+retained. Engine dependencies keep their own licenses. Their source revisions
+are in `Engine/source-lock.json`.
