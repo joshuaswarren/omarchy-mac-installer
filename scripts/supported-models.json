@@ -41,7 +41,8 @@
     "apple,j614s": "MacBook Pro 14-inch (M4 Pro, 2024): M4 and later Macs are not supported"
   },
   "developer": {
-    "apple,j575d": "Developer bring-up only: the engine can inspect and plan the M3 Ultra Mac Studio, but no Omarchy image supports it yet"
+    "apple,j575d": "Developer bring-up only: the engine can inspect and plan the M3 Ultra Mac Studio, but no Omarchy image supports it yet",
+    "apple,j873g": "Developer only: the M6 Mac mini probe proof build; no public catalog offers it"
   },
   "untested": {
     "apple,j433": "Untested: Omarchy Mac previews are not yet qualified on M3 Macs",
