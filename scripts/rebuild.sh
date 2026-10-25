@@ -123,7 +123,8 @@ import hashlib, json, os, shutil, zipfile
 b = os.path.expanduser("~/code/probe-build-20261025")
 tester = os.path.join(b, "tester")
 shutil.copy2(os.path.join(b, "${tester_pkg}"), os.path.join(tester, "${tester_pkg}"))
-for name in ("omarchy-probe-${board}-os-package.zip", "probe-installer_data.json"):
+payload_name = "omarchy-probe-%s-os-package.zip" % os.environ["board"]
+for name in (payload_name, "probe-installer_data.json"):
     shutil.copy2(os.path.join(b, "assets", name), os.path.join(tester, "probe-assets", name))
 files = ["${tester_pkg}",
          "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
