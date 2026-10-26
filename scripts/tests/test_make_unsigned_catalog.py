@@ -270,8 +270,8 @@ class CatalogGeneratorTests(unittest.TestCase):
         self.assertIn("apple,j700", manifest["untested"])
         self.assertEqual(set(manifest["refused"]), {"apple,j614s"})
         self.assertEqual(
-            set(manifest["developer"]), {"apple,j575d"},
-            "the M3 Ultra Mac Studio stays a developer board until an image supports it",
+            set(manifest["developer"]), {"apple,j575d", "apple,j873g"},
+            "the M3 Ultra Mac Studio and the M6 Mac mini stay developer boards until an image supports them",
         )
         for template in sorted(MANIFEST.parent.glob("release-inputs*.template.json")):
             identifiers = json.loads(template.read_text())["device_identifiers"]
