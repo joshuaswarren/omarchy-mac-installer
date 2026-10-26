@@ -234,6 +234,16 @@ class ProbePackageTest(unittest.TestCase):
             self.assertIsNotNone(picker_block)
             self.assertIn("PRESTARTUP_VGID", picker_block)
             self.assertIn("PRESTARTUP_VOLUME", picker_block)
+            # The mount decision rides on an absolute MountPoint, never on the
+            # Mounted flag (which varies across macOS releases and can be
+            # absent while the path is there).
+            self.assertIn("MountPoint", picker_block)
+            # No read of the Mounted field anywhere in the tail (its name may
+            # appear in a comment; the field read is what matters).
+            self.assertNotIn("field Mounted", picker_block)
+            self.assertNotIn('"Mounted"', picker_block)
+            self.assertIn("MountPoint", overlay)
+            self.assertNotIn("field Mounted", overlay)
             self.assertEqual(
                 metadata["os_list"][0]["allowed_device_classes"], [DEVICE_CLASS]
             )
