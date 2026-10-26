@@ -98,7 +98,7 @@ class PatchedFirmwareTableTests(unittest.TestCase):
         self.assertEqual((neo.version, neo.devices), ("26.6", ["j700ap"]))
         self.assertEqual(ultra, IPSW(
             "27.0.1", "26.0", "mBoot-20457.1.29", "26.1.434.0.0,0", False,
-            ["j575dap"],
+            ["j575dap", "j873gap"],
             "https://updates.cdn-apple.com/2026FallFCS/59241290-5d51-4ca8-9df4-31624b9a4eac/"
             "UniversalMac_27.0.1_26A434_Restore.ipsw"))
         self.assertEqual(air, IPSW(
