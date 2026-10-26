@@ -141,7 +141,7 @@
     }
   },
   "downstream_overlay": {
-    "version": "v0.9.2-omarchy.20261026.618a5b81c884",
+    "version": "v0.9.2-omarchy.20261026.2c845e563bc7",
     "capability": "candidate_bound_full_os_stage_one_authenticated_recovery",
     "minimum_app_version": "2.3.0",
     "engine_modes": [
@@ -172,7 +172,7 @@
       {
         "path": "overlay/src/omarchy_asahi.py",
         "destination": "src/omarchy_asahi.py",
-        "sha256": "e7e9c0eb815051235827ba48affc5357e811e52ce79897fd2fe2d2749df02115"
+        "sha256": "d29d2cb97d2c12a05eadc1e2b82a519e90251b6c417a9736be84c0ca2e7438f2"
       },
       {
         "path": "overlay/src/omarchy_contract.py",
@@ -207,7 +207,7 @@
       {
         "path": "overlay/tests/test_omarchy_asahi.py",
         "destination": "tests/test_omarchy_asahi.py",
-        "sha256": "8fd32acac3327387949c2a2af0ef3a865766b33f2cc3499ae2fed2dc8726f395"
+        "sha256": "5a0d3bdf5768747055fa491ce2c26d1b00d763953a8fd8d01664a2eafd125abd"
       },
       {
         "path": "overlay/tests/test_omarchy_contract.py",
@@ -467,7 +467,7 @@
     }
   ],
   "validation_artifact": {
-    "filename": "installer-v0.9.2-omarchy.20261026.618a5b81c884.tar.gz",
+    "filename": "installer-v0.9.2-omarchy.20261026.2c845e563bc7.tar.gz",
     "size_bytes": 17902859,
     "sha256": "8f57cee9cbbfdbf4007440fe5815a78edea6b9be530e8ee0a58981f830e352ca",
     "reproducibility_scope": "two-identical-python-overlay-repacks-authenticated-base",

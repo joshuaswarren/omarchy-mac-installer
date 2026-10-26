@@ -6,10 +6,12 @@ import json
 import os
 import plistlib
 from pathlib import Path
+import signal
 from types import SimpleNamespace
 import sys
 import subprocess
 import tempfile
+import time
 import re
 import shutil
 import time
@@ -1642,7 +1644,8 @@ prestartup_is_startup
 
     def step2_with_fakes(self, kmutil_body, paired=True, bputil_mode="ok", password="secret",
                          startup="macos", startup_policy=None, prestartup=None, mount_fails=False,
-                         already_mounted=False, identity="ok", mounted_flag="true"):
+                         already_mounted=False, identity="ok", mounted_flag="true",
+                         post_mount="ok"):
         """step2.sh in place, with fake recoveryOS tools first on PATH."""
         if startup_policy == "picker":
             group, volume = prestartup
@@ -1676,8 +1679,8 @@ prestartup_is_startup
             )),
             "stty": 'echo "$*" >>"$CALLS.stty"',
             "mount": "exit 0",
-            "reboot": "exit 0",
-            "shutdown": "exit 0",
+            "reboot": 'echo "reboot" >>"$CALLS.reboot"; exit 0',
+            "shutdown": 'echo "shutdown" >>"$CALLS.shutdown"; exit 0',
             # script -q -t 0 log command...: the command's output goes to the
             # log, which is kept for the test because step2.sh deletes it. Like
             # the real script, which gives kmutil its own session on a hidden
@@ -1726,12 +1729,14 @@ prestartup_is_startup
                 # Real mount output names a device; the script reads the
                 # mount path from the plist. The fake tracks mounted state
                 # in $MOUNTED and logs every mount/unmount call.
-                '[ "$1" = mount ] && { echo "mount $*" >>"$CALLS.diskutil"; '
+                '[ "$1" = mount ] && { echo "$*" >>"$CALLS.diskutil"; '
                 + ('exit 1' if mount_fails else
                    ': >"$MOUNTED"; echo "Volume Macintosh HD on disk3s1 mounted"')
                 + ' ; exit 0; }',
-                '[ "$1" = unmount ] && { echo "unmount $*" >>"$CALLS.diskutil"; rm -f "$MOUNTED"; exit 0; }',
+                '[ "$1" = unmount ] && { echo "$*" >>"$CALLS.diskutil"; rm -f "$MOUNTED"; exit 0; }',
                 '[ "$1" = info ] && [ "$2" = -plist ] || exit 1',
+                # A post-mount read can fail outright.
+                '[ -n "$POST_MOUNT_FAIL" ] && [ -e "$MOUNTED" ] && exit 1',
                 'case "$3" in',
                 '  "$PRESTARTUP_VOLUME") if [ -e "$MOUNTED" ]; then cat "$PLIST_VOLUME_MOUNTED"; else cat "$PLIST_VOLUME"; fi ;;',
                 '  /dev/disk0s2) cat "$PLIST_MACOS_BOOT" ;;',
@@ -1764,7 +1769,12 @@ prestartup_is_startup
             # is present, so the mounted fixture comes in both shapes.
             if mounted_flag != "missing":
                 mounted_plist.append(("Mounted", mounted_flag is True or mounted_flag == "true"))
-            mounted_plist.append(("MountPoint", "/Volumes/Macintosh HD"))
+            if post_mount == "missing-mountpoint":
+                pass
+            elif post_mount == "relative":
+                mounted_plist.append(("MountPoint", "Volumes/Macintosh HD"))
+            else:
+                mounted_plist.append(("MountPoint", "/Volumes/Macintosh HD"))
             if identity == "wrong":
                 volume_plist[1] = ("APFSVolumeGroupID", "EEEE0000-1111-4222-8333-FFFFFFFFFFFF")
             if identity in ("wrong", "wrong-after-mount"):
@@ -1793,6 +1803,7 @@ prestartup_is_startup
                 PLIST_STUB=str(root / "plist-stub.xml"),
                 PRESTARTUP_VOLUME=volume,
                 MOUNTED=str(root / "mounted"),
+                POST_MOUNT_FAIL="1" if post_mount == "info-fails" else "",
             )
         return script, env, calls
 
@@ -1811,6 +1822,27 @@ prestartup_is_startup
         path = Path(f"{calls}.diskutil")
         lines = path.read_text().splitlines() if path.exists() else []
         return [line.split()[0] for line in lines]
+
+    def diskutil_lines(self, calls):
+        path = Path(f"{calls}.diskutil")
+        return path.read_text().splitlines() if path.exists() else []
+
+    def unmount_arguments(self, calls):
+        arguments = []
+        for line in self.diskutil_lines(calls):
+            if not line.startswith("unmount"):
+                continue
+            parts = line.split(None, 1)
+            arguments.append(parts[1] if len(parts) > 1 else "")
+        return arguments
+
+    def bless_calls(self, calls):
+        path = Path(f"{calls}.bless")
+        return path.read_text().splitlines() if path.exists() else []
+
+    def reboot_calls(self, calls):
+        path = Path(f"{calls}.reboot")
+        return path.read_text().splitlines() if path.exists() else []
 
     PRESTARTUP = ("AAAA0000-1111-4222-8333-BBBBBBBBBBBB", "CCCC0000-2222-4333-8444-DDDDDDDDDDDD")
 
@@ -1910,7 +1942,84 @@ prestartup_is_startup
         self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
         self.assertIn("could not be switched back to macOS", out)
         self.assertEqual(self.diskutil_calls(calls), ["mount", "unmount"])
+        # The unmount names the volume the script mounted, never an empty
+        # path and never the mount point.
+        self.assertEqual(self.unmount_arguments(calls), [self.PRESTARTUP[1]])
         self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_fails_closed_when_the_post_mount_plist_fails(self):
+        result, _, calls = self.run_step2(
+            PROMPTING_KMUTIL,
+            stdin="y\nsecret\n\n",
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+            post_mount="info-fails",
+        )
+        out = result.stdout
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
+        self.assertIn("could not be switched back to macOS", out)
+        # Nothing was blessed and nothing restarted.
+        self.assertEqual(self.bless_calls(calls), [])
+        self.assertEqual(self.reboot_calls(calls), [])
+        # The script's own mount is still cleaned up, by its volume.
+        self.assertEqual(self.unmount_arguments(calls), [self.PRESTARTUP[1]])
+        self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_refuses_a_missing_or_relative_mount_point(self):
+        for post_mount in ("missing-mountpoint", "relative"):
+            with self.subTest(post_mount=post_mount):
+                result, _, calls = self.run_step2(
+                    PROMPTING_KMUTIL,
+                    stdin="y\nsecret\n\n",
+                    startup="omarchy",
+                    startup_policy="picker",
+                    prestartup=self.PRESTARTUP,
+                    post_mount=post_mount,
+                )
+                out = result.stdout
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(
+                    Path(f"{calls}.boot").read_text().strip(), "/dev/omarchy")
+                self.assertIn("could not be switched back to macOS", out)
+                self.assertEqual(self.bless_calls(calls), [])
+                self.assertEqual(self.reboot_calls(calls), [])
+                self.assertEqual(self.unmount_arguments(calls), [self.PRESTARTUP[1]])
+                self.assert_nothing_left_in_tmp()
+
+    def test_the_picker_run_unmounts_its_own_mount_when_interrupted(self):
+        script, env, calls = self.step2_with_fakes(
+            PROMPTING_KMUTIL,
+            startup="omarchy",
+            startup_policy="picker",
+            prestartup=self.PRESTARTUP,
+        )
+        process = subprocess.Popen(
+            [*self.shell, str(script)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        try:
+            # Answer the confirmation and the first password, then interrupt
+            # the script while it waits for the picker's own password.
+            process.stdin.write("y\nsecret\n")
+            process.stdin.flush()
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                if "mount" in self.diskutil_calls(calls):
+                    break
+                time.sleep(0.1)
+            process.send_signal(signal.SIGINT)
+            process.stdin.close()
+            process.wait(timeout=40)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+        self.assertEqual(process.returncode, 130)
+        # The interrupted run still unmounts only the volume it mounted.
+        self.assertEqual(self.unmount_arguments(calls), [self.PRESTARTUP[1]])
+        self.assertEqual(self.reboot_calls(calls), [])
 
     def test_kmutil_is_answered_out_of_sight(self):
         result, kmutil_calls, calls = self.run_step2(PROMPTING_KMUTIL)

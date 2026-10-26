@@ -431,9 +431,11 @@ prestartup_mount=""
 prestartup_mounted=no
 prestartup_ok=no
 # Only a volume this script mounted is unmounted again, on every way out.
+# It is unmounted by the exact volume the script mounted, never by a path
+# that a failed read could leave empty.
 picker_cleanup() {
     if [ "$prestartup_mounted" = yes ]; then
-        diskutil unmount "$prestartup_mount" >/dev/null 2>&1 || true
+        diskutil unmount "$PRESTARTUP_VOLUME" >/dev/null 2>&1 || true
     fi
 }
 trap 'picker_cleanup; cleanup' EXIT
@@ -461,6 +463,10 @@ if [ -n "$prestartup_info" ] \\
                 prestartup_mount="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
                 prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
                 prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
+                case "$prestartup_mount" in
+                    /*) ;;
+                    *) prestartup_mount="" ;;
+                esac
                 if [ -n "$prestartup_mount" ] \\
                     && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ] \\
                     && [ "$prestartup_group" = "$PRESTARTUP_VGID" ]; then
