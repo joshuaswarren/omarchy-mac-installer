@@ -157,7 +157,7 @@ def sha(path):
     return h.hexdigest()
 manifest = {
   "bundle": "omarchy probe test, %s (%s)" % (os.environ["probe_name"], os.environ["device_class"]),
-  "installs": "loader-chain diagnostic only: the Mac boots into the m1n1 USB proxy and never boots any OS",
+  "installs": "loader-chain diagnostic only: the Mac boots into the m1n1 USB proxy; it is not meant to boot any OS",
   "admitted_hardware": [os.environ["gate_board"]],
   "package": os.environ["tester_pkg"],
   "staged_assets": {
