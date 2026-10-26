@@ -1,6 +1,7 @@
 #if os(macOS)
   import Foundation
   import Darwin
+  import OSLog
   import RecoveryAccountCore
 
   public enum EngineHandoffOperation: String, Equatable, Sendable {
@@ -131,6 +132,8 @@
 
   public actor ClosedEngineHelperServer {
     private static let explicitlyUnsupportedDevices = ["apple,j614s"]
+    private static let logger = Logger(
+      subsystem: InstallerProductIdentity.appIdentifier, category: "helper")
 
     private let workingDirectory: URL
     private let credentialValidator: any MachineOwnerCredentialValidating
@@ -371,8 +374,9 @@
     /// A fresh install is refused while the disk already carries an Omarchy-like
     /// startup container: a second group would leave a layout removal refuses.
     /// A run whose journal exists is a resumption, and the group it finds is its
-    /// own half-made one, so it goes on. A disk read that fails here says
-    /// nothing; the engine's own checks decide, as they did before this gate.
+    /// own half-made one, so it goes on. A disk read that fails here is logged
+    /// and the gate steps aside; the engine's own checks decide, as they did
+    /// before this gate.
     private func refuseAnotherOmarchyLikeInstall(for package: ImportedEngineHandoffPackage) throws {
       if let journal = EngineJournalLocator.journalURL(
         workingDirectory: workingDirectory, bindingDigest: package.bindingDigest),
@@ -380,7 +384,15 @@
       {
         return
       }
-      guard let snapshot = try? removalDisks.snapshot() else { return }
+      let snapshot: RemovalSnapshot
+      do {
+        snapshot = try removalDisks.snapshot()
+      } catch {
+        Self.logger.error(
+          "install gate skipped: the disk layout could not be read: \(error.localizedDescription, privacy: .public)"
+        )
+        return
+      }
       if !RemovalLayout.omarchyLikeStubs(in: snapshot).isEmpty {
         throw ClosedEngineHelperError.existingOmarchyLikeInstall
       }

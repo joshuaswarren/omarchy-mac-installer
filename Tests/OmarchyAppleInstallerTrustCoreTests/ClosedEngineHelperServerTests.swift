@@ -419,6 +419,22 @@
       XCTAssertEqual(executions, 0)
     }
 
+    func testInstallProceedsWhenTheDiskLayoutCannotBeRead() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let source = try openDirectory(fixture.source)
+      defer { try? source.close() }
+      let executor = RecordingHandoffExecutor(result: fixture.transcript)
+      let server = ClosedEngineHelperServer(
+        workingDirectory: fixture.destination, executor: executor,
+        credentialValidator: AcceptingMachineOwnerCredentialValidator(),
+        removalDisks: UnreadableRemovalDisks(), removalAdminValidator: { _ in })
+      _ = try await server.submit(
+        packageDirectory: source, authorization: try machineOwnerAuthorization())
+      let executions = await executor.executionCount
+      XCTAssertEqual(executions, 1, "the gate steps aside; the engine's own checks decide")
+    }
+
     func testInstallProceedsOnADiskWithNoOmarchyLikeStub() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -876,6 +892,22 @@
   private struct SnapshotRemovalDisks: RemovalDiskOperating {
     let layout: RemovalSnapshot
     func snapshot() throws -> RemovalSnapshot { layout }
+    func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence {
+      throw RemovalFailure(message: "unused")
+    }
+    func startup(_ snapshot: RemovalSnapshot) throws -> RemovalStartup { .unknown }
+    func setMacOSStartup(
+      _ snapshot: RemovalSnapshot, nextOnly: Bool, authorization: MachineOwnerAuthorization
+    ) throws {}
+    func growLimit(_ macOS: RemovalPartition, disk: String) throws -> UInt64 { 0 }
+    func deleteContainer(_ stub: RemovalPartition, disk: String) throws {}
+    func erasePartition(_ partition: RemovalPartition, disk: String) throws {}
+    func growContainer(_ macOS: RemovalPartition, disk: String) throws {}
+  }
+
+  /// A disk the removal reader cannot describe, as on a Mac with an unexpected layout.
+  private struct UnreadableRemovalDisks: RemovalDiskOperating {
+    func snapshot() throws -> RemovalSnapshot { throw RemovalFailure(message: "unreadable") }
     func evidence(for installation: RemovalInstallation, disk: String) throws -> RemovalEvidence {
       throw RemovalFailure(message: "unused")
     }
