@@ -373,8 +373,7 @@
     /// A run whose journal exists is a resumption, and the group it finds is its
     /// own half-made one, so it goes on. A disk read that fails here says
     /// nothing; the engine's own checks decide, as they did before this gate.
-    private func refuseAnotherOmarchyLikeInstall(for package: ImportedEngineHandoffPackage) throws
-    {
+    private func refuseAnotherOmarchyLikeInstall(for package: ImportedEngineHandoffPackage) throws {
       if let journal = EngineJournalLocator.journalURL(
         workingDirectory: workingDirectory, bindingDigest: package.bindingDigest),
         FileManager.default.fileExists(atPath: journal.path)
