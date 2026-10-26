@@ -142,6 +142,12 @@
       "After the last removal, the installer couldn’t set aside its record of the installation it removed. Installing at the same size could reuse that record and skip installing, so installation didn’t start and nothing was changed."
     public static let earlierInstallRecordUnclearedRemedy =
       "Try again: each attempt tries to set the record aside first. If this keeps happening, keep the records in \(InstallerProductIdentity.helperWorkingDirectory) for support."
+    public static let existingOmarchyLikeInstallHeadline =
+      "Another Omarchy-style installation is on this Mac"
+    public static let existingOmarchyLikeInstallDetail =
+      "This Mac’s disk already has an Omarchy-style installation: an earlier Omarchy, one this installer didn’t make, or one that is incomplete. Installing another beside it would leave a layout this installer can’t remove, so installation didn’t start and nothing was changed."
+    public static let existingOmarchyLikeInstallRemedy =
+      "Open Installation → Remove Omarchy to see whether the installer can remove the other installation. If it can’t, remove or repair it yourself or ask for help before installing."
     public static let helperRetiringHeadline = "The installation service was just removed"
     public static let helperRetiringDetail =
       "Omarchy's removal finished and its installation service is removing itself. Nothing was changed. Try again in a moment; the app sets the service up again with your password."
@@ -688,6 +694,15 @@
             if domain == gate.domain, code == gate.code {
               return earlierRemovalGate(unfinished: unfinished, technicalDetail: technical)
             }
+          }
+          let likeInstall = ClosedEngineHelperError.existingOmarchyLikeInstall as NSError
+          if domain == likeInstall.domain, code == likeInstall.code {
+            return FailureDisplay(
+              headline: PlainLanguage.existingOmarchyLikeInstallHeadline,
+              plainDetail: PlainLanguage.existingOmarchyLikeInstallDetail,
+              technicalDetail: technical,
+              remedy: PlainLanguage.existingOmarchyLikeInstallRemedy
+            )
           }
           let busy = ClosedEngineHelperError.busy as NSError
           if domain == busy.domain, code == busy.code {
