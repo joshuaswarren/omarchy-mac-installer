@@ -1420,9 +1420,9 @@ try:
 except Exception:
     sys.exit(1)
 if value is True:
-    print(1)
+    print("true")
 elif value is False:
-    print(0)
+    print("false")
 elif isinstance(value, str) and value:
     print(value)
 """
@@ -1560,6 +1560,10 @@ class Step2ScriptTests(unittest.TestCase):
         tail = text.split('STARTUP_POLICY="picker"', 1)[1]
         self.assertNotIn("s/^Volume .* on //", tail)
         self.assertNotIn("Device Node", tail)
+        # The Mounted flag varies across releases and is not consulted: a
+        # nonempty absolute MountPoint is what says "already mounted".
+        self.assertNotIn("prestartup_field Mounted", tail)
+        self.assertIn("MountPoint", tail)
         result = subprocess.run([*self.shell, "-n", str(step2)])
         self.assertEqual(result.returncode, 0)
 
@@ -1638,7 +1642,7 @@ prestartup_is_startup
 
     def step2_with_fakes(self, kmutil_body, paired=True, bputil_mode="ok", password="secret",
                          startup="macos", startup_policy=None, prestartup=None, mount_fails=False,
-                         already_mounted=False, identity="ok"):
+                         already_mounted=False, identity="ok", mounted_flag="true"):
         """step2.sh in place, with fake recoveryOS tools first on PATH."""
         if startup_policy == "picker":
             group, volume = prestartup
@@ -1755,8 +1759,12 @@ prestartup_is_startup
             (bin_dir / "plutil").chmod(0o755)
             volume_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group),
                             ("Mounted", False)]
-            mounted_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group),
-                             ("Mounted", True), ("MountPoint", "/Volumes/Macintosh HD")]
+            mounted_plist = [("VolumeUUID", volume), ("APFSVolumeGroupID", group)]
+            # Real diskutil info -plist can omit Mounted while a MountPoint
+            # is present, so the mounted fixture comes in both shapes.
+            if mounted_flag != "missing":
+                mounted_plist.append(("Mounted", mounted_flag is True or mounted_flag == "true"))
+            mounted_plist.append(("MountPoint", "/Volumes/Macintosh HD"))
             if identity == "wrong":
                 volume_plist[1] = ("APFSVolumeGroupID", "EEEE0000-1111-4222-8333-FFFFFFFFFFFF")
             if identity in ("wrong", "wrong-after-mount"):
@@ -1828,21 +1836,28 @@ prestartup_is_startup
         self.assert_nothing_left_in_tmp()
 
     def test_the_picker_run_never_touches_an_already_mounted_volume(self):
-        result, _, calls = self.run_step2(
-            PROMPTING_KMUTIL,
-            stdin="y\nsecret\nsecret\n\n",
-            startup="omarchy",
-            startup_policy="picker",
-            prestartup=self.PRESTARTUP,
-            already_mounted=True,
-        )
-        out = result.stdout
-        self.assertEqual(result.returncode, 0, out + result.stderr)
-        self.assertEqual(Path(f"{calls}.boot").read_text().strip(), "/dev/disk0s2")
-        self.assertIn("Press Enter to restart into macOS. To start the probe:", out)
-        # Someone else's mount: the script mounts and unmounts nothing.
-        self.assertEqual(self.diskutil_calls(calls), [])
-        self.assert_nothing_left_in_tmp()
+        # Real diskutil info -plist carries Mounted+MountPoint or, on some
+        # releases, just the MountPoint; both mean already mounted.
+        for mounted_flag in ("true", "missing"):
+            with self.subTest(mounted_flag=mounted_flag):
+                result, _, calls = self.run_step2(
+                    PROMPTING_KMUTIL,
+                    stdin="y\nsecret\nsecret\n\n",
+                    startup="omarchy",
+                    startup_policy="picker",
+                    prestartup=self.PRESTARTUP,
+                    already_mounted=True,
+                    mounted_flag=mounted_flag,
+                )
+                out = result.stdout
+                self.assertEqual(result.returncode, 0, out + result.stderr)
+                self.assertEqual(
+                    Path(f"{calls}.boot").read_text().strip(), "/dev/disk0s2")
+                self.assertIn(
+                    "Press Enter to restart into macOS. To start the probe:", out)
+                # Someone else's mount: the script mounts and unmounts nothing.
+                self.assertEqual(self.diskutil_calls(calls), [])
+                self.assert_nothing_left_in_tmp()
 
     def test_the_picker_run_fails_closed_when_macos_cannot_be_mounted(self):
         result, _, calls = self.run_step2(

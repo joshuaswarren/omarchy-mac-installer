@@ -439,31 +439,36 @@ picker_cleanup() {
 trap 'picker_cleanup; cleanup' EXIT
 
 # Read the volume's state before touching anything: identity first, then
-# whether it is already mounted by someone else.
+# whether it is already mounted by someone else. A nonempty absolute
+# MountPoint means mounted; the Mounted flag varies across releases and
+# is not required.
 prestartup_info="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null)" || prestartup_info=""
 if [ -n "$prestartup_info" ] \\
     && [ "$(printf '%s' "$prestartup_info" | prestartup_field VolumeUUID)" = "$PRESTARTUP_VOLUME" ] \\
     && [ "$(printf '%s' "$prestartup_info" | prestartup_field APFSVolumeGroupID)" = "$PRESTARTUP_VGID" ]; then
-    if [ "$(printf '%s' "$prestartup_info" | prestartup_field Mounted)" = "1" ] \\
-        && [ -n "$(printf '%s' "$prestartup_info" | prestartup_field MountPoint)" ]; then
-        # Already mounted by something else: use that path, never unmount.
-        prestartup_mount="$(printf '%s' "$prestartup_info" | prestartup_field MountPoint)"
-        prestartup_ok=yes
-    else
-        if diskutil mount "$PRESTARTUP_VOLUME" >/dev/null 2>&1; then
-            # Owned from this point: cleaned up on every way out, even if
-            # the identity re-check below fails.
-            prestartup_mounted=yes
-            prestartup_mount="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
-            prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
-            prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
-            if [ -n "$prestartup_mount" ] \\
-                && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ] \\
-                && [ "$prestartup_group" = "$PRESTARTUP_VGID" ]; then
-                prestartup_ok=yes
+    prestartup_mountpoint="$(printf '%s' "$prestartup_info" | prestartup_field MountPoint)" || prestartup_mountpoint=""
+    case "$prestartup_mountpoint" in
+        /*)
+            # Already mounted by something else: use that path, never unmount.
+            prestartup_mount="$prestartup_mountpoint"
+            prestartup_ok=yes
+            ;;
+        *)
+            if diskutil mount "$PRESTARTUP_VOLUME" >/dev/null 2>&1; then
+                # Owned from this point: cleaned up on every way out, even
+                # if the identity re-check below fails.
+                prestartup_mounted=yes
+                prestartup_mount="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field MountPoint)" || prestartup_mount=""
+                prestartup_volume="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field VolumeUUID)" || prestartup_volume=""
+                prestartup_group="$(diskutil info -plist "$PRESTARTUP_VOLUME" 2>/dev/null | prestartup_field APFSVolumeGroupID)" || prestartup_group=""
+                if [ -n "$prestartup_mount" ] \\
+                    && [ "$prestartup_volume" = "$PRESTARTUP_VOLUME" ] \\
+                    && [ "$prestartup_group" = "$PRESTARTUP_VGID" ]; then
+                    prestartup_ok=yes
+                fi
             fi
-        fi
-    fi
+            ;;
+    esac
 fi
 blessed=no
 if [ "$prestartup_ok" = yes ]; then
