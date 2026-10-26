@@ -205,7 +205,9 @@ stage = open(os.path.join(extracted, "Stage assets.command")).read()
 pins = re.findall(r"^([0-9a-f]{64}) (\d+) (\S+)$", stage.split("<<'PINS'\n", 1)[1].split("\nPINS\n", 1)[0], re.M)
 for name in ("manifest.json", "Stage assets.command", "Preflight.command", "Remove helper.command", "README.md", "Feedback.md"):
     text = open(os.path.join(extracted, name)).read()
-    for bad in ("${", "$gate_board", "@HELPER_", "@APP_", "probe-${board}"):
+    # The chain's own variables must be expanded; a bare "${" is ordinary shell in the scripts.
+    for bad in ("${board}", "${gate_board}", "${tester_pkg}", "${engine_file}", "${INSTALLER_",
+                "$gate_board", "@HELPER_", "@APP_", "probe-${board}"):
         assert bad not in text, "unresolved placeholder %r in %s" % (bad, name)
 assert pins, "no pins found"
 for digest, size, name in pins:
