@@ -478,17 +478,23 @@
         [.posixPermissions: 0o600], ofItemAtPath: journal.path)
     }
 
-    private static let planRecord =
-      #"{"schema_version":1,"sequence":3,"type":"plan","payload":{}}"#
+    /// What the engine writes before it touches the disk: sequence 1, 2, 3, read-only.
+    private static let readOnlyRecords = [
+      #"{"schema_version":1,"sequence":1,"type":"inspection","payload":{}}"#,
+      #"{"schema_version":1,"sequence":2,"type":"inventory","payload":{}}"#,
+      #"{"schema_version":1,"sequence":3,"type":"plan","payload":{}}"#,
+    ]
     private static let eventRecord =
       #"{"schema_version":1,"sequence":4,"type":"event","payload":{"name":"apfs_preparation_started"}}"#
+    private static let gappedRecords =
+      readOnlyRecords + [#"{"schema_version":1,"sequence":9,"type":"event","payload":{}}"#]
 
     func testAJournalThatRecordsAMutationResumesInsteadOfBeingRefused() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }
       let source = try openDirectory(fixture.source)
       defer { try? source.close() }
-      try writeJournal([Self.planRecord, Self.eventRecord], fixture: fixture)
+      try writeJournal(Self.readOnlyRecords + [Self.eventRecord], fixture: fixture)
       let executor = RecordingHandoffExecutor(result: fixture.transcript)
       let server = gateServer(
         fixture, snapshot: OmarchyRemovalForeignStubTests.foreignStubAsFound, executor: executor)
@@ -501,9 +507,10 @@
     func testAnEmptyPlanOnlyOrInvalidJournalDoesNotExemptTheGate() async throws {
       let cases: [(name: String, lines: [String])] = [
         ("empty", []),
-        ("plan only", [Self.planRecord]),
+        ("read-only records only", Self.readOnlyRecords),
         ("not json", ["not a journal"]),
         ("unknown record type", [#"{"schema_version":1,"sequence":1,"type":"x","payload":{}}"#]),
+        ("a gap in the sequence", Self.gappedRecords),
       ]
       for journalCase in cases {
         let fixture = try makeFixture()
