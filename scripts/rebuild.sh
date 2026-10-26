@@ -24,6 +24,11 @@ export EVIDENCE_LEAF="probe-${board}-2026.10.25"
 cd "$b"
 stage1=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 stage2=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+[[ -f repo/Engine/source-lock.json ]] || { echo 'repo not synced' >&2; exit 64; }
+# The engine archive is the one the source lock pins, never a name written into this script.
+engine_file=$(python3 -c "import json;print(json.load(open('repo/Engine/source-lock.json'))['validation_artifact']['filename'])")
+[[ -f assets/$engine_file ]] || { echo "engine archive missing: assets/$engine_file" >&2; exit 64; }
+export engine_file
 [[ -f $stage1 && -f $stage2 ]] || { echo 'stage binaries missing' >&2; exit 64; }
 [[ -f repo/image-builder/probe-package.py ]] || { echo 'repo not synced' >&2; exit 64; }
 [[ -f keys/probe-trust-root.key && -f keys/probe-trust-root.pub ]] || { echo 'probe key missing' >&2; exit 64; }
@@ -51,7 +56,7 @@ t derive-pins python3 - <<'PYPINS'
 import hashlib, os, re
 b = os.path.expanduser("~/code/probe-build-20261025")
 pins = {
-    "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz": os.path.join(b, "assets", "installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz"),
+    os.environ["engine_file"]: os.path.join(b, "assets", os.environ["engine_file"]),
     "probe-installer_data.json": os.path.join(b, "assets", "probe-installer_data.json"),
     "omarchy-probe-%s-os-package.zip" % os.environ["board"]: os.path.join(b, "pkg", "omarchy-probe-%s-os-package.zip" % os.environ["board"]),
 }
@@ -79,7 +84,7 @@ t sign bash -c "./catalog-signing sign keys/probe-trust-root.key assets/probe-ca
   ./catalog-signing verify keys/probe-trust-root.pub assets/probe-catalog-unsigned.json release-inputs/catalog.json.sig && \
   cp assets/probe-catalog-unsigned.json release-inputs/catalog.json"
 
-t stage-engine bash -c "mkdir -p repo/Engine/artifacts && cp assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz repo/Engine/artifacts/"
+t stage-engine bash -c "mkdir -p repo/Engine/artifacts && cp assets/${engine_file} repo/Engine/artifacts/"
 
 t app bash -c "rm -rf '$b/app-final-r4' && cd repo && OMARCHY_PRIVATE_PLAIN_TEST=1 OMARCHY_APP_VERSION=2.3.0 \
   OMARCHY_APP_BUILD_NUMBER=\$(date -u +%y%m%d%H%M) bash Packaging/private-test/build-adhoc-app.sh \
@@ -127,10 +132,14 @@ b = os.path.expanduser("~/code/probe-build-20261025")
 tester = os.path.join(b, "tester")
 shutil.copy2(os.path.join(b, os.environ["tester_pkg"]), os.path.join(tester, os.environ["tester_pkg"]))
 payload_name = "omarchy-probe-%s-os-package.zip" % os.environ["board"]
-for name in (payload_name, "probe-installer_data.json"):
+for name in (payload_name, "probe-installer_data.json", os.environ["engine_file"]):
     shutil.copy2(os.path.join(b, "assets", name), os.path.join(tester, "probe-assets", name))
+# Only the engine the lock pins ships; an earlier one left in the folder must not ride along.
+for stale in os.listdir(os.path.join(tester, "probe-assets")):
+    if stale.startswith("installer-") and stale != os.environ["engine_file"]:
+        os.unlink(os.path.join(tester, "probe-assets", stale))
 files = [os.environ["tester_pkg"],
-         "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
+         "probe-assets/" + os.environ["engine_file"],
          "probe-assets/probe-installer_data.json", "probe-assets/" + payload_name,
          "Preflight.command", "Stage assets.command", "Remove helper.command",
          "README.md", "Feedback.md"]
@@ -146,7 +155,7 @@ manifest = {
   "admitted_hardware": [os.environ["gate_board"]],
   "package": os.environ["tester_pkg"],
   "staged_assets": {
-    "engine": "probe-assets/installer-v0.9.2-omarchy.20261025.17e0d750eb6b.tar.gz",
+    "engine": "probe-assets/" + os.environ["engine_file"],
     "metadata": "probe-assets/probe-installer_data.json",
     "payload": "probe-assets/" + payload_name},
   "sealed_catalog_sha256": sha(os.path.join(b, "release-inputs", "catalog.json")),
