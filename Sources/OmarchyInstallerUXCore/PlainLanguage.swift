@@ -145,7 +145,7 @@
     public static let existingOmarchyLikeInstallHeadline =
       "Another Omarchy-style installation is on this Mac"
     public static let existingOmarchyLikeInstallDetail =
-      "This Mac’s disk already has an installation that looks like Omarchy but isn’t one this installer can manage, or one that is incomplete. Installing a second one would leave a layout this installer can’t remove, so installation didn’t start and nothing was changed."
+      "This Mac’s disk already has an Omarchy-style installation: an earlier Omarchy, one this installer didn’t make, or one that is incomplete. Installing another beside it would leave a layout this installer can’t remove, so installation didn’t start and nothing was changed."
     public static let existingOmarchyLikeInstallRemedy =
       "Open Installation → Remove Omarchy to see whether the installer can remove the other installation. If it can’t, remove or repair it yourself or ask for help before installing."
     public static let helperRetiringHeadline = "The installation service was just removed"

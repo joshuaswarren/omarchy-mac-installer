@@ -401,6 +401,24 @@
       XCTAssertEqual(executions, 0, "the engine must not start")
     }
 
+    /// A whole installation of this app is an Omarchy-like stub too: installs are never joined.
+    func testInstallIsRefusedBesideAWholeInstallationOfThisApp() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let source = try openDirectory(fixture.source)
+      defer { try? source.close() }
+      let executor = RecordingHandoffExecutor(result: fixture.transcript)
+      let server = gateServer(fixture, snapshot: RemovalFixtures.neoMacos26(), executor: executor)
+      await assertThrowsErrorAsync(
+        try await server.submit(
+          packageDirectory: source, authorization: try machineOwnerAuthorization())
+      ) {
+        XCTAssertEqual($0 as? ClosedEngineHelperError, .existingOmarchyLikeInstall)
+      }
+      let executions = await executor.executionCount
+      XCTAssertEqual(executions, 0)
+    }
+
     func testInstallProceedsOnADiskWithNoOmarchyLikeStub() async throws {
       let fixture = try makeFixture()
       defer { try? FileManager.default.removeItem(at: fixture.root) }
