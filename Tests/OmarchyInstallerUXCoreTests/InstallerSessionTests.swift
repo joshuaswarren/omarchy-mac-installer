@@ -1273,8 +1273,8 @@
       }
     }
 
-    /// The helper refuses this install before it imports the package or starts the engine, so
-    /// nothing was written and the card's advice, opening removal, must stay possible.
+    /// The helper refuses this install before it starts the engine, so nothing in the disk
+    /// layout was written and the card's advice, opening removal, must stay possible.
     func testRefusalBesideAnotherInstallationReleasesTheLatchAndKeepsRemovalOpen() async throws {
       let refused = ClosedEngineHelperError.existingOmarchyLikeInstall as NSError
       let environment = MockInstallerEnvironment()
