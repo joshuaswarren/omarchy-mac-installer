@@ -50,6 +50,15 @@
     case existingOmarchyLikeInstall
   }
 
+  extension ClosedEngineHelperError {
+    /// Over XPC the app sees only a domain and a code. Whether they name
+    /// `existingOmarchyLikeInstall`, which the helper raises before it writes anything.
+    public static func isExistingOmarchyLikeInstall(domain: String, code: Int) -> Bool {
+      let refused = ClosedEngineHelperError.existingOmarchyLikeInstall as NSError
+      return domain == refused.domain && code == refused.code
+    }
+  }
+
   /// Whether the helper is idle, working on a job, or held for replacement by
   /// one app. One lock decides it, so "may it be replaced?" and "may this job
   /// start?" never both say yes, and only one app at a time holds it.
@@ -373,14 +382,15 @@
 
     /// A fresh install is refused while the disk already carries an Omarchy-like
     /// startup container: a second group would leave a layout removal refuses.
-    /// A run whose journal exists is a resumption, and the group it finds is its
-    /// own half-made one, so it goes on. A disk read that fails here is logged
-    /// and the gate steps aside; the engine's own checks decide, as they did
-    /// before this gate.
+    /// A run whose own journal records a disk-mutation intent is a resumption, and
+    /// the group it finds is its own half-made one, so it goes on. An empty,
+    /// plan-only or unreadable journal proves nothing was begun, so it does not
+    /// exempt. A disk read that fails here is logged and the gate steps aside; the
+    /// engine's own checks decide, as they did before this gate.
     private func refuseAnotherOmarchyLikeInstall(for package: ImportedEngineHandoffPackage) throws {
       if let journal = EngineJournalLocator.journalURL(
         workingDirectory: workingDirectory, bindingDigest: package.bindingDigest),
-        FileManager.default.fileExists(atPath: journal.path)
+        Self.journalRecordsMutationIntent(journal)
       {
         return
       }
@@ -396,6 +406,41 @@
       if !RemovalLayout.omarchyLikeStubs(in: snapshot).isEmpty {
         throw ClosedEngineHelperError.existingOmarchyLikeInstall
       }
+    }
+
+    /// Whether a run's journal (named by its binding digest) is a valid, owner-only file of
+    /// whole records, none unknown, with at least one event, checkpoint or completion: the
+    /// engine appends these before it touches the disk. Anything else says nothing.
+    static func journalRecordsMutationIntent(_ journal: URL) -> Bool {
+      let descriptor = Darwin.open(journal.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+      guard descriptor >= 0 else { return false }
+      defer { Darwin.close(descriptor) }
+      var status = stat()
+      guard fstat(descriptor, &status) == 0,
+        (status.st_mode & S_IFMT) == S_IFREG, status.st_mode & 0o077 == 0,
+        status.st_uid == geteuid(), status.st_size > 0,
+        status.st_size <= PinnedAsahiEngineExecutor.maximumTranscriptBytes
+      else { return false }
+      let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+      guard let data = try? handle.readToEnd(), data.count == Int(status.st_size),
+        data.last == 0x0A
+      else { return false }
+      let known: Set<String> = [
+        "inspection", "inventory", "plan", "event", "checkpoint", "completion",
+      ]
+      var previous = 0
+      var intent = false
+      for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line)),
+          let record = object as? [String: Any],
+          Set(record.keys) == ["schema_version", "sequence", "type", "payload"],
+          let type = record["type"] as? String, known.contains(type),
+          let sequence = record["sequence"] as? Int, sequence > previous
+        else { return false }
+        previous = sequence
+        if ["event", "checkpoint", "completion"].contains(type) { intent = true }
+      }
+      return intent
     }
 
     /// `progress` is optional and advisory: when a connected app exports the
