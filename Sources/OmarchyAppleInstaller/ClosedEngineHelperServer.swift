@@ -44,6 +44,9 @@
     /// size would find them complete and skip installing, so nothing is
     /// installed until setting them aside works; each request tries again.
     case earlierInstallRecordUncleared
+    /// The disk already has an Omarchy-like installation. A second one would
+    /// leave a layout that removal refuses, so nothing is installed.
+    case existingOmarchyLikeInstall
   }
 
   /// Whether the helper is idle, working on a job, or held for replacement by

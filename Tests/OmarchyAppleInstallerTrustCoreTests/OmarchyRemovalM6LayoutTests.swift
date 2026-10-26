@@ -56,6 +56,11 @@
       }
     }
 
+    /// The M6 exactly as read: macOS, the Aura stub, two Linux partitions, Recovery.
+    static var m6AsItIs: RemovalSnapshot {
+      F.snapshot(macOSSize: macOSBytes, auraRows, installs: [aura])
+    }
+
     private static let shapePrefix =
       "Found a startup container, but the partitions with it don’t match one installation"
     private static let severalPrefix = "Found more than one installation:"
