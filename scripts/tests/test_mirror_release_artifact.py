@@ -244,7 +244,9 @@ class AppMirrorTests(unittest.TestCase):
 
     def run_main(self, endpoint):
         environment = {"GH_TOKEN": "token", "R2_ENDPOINT": "https://a.r2.cloudflarestorage.com",
-                       "R2_ACCESS_KEY_ID": "id", "R2_SECRET_ACCESS_KEY": "secret"}
+                       "R2_ACCESS_KEY_ID": "id", "R2_SECRET_ACCESS_KEY": "secret",
+                       # A fork's Actions env names the fork; the publish guard must see its own repo.
+                       "GITHUB_REPOSITORY": mirror.catalog_release.stopgap_repo()}
         with unittest.mock.patch.dict("os.environ", environment), \
                 unittest.mock.patch.object(mirror.r2_s3.Endpoint, "parse", return_value=endpoint), \
                 unittest.mock.patch("sys.stdout", io.StringIO()), unittest.mock.patch("sys.stderr", io.StringIO()):
