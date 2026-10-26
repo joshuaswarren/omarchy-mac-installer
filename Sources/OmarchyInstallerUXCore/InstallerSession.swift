@@ -741,10 +741,10 @@
       }
 
       if context.kind == .install, Self.isRefusalBesideAnotherInstall(error) {
-        // The helper reads the disk before it imports the package or starts the
-        // engine, and writes nothing when it refuses, so the latch may be released
-        // as above. Without it, Remove Omarchy, which the card points to, stays
-        // disabled until the app is relaunched.
+        // The helper imports the package, reads the disk and refuses before it starts
+        // the engine, so nothing in the disk layout was written and the latch may be
+        // released as above. Without it, Remove Omarchy, which the card points to,
+        // stays disabled until the app is relaunched.
         hasExecutionStarted = false
         refusedPlan = plan
       }

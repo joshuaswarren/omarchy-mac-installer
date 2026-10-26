@@ -428,16 +428,18 @@
       let known: Set<String> = [
         "inspection", "inventory", "plan", "event", "checkpoint", "completion",
       ]
-      var previous = 0
+      var expectedSequence = 1
       var intent = false
       for line in data.split(separator: 0x0A, omittingEmptySubsequences: true) {
         guard let object = try? JSONSerialization.jsonObject(with: Data(line)),
           let record = object as? [String: Any],
           Set(record.keys) == ["schema_version", "sequence", "type", "payload"],
+          record["schema_version"] as? Int == 1,
+          record["payload"] is [String: Any],
           let type = record["type"] as? String, known.contains(type),
-          let sequence = record["sequence"] as? Int, sequence > previous
+          record["sequence"] as? Int == expectedSequence
         else { return false }
-        previous = sequence
+        expectedSequence += 1
         if ["event", "checkpoint", "completion"].contains(type) { intent = true }
       }
       return intent
