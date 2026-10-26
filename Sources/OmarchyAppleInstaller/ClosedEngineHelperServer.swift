@@ -368,6 +368,25 @@
       return .finalized
     }
 
+    /// A fresh install is refused while the disk already carries an Omarchy-like
+    /// startup container: a second group would leave a layout removal refuses.
+    /// A run whose journal exists is a resumption, and the group it finds is its
+    /// own half-made one, so it goes on. A disk read that fails here says
+    /// nothing; the engine's own checks decide, as they did before this gate.
+    private func refuseAnotherOmarchyLikeInstall(for package: ImportedEngineHandoffPackage) throws
+    {
+      if let journal = EngineJournalLocator.journalURL(
+        workingDirectory: workingDirectory, bindingDigest: package.bindingDigest),
+        FileManager.default.fileExists(atPath: journal.path)
+      {
+        return
+      }
+      guard let snapshot = try? removalDisks.snapshot() else { return }
+      if !RemovalLayout.omarchyLikeStubs(in: snapshot).isEmpty {
+        throw ClosedEngineHelperError.existingOmarchyLikeInstall
+      }
+    }
+
     /// `progress` is optional and advisory: when a connected app exports the
     /// journal callback, the helper tails the run's journal and forwards whole
     /// lines. Passing nil reproduces the previous behavior exactly.
@@ -409,6 +428,10 @@
         throw ClosedEngineHelperError.unsupportedDevice(
           package.deviceIdentifier
         )
+      }
+
+      if operation == .install {
+        try refuseAnotherOmarchyLikeInstall(for: package)
       }
 
       var tailer: EngineJournalTailer?
