@@ -465,18 +465,30 @@
       XCTAssertEqual(executions, 1, "the install being finished is on the disk by then")
     }
 
-    func testAnInstallWithAnExistingJournalResumesInsteadOfBeingRefused() async throws {
-      let fixture = try makeFixture()
-      defer { try? FileManager.default.removeItem(at: fixture.root) }
-      let source = try openDirectory(fixture.source)
-      defer { try? source.close() }
+    /// Writes the run's journal the way the executor does: owner-only, one record per line.
+    private func writeJournal(_ lines: [String], fixture: HelperServerFixture) throws {
       let journal = try XCTUnwrap(
         EngineJournalLocator.journalURL(
           workingDirectory: fixture.destination,
           bindingDigest: digest(Data("binding".utf8))))
       try FileManager.default.createDirectory(
         at: journal.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try Data().write(to: journal)
+      try Data(lines.map { $0 + "\n" }.joined().utf8).write(to: journal)
+      try FileManager.default.setAttributes(
+        [.posixPermissions: 0o600], ofItemAtPath: journal.path)
+    }
+
+    private static let planRecord =
+      #"{"schema_version":1,"sequence":3,"type":"plan","payload":{}}"#
+    private static let eventRecord =
+      #"{"schema_version":1,"sequence":4,"type":"event","payload":{"name":"apfs_preparation_started"}}"#
+
+    func testAJournalThatRecordsAMutationResumesInsteadOfBeingRefused() async throws {
+      let fixture = try makeFixture()
+      defer { try? FileManager.default.removeItem(at: fixture.root) }
+      let source = try openDirectory(fixture.source)
+      defer { try? source.close() }
+      try writeJournal([Self.planRecord, Self.eventRecord], fixture: fixture)
       let executor = RecordingHandoffExecutor(result: fixture.transcript)
       let server = gateServer(
         fixture, snapshot: OmarchyRemovalForeignStubTests.foreignStubAsFound, executor: executor)
@@ -484,6 +496,34 @@
         packageDirectory: source, authorization: try machineOwnerAuthorization())
       let executions = await executor.executionCount
       XCTAssertEqual(executions, 1, "its own half-made group must not stop its resumption")
+    }
+
+    func testAnEmptyPlanOnlyOrInvalidJournalDoesNotExemptTheGate() async throws {
+      let cases: [(name: String, lines: [String])] = [
+        ("empty", []),
+        ("plan only", [Self.planRecord]),
+        ("not json", ["not a journal"]),
+        ("unknown record type", [#"{"schema_version":1,"sequence":1,"type":"x","payload":{}}"#]),
+      ]
+      for journalCase in cases {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try openDirectory(fixture.source)
+        defer { try? source.close() }
+        try writeJournal(journalCase.lines, fixture: fixture)
+        let executor = RecordingHandoffExecutor(result: fixture.transcript)
+        let server = gateServer(
+          fixture, snapshot: OmarchyRemovalForeignStubTests.foreignStubAsFound, executor: executor)
+        await assertThrowsErrorAsync(
+          try await server.submit(
+            packageDirectory: source, authorization: try machineOwnerAuthorization())
+        ) {
+          XCTAssertEqual(
+            $0 as? ClosedEngineHelperError, .existingOmarchyLikeInstall, journalCase.name)
+        }
+        let executions = await executor.executionCount
+        XCTAssertEqual(executions, 0, journalCase.name)
+      }
     }
 
     func testWriteInstallConfRejectsRequestsBeforeACompletedPlan() async throws {

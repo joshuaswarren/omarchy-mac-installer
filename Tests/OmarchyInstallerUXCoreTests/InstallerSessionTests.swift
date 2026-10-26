@@ -1273,6 +1273,27 @@
       }
     }
 
+    /// The helper refuses this install before it imports the package or starts the engine, so
+    /// nothing was written and the card's advice, opening removal, must stay possible.
+    func testRefusalBesideAnotherInstallationReleasesTheLatchAndKeepsRemovalOpen() async throws {
+      let refused = ClosedEngineHelperError.existingOmarchyLikeInstall as NSError
+      let environment = MockInstallerEnvironment()
+      environment.executeResults = [
+        .failure(
+          EngineXPCSubmissionError.helperRejected(domain: refused.domain, code: refused.code))
+      ]
+      let session = await ready(environment)
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      guard case .failed(let failure) = session.phase else {
+        return XCTFail("Expected failure, got \(session.phase)")
+      }
+      XCTAssertEqual(failure.headline, PlainLanguage.existingOmarchyLikeInstallHeadline)
+      XCTAssertFalse(session.hasExecutionStarted)
+      XCTAssertTrue(session.canInspect)
+      XCTAssertTrue(session.canOpenRemoval)
+    }
+
     func testUnsupportedModelHostNamesTheMac() async throws {
       let environment = MockInstallerEnvironment()
       environment.engineSupported = false
