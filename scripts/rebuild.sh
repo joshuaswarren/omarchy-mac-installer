@@ -36,10 +36,16 @@ export engine_file
 [[ -d tester && -f tester/manifest.json ]] || { echo 'tester dir not synced (rsync it from the lane host first)' >&2; exit 64; }
 [[ -f .downstream-revision ]] || { printf '%s\n' "507581fcb87c3e177908ea48a8124a7499392b4b" > .downstream-revision; }
 rev=$(cat .downstream-revision)
-: > timings.txt
+# RESUME_AT=<step> skips every step before it: those already ran and left their outputs.
+[[ -n ${RESUME_AT:-} ]] || : > timings.txt
 total0=$(date +%s)
+skipping=${RESUME_AT:+1}
 
-t() { local name=$1 shift_secs rc=0; shift; local t0=$(date +%s); "$@" || rc=$?; local t1=$(date +%s)
+t() { local name=$1 shift_secs rc=0; shift
+  if [[ -n $skipping ]]; then
+    if [[ $name == "$RESUME_AT" ]]; then skipping=; else printf '%-28s skipped (resume at %s)\n' "$name" "$RESUME_AT"; return 0; fi
+  fi
+  local t0=$(date +%s); "$@" || rc=$?; local t1=$(date +%s)
   printf '%-28s %ss\n' "$name" "$((t1 - t0))" | tee -a timings.txt
   if (( rc != 0 )); then printf '%-28s FAILED rc=%s\n' "$name" "$rc" | tee -a timings.txt; exit $rc; fi; }
 
