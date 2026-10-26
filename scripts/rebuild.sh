@@ -9,7 +9,8 @@
 # timings.txt and stdout.
 set -euo pipefail
 (( $# == 2 )) || { echo 'usage: rebuild.sh STAGE1_BIN STAGE2_BIN' >&2; exit 64; }
-b="$HOME/code/probe-build-20261025"
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$root/Packaging/identity.conf"
 board="${BOARD:-j575d}"
 case $board in
   j575d) device_class=j575dap; device_identifier=apple,j575d; probe_name="Omarchy Probe (M3 Ultra)"; tester_pkg=${tester_pkg}; gate_board=j575d ;;
@@ -68,7 +69,7 @@ print("pins derived:", lines.splitlines())
 PYPINS
 
 t catalog bash -c "cd repo && python3 scripts/make-unsigned-catalog.py --developer \
-  --base-url https://mac.omarchy.org/v1/releases/probe-${board}-2026.10.25 \
+  --base-url ${INSTALLER_CATALOG_BASE}/releases/probe-${board}-2026.10.25 \
   --assets-dir ../assets --inputs ../pkg/catalog-inputs.json \
   --output ../assets/probe-catalog-unsigned.json > ../catalog.log 2>&1"
 
@@ -111,11 +112,11 @@ bash -n Packaging/private-test/scripts/preinstall && rm -f Packaging/private-tes
 NARROW
 
 t tester-pkg bash -c "cd repo && rm -f ../${tester_pkg} && bash Packaging/private-test/build-tester-pkg.sh \
-  '$b/app-final-r4/Omarchy Installer.app' \
+  '$b/app-final-r4/$INSTALLER_APP_NAME.app' \
   $b/${tester_pkg} > ../pkg-build.log 2>&1"
 
 t package-test bash -c "cd repo && bash test/macos-private-package.sh \
-  '$b/app-final-r4/Omarchy Installer.app' \
+  '$b/app-final-r4/$INSTALLER_APP_NAME.app' \
   $b/${tester_pkg} > ../package-test.log 2>&1 && tail -1 ../package-test.log"
 
 t bundle python3 - <<'PYBUNDLE'
@@ -210,7 +211,7 @@ subprocess.run(
     check=True, env=env,
 )
 staged = os.path.join(home, "Library", "Application Support",
-                      "org.omarchy.installer.private-m3-20260922", "staging",
+                      "${INSTALLER_APP_IDENTIFIER}.private-m3-20260922", "staging",
                       "probe-${board}-2026.10.25")
 staged_files = sorted(os.listdir(staged))
 assert len(staged_files) == 3, staged_files
