@@ -419,6 +419,15 @@
           remedy: earlierInstallRecordUnclearedRemedy)
     }
 
+    /// The helper refused to install beside another Omarchy-like installation.
+    static func existingOmarchyLikeInstallGate(technicalDetail: String) -> FailureDisplay {
+      FailureDisplay(
+        headline: existingOmarchyLikeInstallHeadline,
+        plainDetail: existingOmarchyLikeInstallDetail,
+        technicalDetail: technicalDetail,
+        remedy: existingOmarchyLikeInstallRemedy)
+    }
+
     /// The blocked-model card: names this Mac and, when the signed catalog
     /// could be read, the model families this release supports.
     public static func unsupportedModel(
@@ -695,14 +704,8 @@
               return earlierRemovalGate(unfinished: unfinished, technicalDetail: technical)
             }
           }
-          let likeInstall = ClosedEngineHelperError.existingOmarchyLikeInstall as NSError
-          if domain == likeInstall.domain, code == likeInstall.code {
-            return FailureDisplay(
-              headline: PlainLanguage.existingOmarchyLikeInstallHeadline,
-              plainDetail: PlainLanguage.existingOmarchyLikeInstallDetail,
-              technicalDetail: technical,
-              remedy: PlainLanguage.existingOmarchyLikeInstallRemedy
-            )
+          if ClosedEngineHelperError.isExistingOmarchyLikeInstall(domain: domain, code: code) {
+            return existingOmarchyLikeInstallGate(technicalDetail: technical)
           }
           let busy = ClosedEngineHelperError.busy as NSError
           if domain == busy.domain, code == busy.code {
@@ -766,6 +769,8 @@
           return earlierRemovalGate(unfinished: true, technicalDetail: technical)
         case .earlierInstallRecordUncleared:
           return earlierRemovalGate(unfinished: false, technicalDetail: technical)
+        case .existingOmarchyLikeInstall:
+          return existingOmarchyLikeInstallGate(technicalDetail: technical)
         default:
           return FailureDisplay(
             headline: "The installation service reported an error",

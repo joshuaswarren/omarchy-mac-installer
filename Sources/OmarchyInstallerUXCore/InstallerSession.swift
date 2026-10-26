@@ -648,6 +648,16 @@
       phase = .installing(journal.display(startedAt: installStartedAt))
     }
 
+    /// The helper's refusal to install beside another Omarchy-like installation, as the
+    /// app sees it directly or, over XPC, by domain and code.
+    private static func isRefusalBesideAnotherInstall(_ error: Error) -> Bool {
+      if case .existingOmarchyLikeInstall = error as? ClosedEngineHelperError { return true }
+      if case .helperRejected(let domain, let code) = error as? EngineXPCSubmissionError {
+        return ClosedEngineHelperError.isExistingOmarchyLikeInstall(domain: domain, code: code)
+      }
+      return false
+    }
+
     private func handleExecutionFailure(
       _ error: any Error,
       context: CredentialSheetContext,
@@ -726,6 +736,15 @@
         // engine output: no event, checkpoint or completion was recorded, so
         // no disk mutation began. The latch may be released, as for rejected
         // credentials; any new attempt still needs a new reviewed plan.
+        hasExecutionStarted = false
+        refusedPlan = plan
+      }
+
+      if context.kind == .install, Self.isRefusalBesideAnotherInstall(error) {
+        // The helper reads the disk before it imports the package or starts the
+        // engine, and writes nothing when it refuses, so the latch may be released
+        // as above. Without it, Remove Omarchy, which the card points to, stays
+        // disabled until the app is relaunched.
         hasExecutionStarted = false
         refusedPlan = plan
       }
