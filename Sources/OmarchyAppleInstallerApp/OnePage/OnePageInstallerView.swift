@@ -116,7 +116,10 @@ struct OnePageInstallerView: View {
     .sheet(isPresented: $showsShutdownConfirmation) {
       ConfirmationSheet(
         title: PlainLanguage.shutdownConfirmationTitle,
-        message: PlainLanguage.shutdownConfirmationBody,
+        message: session.showsRecoveryAccountSetup
+          ? PlainLanguage.recoveryAccountShutdownConfirmationBody(
+            resuming: session.recoveryAccountStarted)
+          : PlainLanguage.shutdownConfirmationBody,
         action: PlainLanguage.shutdownConfirmationAction,
         onConfirm: {
           showsShutdownConfirmation = false
@@ -303,6 +306,15 @@ struct OnePageInstallerView: View {
 
     case .existingInstallRefused:
       if pendingRecoveryHandoff != nil {
+        if session.recoveryAccountDeferred {
+          Button(PlainLanguage.cancel) {
+            shutdownFailure = nil
+            session.cancelRecoveryAccountSetup()
+          }
+          .omarchySecondaryButton()
+          .disabled(preparingShutdown)
+          .keyboardShortcut(.cancelAction)
+        }
         shutDownButton
       } else {
         Button(PlainLanguage.closeInstaller) { NSApplication.shared.terminate(nil) }
@@ -453,6 +465,16 @@ struct OnePageInstallerView: View {
       .font(OmarchyTheme.body)
       .foregroundStyle(OmarchyTheme.secondaryText)
       .fixedSize(horizontal: false, vertical: true)
+      if session.recoveryAccountDeferred {
+        Label(
+          session.recoveryAccountStarted
+            ? PlainLanguage.recoveryAccountStartedNote : PlainLanguage.recoveryAccountDeferredNote,
+          systemImage: "info.circle"
+        )
+        .omarchyHelpText()
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.top, 4)
+      }
     }
   }
 
@@ -531,10 +553,24 @@ struct OnePageInstallerView: View {
   }
 
   /// The Recovery steps for an installation that finished but has not been
-  /// through Recovery yet, found when the installer is opened again.
+  /// through Recovery yet, found when the installer is opened again. One that
+  /// skipped only the optional recovery account is installed, so it shows its
+  /// steps only when the person asks to set that account up.
   private var pendingRecoveryHandoff: HandoffDisplay? {
     guard let target = session.recoveryAccount?.target else { return nil }
     let guide = session.powerButtonGuide
+    if session.recoveryAccountDeferred {
+      guard session.showsRecoveryAccountSetup else { return nil }
+      let resuming = session.recoveryAccountStarted
+      return HandoffDisplay(
+        headline: resuming
+          ? PlainLanguage.recoveryAccountFinishHeadline
+          : PlainLanguage.recoveryAccountSetupHeadline,
+        steps: PlainLanguage.recoveryAccountSteps(
+          volumeName: target.volumeName, holdInstruction: guide.holdInstruction,
+          resuming: resuming),
+        warning: nil)
+    }
     return HandoffDisplay(
       headline: "Finish the installation in Recovery",
       steps: [

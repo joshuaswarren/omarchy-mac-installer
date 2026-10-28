@@ -309,6 +309,10 @@ enum RecoveryActions {
     let reason =
       result < 0 ? String(cString: aurora_authorization_failure(result)) : "exit status \(result)"
     InstallerLog.shared.append("\(name): \(result == 0 ? "completed" : reason)")
+    // The helper recognizes a refusal in the raw output, before redaction.
+    if aurora_authorization_password_rejected(result) != 0 {
+      throw RecoveryPasswordRejected(username: owner.username)
+    }
     try check(result == 0, "\(name) failed: \(reason). Open Show details for the command output.")
   }
   static func install(
@@ -323,8 +327,13 @@ enum RecoveryActions {
       if owner.uuid.uuidString == selected.generatedUID {
         InstallerLog.shared.append(
           "Verifying the recovery account and completing its ownership metadata.")
-        let final = try RecoveryAccountInstaller.finalize(
-          selected.target, password: Data(password.utf8), installationPending: true)
+        let final: RecoveryAccountRecord
+        do {
+          final = try RecoveryAccountInstaller.finalize(
+            selected.target, password: Data(password.utf8), installationPending: true)
+        } catch is RecoveryAccountPasswordRejected {
+          throw RecoveryPasswordRejected(username: owner.username)
+        }
         try RecoveryAccountInstaller.requireOwnership(final)
         InstallerLog.shared.append("Recovery account ownership verified.")
       } else {

@@ -495,7 +495,7 @@ prepare_toolchain() {
   pacman -Su --noconfirm --needed arch-install-scripts btrfs-progs dosfstools e2fsprogs gnupg jq python \
     >>"$logs/toolchain.log" 2>&1 || fail "could not install the build tools (logs/toolchain.log)"
 
-  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --retry 3 \
+  fetch \
     --output "$work/$ASAHI_KEYRING_FILE" "$(field asahi_alarm_server)/$ASAHI_KEYRING_FILE" ||
     fail "could not download $ASAHI_KEYRING_FILE"
   [[ $(sha256_of "$work/$ASAHI_KEYRING_FILE") == "$ASAHI_KEYRING_SHA256" ]] || fail "$ASAHI_KEYRING_FILE changed"
@@ -1131,12 +1131,20 @@ load_node_pin() {
   node_sha256=$sha256
 }
 
+# nodejs.org has reset HTTP/2 streams mid-transfer, which --retry alone does not
+# retry; a stalled transfer otherwise waits for the job timeout.
+fetch() {
+  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --http1.1 \
+    --connect-timeout 30 --speed-limit 10240 --speed-time 60 \
+    --retry 5 --retry-delay 5 --retry-all-errors "$@"
+}
+
 stage_node() {
   load_node_pin
   local tarball=$target/var/lib/omarchy/provisioning/packages/$node_filename cached=/cache/$node_filename
   install -d -m 0755 "$target/var/lib/omarchy/provisioning/packages"
   if [[ ! -f $cached || $(sha256_of "$cached") != "$node_sha256" ]]; then
-    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --retry 3 \
+    fetch \
       --output "$cached.partial" "$node_url" || fail "could not download Node.js for owner provisioning"
     mv -f "$cached.partial" "$cached"
   fi

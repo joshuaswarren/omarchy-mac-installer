@@ -89,6 +89,134 @@
       XCTAssertEqual(environment.prepareCount, 0)
       XCTAssertEqual(environment.prefetchStartCount, 0)
     }
+    func testSkippedRecoveryAccountIsInstalledAndOffersTheAccountOnRequest() async {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      for deferred in [false, true] {
+        environment.accountReply = RecoveryAccountReply(
+          ticket: "bound-ticket", target: target, accountDeferred: deferred)
+        let session = InstallerSession(environment: environment)
+        await session.inspect()
+        guard case .existingInstallRefused = session.phase else {
+          return XCTFail("An existing installation must stay refused")
+        }
+        XCTAssertEqual(session.recoveryAccountDeferred, deferred)
+        XCTAssertEqual(session.canSetUpRecoveryAccount, deferred)
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        session.setUpRecoveryAccount()
+        XCTAssertEqual(session.showsRecoveryAccountSetup, deferred)
+        XCTAssertFalse(session.canSetUpRecoveryAccount)
+        session.cancelRecoveryAccountSetup()
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        session.setUpRecoveryAccount()
+        // Inspecting again starts from the installed page.
+        await session.inspect()
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        XCTAssertEqual(environment.executeCount, 0)
+      }
+    }
+
+    func testAStartedRecoveryAccountResumesAndItsStepsShutDown() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      func record(_ phase: String) -> RecoveryAccountRecord {
+        RecoveryAccountRecord(
+          target: target, username: "omarchy-owner",
+          generatedUID: "55555555-5555-4555-8555-555555555555", phase: phase)
+      }
+      let cases: [(RecoveryAccountRecord?, Bool, Bool)] = [
+        (nil, true, false),
+        (record("awaiting-ownership"), true, true),
+        (record("prepared"), true, true),
+        (record("finalized"), true, false),
+        (record("awaiting-ownership"), false, false),
+      ]
+      for (record, deferred, started) in cases {
+        environment.accountReply = RecoveryAccountReply(
+          ticket: "bound-ticket", target: target, record: record, accountDeferred: deferred)
+        let session = InstallerSession(environment: environment)
+        await session.inspect()
+        XCTAssertEqual(session.recoveryAccountStarted, started, String(describing: record?.phase))
+      }
+
+      // The setup steps' Shut down works although the page is not waiting
+      // for Recovery; the installed page alone never shuts down.
+      let session = InstallerSession(environment: environment)
+      environment.accountReply = RecoveryAccountReply(
+        ticket: "bound-ticket", target: target, accountDeferred: true)
+      await session.inspect()
+      environment.shutdownAccepted = true
+      let before = environment.requestShutdownCount
+      XCTAssertFalse(session.shutDown())
+      XCTAssertNil(session.shutdownMessage)
+      session.setUpRecoveryAccount()
+      XCTAssertTrue(session.shutDown())
+      XCTAssertNotNil(session.shutdownMessage)
+      XCTAssertEqual(environment.requestShutdownCount, before + 1)
+    }
+
+    func testAHandoffThatTurnsDeferredKeepsTheSetupStepsOnScreen() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      environment.accountReply = RecoveryAccountReply(ticket: "bound-ticket", target: target)
+      let session = InstallerSession(environment: environment)
+      await session.inspect()
+      XCTAssertFalse(session.recoveryAccountDeferred)
+      environment.accountReply = RecoveryAccountReply(
+        ticket: "bound-ticket", target: target, accountDeferred: true)
+      _ = try await session.prepareRecoveryHandoffAndShutdown()
+      XCTAssertTrue(session.recoveryAccountDeferred)
+      XCTAssertTrue(session.showsRecoveryAccountSetup)
+    }
+
+    func testRecoveryAccountStepsNameWhatRecoveryShows() {
+      let create = PlainLanguage.recoveryAccountSteps(
+        volumeName: "Omarchy", holdInstruction: "Hold it.", resuming: false)
+      XCTAssertEqual(create.map(\.number), [1, 2, 3, 4])
+      XCTAssertTrue(create[3].title.contains("Create a recovery account"), create[3].title)
+      let resume = PlainLanguage.recoveryAccountSteps(
+        volumeName: "Omarchy", holdInstruction: "Hold it.", resuming: true)
+      XCTAssertEqual(resume.map(\.number), [1, 2, 3, 4, 5])
+      XCTAssertTrue(resume[3].title.contains("Resume recovery setup"), resume[3].title)
+      XCTAssertTrue(resume[4].title.contains("authorize"), resume[4].title)
+      XCTAssertTrue(
+        PlainLanguage.recoveryAccountShutdownConfirmationBody(resuming: false)
+          .contains("Create a recovery account"))
+      XCTAssertTrue(
+        PlainLanguage.recoveryAccountShutdownConfirmationBody(resuming: true)
+          .contains("Resume recovery setup"))
+    }
+
     func testChannelAvailabilityKeepsTheLatestCheck() async {
       let environment = MockInstallerEnvironment()
       let slow = OperationGate()
