@@ -658,6 +658,83 @@ else:
         finally:
             release.open_url = saved
 
+    def test_remote_digest_resumes_a_stalled_read(self) -> None:
+        data = bytes(range(256)) * 64
+        requests = []
+
+        class Stalling(io.BytesIO):
+            status = 200
+
+            def read(self, size=-1):
+                if self.tell() >= 4096:
+                    raise TimeoutError("stalled")
+                return super().read(min(size, 1024))
+
+        def serve(url, timeout=60, headers=None):
+            requests.append(headers)
+            if headers is None:
+                return contextlib.closing(Stalling(data))
+            body = io.BytesIO(data[int(headers["Range"][6:-1]):])
+            body.status = 206
+            return contextlib.closing(body)
+
+        saved, sleep = release.open_url, release.time.sleep
+        release.open_url, release.time.sleep = serve, lambda seconds: None
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=4096-"}])
+
+            def ignore_range(url, timeout=60, headers=None):
+                return contextlib.closing(Stalling(data))
+
+            release.open_url = ignore_range
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(release.Refusal, "ignored a resume request"):
+                    release.remote_digest("https://example.test/p", len(data))
+
+            requests.clear()
+
+            def close_early(url, timeout=60, headers=None):
+                requests.append(headers)
+                start = int(headers["Range"][6:-1]) if headers else 0
+                body = io.BytesIO(data[start:] if headers else data[:3000])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            release.open_url = close_early
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=3000-"}])
+
+            class StallAfterEnd(io.BytesIO):
+                status = 206
+
+                def read(self, size=-1):
+                    block = super().read(size)
+                    if not block:
+                        raise TimeoutError("stalled before the end of the body")
+                    return block
+
+            def always_stall(url, timeout=60, headers=None):
+                start = int(headers["Range"][6:-1]) if headers else 0
+                stop = len(data) if len(requests) + 1 >= release.REMOTE_READ_ATTEMPTS else start + 512
+                requests.append(headers)
+                body = StallAfterEnd(data[start:stop])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            requests.clear()
+            release.open_url = always_stall
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(len(requests), release.REMOTE_READ_ATTEMPTS)
+        finally:
+            release.open_url, release.time.sleep = saved, sleep
+
     def test_remote_verification_reads_the_app_against_its_sidecar(self) -> None:
         base = release.identity()["INSTALLER_CATALOG_BASE"]
         url = f"{base}/installer/2.4.0/App-2.4.0.dmg"

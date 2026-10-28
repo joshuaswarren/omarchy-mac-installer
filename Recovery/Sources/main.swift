@@ -229,7 +229,8 @@ final class InstallerModel {
     }
   }
 
-  func repairRecoveryBoot(password: String? = nil, needsPassword: @escaping () -> Void) {
+  /// `needsPassword` receives the reason when a password was refused.
+  func repairRecoveryBoot(password: String? = nil, needsPassword: @escaping (String?) -> Void) {
     guard !checkingEnvironment else { return }
     checkingEnvironment = true
     let previousOwner = authorizationOwner
@@ -242,13 +243,17 @@ final class InstallerModel {
           self.checkingEnvironment = false
           if !complete {
             self.authorizationOwner = owner
-            needsPassword()
+            needsPassword(nil)
           }
         }
       } catch {
         DispatchQueue.main.async {
           self.checkingEnvironment = false
-          self.failure = error.localizedDescription
+          if error is RecoveryPasswordRejected {
+            needsPassword(error.localizedDescription)
+          } else {
+            self.failure = error.localizedDescription
+          }
         }
       }
     }
@@ -302,7 +307,8 @@ final class InstallerModel {
     }
   }
 
-  func startDemo() {
+  /// `passwordRejected` asks for the password again instead of reporting a failure.
+  func startDemo(passwordRejected: ((String) -> Void)? = nil) {
     guard RecoveryActions.isPreview || RecoveryActions.inRecovery else {
       password.removeAll(keepingCapacity: false)
       environmentIssue = .notRecovery
@@ -336,10 +342,11 @@ final class InstallerModel {
           DispatchQueue.main.async {
             if let issue = error as? EnrollmentGateIssue {
               self.environmentIssue = issue
-            } else {
+            } else if !(error is RecoveryPasswordRejected) || passwordRejected == nil {
               self.failure = error.localizedDescription
             }
             self.stage = .welcome
+            if error is RecoveryPasswordRejected { passwordRejected?(error.localizedDescription) }
           }
         }
       }

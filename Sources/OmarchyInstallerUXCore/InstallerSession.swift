@@ -90,6 +90,29 @@
     public var canOpenRemoval: Bool {
       canInspect && !isEditingSize && credentialSheet.context == nil
     }
+    /// Recovery finished this installation; only the optional recovery
+    /// account was skipped, so it is installed rather than waiting.
+    public var recoveryAccountDeferred: Bool { recoveryAccount?.accountDeferred == true }
+    /// The skipped account was started in Recovery but its ownership was never
+    /// finalized, so Recovery resumes it rather than offering a new one.
+    /// Finalizing clears the deferral, so a finalized record that is still
+    /// deferred only follows an interruption between the two; it is treated
+    /// as not started.
+    public var recoveryAccountStarted: Bool {
+      guard recoveryAccountDeferred, let record = recoveryAccount?.record else { return false }
+      return record.phase != "finalized"
+    }
+    /// The person chose Installation → Set Up Recovery Password….
+    public private(set) var showsRecoveryAccountSetup = false
+    public var canSetUpRecoveryAccount: Bool {
+      guard case .existingInstallRefused = phase else { return false }
+      return recoveryAccountDeferred && !showsRecoveryAccountSetup && canOpenRemoval
+    }
+    public func setUpRecoveryAccount() {
+      guard canSetUpRecoveryAccount else { return }
+      showsRecoveryAccountSetup = true
+    }
+    public func cancelRecoveryAccountSetup() { showsRecoveryAccountSetup = false }
     public var canEditPlan: Bool {
       guard case .awaitingInstall = phase else { return false }
       return canInspect && credentialSheet.context == nil
@@ -761,10 +784,13 @@
     }
 
     /// Retain the handoff even when another app rejects shutdown. A successful
-    /// Apple Event dispatch is not proof that macOS has shut down.
+    /// Apple Event dispatch is not proof that macOS has shut down. The
+    /// recovery account's setup steps shut down the same way.
     @discardableResult
     public func shutDown() -> Bool {
-      guard case .awaitingRecovery = phase else { return false }
+      var showsSteps = showsRecoveryAccountSetup
+      if case .awaitingRecovery = phase { showsSteps = true }
+      guard showsSteps else { return false }
       let accepted = environment.requestShutdown()
       shutdownMessage =
         isSimulation
@@ -817,6 +843,11 @@
         throw AccountSetupFailure("The Recovery target changed. Inspect the installation again.")
       }
       recoveryAccount = reply
+      // An installation that turns out to have skipped only the account keeps
+      // its steps, and any shutdown failure, on screen.
+      if case .existingInstallRefused = phase, reply.accountDeferred == true {
+        showsRecoveryAccountSetup = true
+      }
       return environment.requestShutdown()
     }
 
@@ -971,6 +1002,7 @@
     private func resetForInspection() {
       environment.discardApproval()
       isEditingSize = false
+      showsRecoveryAccountSetup = false
       shutdownMessage = nil
       allocationNotice = nil
       stagingProgress = [:]
