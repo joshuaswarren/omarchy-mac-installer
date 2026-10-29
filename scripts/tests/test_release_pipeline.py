@@ -116,6 +116,7 @@ class Triggers(unittest.TestCase):
         "mac-catalog.yml": {"workflow_call", "workflow_dispatch"},
         "edge-dispatch.yml": {"repository_dispatch"},
         "mac-mirror.yml": {"workflow_dispatch"},
+        "mac-pipeline-pins.yml": {"release", "workflow_dispatch"},
     }
 
     def test_no_pipeline_workflow_runs_for_pull_requests_pushes_or_other_runs(self):
@@ -148,7 +149,7 @@ class Ordering(unittest.TestCase):
         self.assertEqual(field(self.jobs["acceptance"], "needs"), "build")
         self.assertEqual(field(self.jobs["upload"], "needs"), "[build, acceptance, catalog-inputs]")
         self.assertEqual(field(self.jobs["catalog-inputs"], "needs"), "acceptance")
-        self.assertEqual(field(self.jobs["catalog"], "needs"), "[build, acceptance, upload, catalog-inputs]")
+        self.assertEqual(field(self.jobs["catalog"], "needs"), "[plan, build, acceptance, upload, catalog-inputs]")
         for job, workflow in (("build", "mac-image"), ("acceptance", "mac-acceptance"), ("upload", "mac-upload"),
                               ("catalog", "mac-catalog")):
             self.assertEqual(field(self.jobs[job], "uses"), f"./.github/workflows/{workflow}.yml")
@@ -179,7 +180,8 @@ class Ordering(unittest.TestCase):
             self.assertIn(line, upload_job)
         for line in ("image: ${{ needs.build.outputs.name }}", "payload: ${{ needs.upload.outputs.payload }}",
                      "installer-data: ${{ needs.upload.outputs.installer-data }}",
-                     "evidence: ${{ needs.upload.outputs.evidence }}", "channel: edge", "dry-run: false"):
+                     "evidence: ${{ needs.upload.outputs.evidence }}", "channel: ${{ needs.plan.outputs.lane }}",
+                     "dry-run: false"):
             self.assertIn(line, catalog_job)
 
     def test_called_workflows_declare_what_the_pipeline_reads(self):
@@ -190,6 +192,68 @@ class Ordering(unittest.TestCase):
                 with self.subTest(f"{workflow} {output}"):
                     self.assertRegex(text(WORKFLOWS / workflow),
                                      rf"\n      {re.escape(output)}:\n        description: [^\n]*\n        value: \$\{{\{{ jobs\.")
+
+
+class Lanes(unittest.TestCase):
+    """A run without a release tag is an edge run, as the edge trigger starts it; a release tag makes
+    an rc run, which builds the rc image for that tag and publishes to catalog-rc after acceptance."""
+
+    def plan(self, tag: str = "", revision: str = "", ref: str = "refs/heads/main") -> tuple[int, str]:
+        directory = Path(tempfile.mkdtemp(prefix="omarchy-pipeline-plan-"))
+        self.addCleanup(shutil.rmtree, directory)
+        output = directory / "output"
+        output.write_text("")
+        env = {"PATH": os.environ["PATH"], "EVENT": "workflow_dispatch", "GITHUB_REF": ref, "DRY_RUN": "true",
+               "RELEASE_TAG": tag, "MAC_REVISION": revision, "GITHUB_OUTPUT": str(output)}
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", step_script(PIPELINE, "Refuse a run off main")],
+                                cwd=ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.output = result.stdout + result.stderr
+        return result.returncode, output.read_text()
+
+    def test_a_run_without_a_tag_is_edge(self):
+        self.assertEqual(self.plan(), (0, "lane=edge\nrelease-tag=\nmac-revision=\n"), self.output)
+
+    def test_a_release_tag_makes_an_rc_run_at_revision_one_by_default(self):
+        self.assertEqual(self.plan("v4.5.0-rc2"), (0, "lane=rc\nrelease-tag=v4.5.0-rc2\nmac-revision=1\n"), self.output)
+        self.assertEqual(self.plan("v4.5.0-rc2", "3")[1], "lane=rc\nrelease-tag=v4.5.0-rc2\nmac-revision=3\n")
+
+    def test_a_malformed_tag_or_revision_never_reaches_the_build(self):
+        for tag, revision in (("v4.5.0", ""), ("4.5.0-rc2", ""), ("v4.5.0-rc2;id", ""), ("v4.5.0-rc0", ""),
+                              ("v4.5.0-rc2", "0"), ("v4.5.0-rc2", "1a"), ("", "2")):
+            with self.subTest(tag=tag, revision=revision):
+                self.assertEqual(self.plan(tag, revision), (1, ""))
+        self.assertEqual(self.plan("v4.5.0-rc2", ref="refs/heads/feature"), (1, ""))
+
+    def test_the_build_takes_the_lane_and_the_catalog_its_channel(self):
+        pipeline = jobs(PIPELINE)
+        for line in ("lane: ${{ needs.plan.outputs.lane }}", "release-tag: ${{ needs.plan.outputs.release-tag }}",
+                     "mac-revision: ${{ needs.plan.outputs.mac-revision }}"):
+            self.assertIn(line, pipeline["build"])
+        self.assertIn("channel: ${{ needs.plan.outputs.lane }}", pipeline["catalog"])
+        # catalog-rc, like catalog-edge, waits for passing VM acceptance and a real run.
+        self.assertEqual(field(pipeline["catalog"], "if"), "needs.acceptance.outputs.result == 'pass' && !inputs.dry-run")
+
+    def test_the_image_build_defaults_to_edge_and_reads_its_inputs_from_the_environment(self):
+        image = text(IMAGE)
+        self.assertEqual(image.count("        default: edge\n"), 2, "both triggers default to the edge lane")
+        self.assertIn("group: mac-image-${{ inputs.lane || 'edge' }}", image)
+        self.assertIn("name: Build the ${{ inputs.lane || 'edge' }} image", image)
+        for name, value in (("LANE", "${{ inputs.lane || 'edge' }}"), ("RELEASE_TAG", "${{ inputs.release-tag }}"),
+                            ("MAC_REVISION", "${{ inputs.mac-revision }}")):
+            self.assertIn(f"      {name}: {value}\n", image)
+        build = jobs(IMAGE)["build"]
+        run_blocks = re.findall(r"run: \|\n((?:          .*\n|\n)+)", text(IMAGE))
+        self.assertTrue(run_blocks)
+        for block in run_blocks:
+            self.assertNotIn("${{ inputs.", block, "inputs reach scripts only through the environment")
+        self.assertIn('--channel "$LANE"', build)
+        self.assertIn('${RELEASE_TAG:+--release-tag "$RELEASE_TAG"}', build)
+
+    def test_the_signer_takes_evidence_for_edge_and_rc_alone(self):
+        sign = text(WORKFLOWS / "mac-catalog-sign.yml")
+        self.assertIn("evidence:edge | evidence:rc)", sign)
+        self.assertNotIn("evidence:stable", sign)
+        self.assertIn("options: [edge, rc]", text(WORKFLOWS / "mac-catalog.yml"))
 
 
 class Secrets(unittest.TestCase):
@@ -785,8 +849,10 @@ class NativeRecovery(unittest.TestCase):
         (download / "source.txt").write_text(f"source_commit={'a' * 40}\nrecovery_app_manifest_sha256={digest}\n")
         return digest
 
-    def run_step(self, name: str, digest: str, cwd: Path = ROOT, path: str = "") -> subprocess.CompletedProcess:
-        env = {"PATH": path + os.environ["PATH"], "WORK": str(self.work), "RECOVERY_SHA256": digest}
+    def run_step(self, name: str, digest: str, cwd: Path = ROOT, path: str = "",
+                 lane: tuple[str, str, str] = ("edge", "", "")) -> subprocess.CompletedProcess:
+        env = {"PATH": path + os.environ["PATH"], "WORK": str(self.work), "RECOVERY_SHA256": digest,
+               "LANE": lane[0], "RELEASE_TAG": lane[1], "MAC_REVISION": lane[2]}
         return subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", step_script(IMAGE, name)], cwd=cwd,
                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
@@ -816,7 +882,7 @@ class NativeRecovery(unittest.TestCase):
     def test_the_resolver_must_pin_the_app_the_build_then_takes(self):
         digest = "a" * 64
         checkout = self.stub_tools(digest)
-        for step in ("Resolve the edge inputs", "Build the image"):
+        for step in ("Resolve the lane's inputs", "Build the image"):
             result = self.run_step(step, digest, cwd=checkout)
             self.assertEqual(result.returncode, 0, result.stderr)
         calls = (Path(self.tmp.name) / "calls").read_text().splitlines()
@@ -826,9 +892,21 @@ class NativeRecovery(unittest.TestCase):
         self.assertIn(recovery, calls[0])
         self.assertTrue(calls[1].startswith(f"build-mac-image --inputs {self.work}/inputs {recovery} "), calls[1])
 
+    def test_an_rc_build_resolves_its_tag_and_revision(self):
+        digest = "a" * 64
+        checkout = self.stub_tools(digest)
+        result = self.run_step("Resolve the lane's inputs", digest, cwd=checkout, lane=("rc", "v4.5.0-rc2", "2"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = (Path(self.tmp.name) / "calls").read_text()
+        self.assertTrue(call.startswith(f"mac-image-inputs resolve {self.work}/inputs --channel-set --channel rc "
+                                        "--release-tag v4.5.0-rc2 --mac-revision 2 "), call)
+        result = self.run_step("Resolve the lane's inputs", digest, cwd=checkout, lane=("stable", "v4.5.0", ""))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the lane must be edge or rc", result.stdout + result.stderr)
+
     def test_inputs_pinning_another_app_stop_the_build(self):
         checkout = self.stub_tools("b" * 64)
-        result = self.run_step("Resolve the edge inputs", "a" * 64, cwd=checkout)
+        result = self.run_step("Resolve the lane's inputs", "a" * 64, cwd=checkout)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not pin the Recovery app built for this run", result.stdout + result.stderr)
 
@@ -840,7 +918,8 @@ class NativeRecovery(unittest.TestCase):
 
 class Plan(unittest.TestCase):
     def plan(self, dry_run: str, ref: str, event: str = "workflow_dispatch") -> int:
-        env = {"PATH": os.environ["PATH"], "DRY_RUN": dry_run, "GITHUB_REF": ref, "EVENT": event}
+        env = {"PATH": os.environ["PATH"], "DRY_RUN": dry_run, "GITHUB_REF": ref, "EVENT": event,
+               "RELEASE_TAG": "", "MAC_REVISION": "", "GITHUB_OUTPUT": os.devnull}
         return subprocess.run(["bash", "--noprofile", "--norc", "-c", step_script(PIPELINE, "Refuse a run off main")], env=env,
                               stdin=subprocess.DEVNULL, capture_output=True).returncode
 

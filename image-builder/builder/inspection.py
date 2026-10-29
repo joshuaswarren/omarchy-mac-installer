@@ -78,6 +78,7 @@ installed_system = _load("verify_installed_system", "verify_installed_system.py"
 # The raw Stage 1 the engine enrolls on a MacBook Neo.
 STAGE1 = "usr/share/m1n1-aurora/stage1/m1n1-raw.bin"
 test_image_pin = _load("test_image_pin", "test_image_pin.py")
+channel_set = _load("channel_set", "channel_set.py")
 
 
 class InspectionError(RuntimeError):
@@ -676,6 +677,82 @@ def check_pacman_config(root: Path, channel: str, candidates: Candidates) -> str
             + (f"; test image pin: IgnorePkg = {' '.join(pinned)}" if pinned else ""))
 
 
+# What a release lane's image records about where it came from (build-mac-image
+# write_install_receipt), in this order: the image, the release it builds, its
+# lane and catalog channel, the lane's install contract, and the build identity.
+RECEIPT = "var/lib/omarchy/install-receipt"
+RECEIPT_FIELDS = ("format", "image", "release_tag", "mac_revision", "lane", "catalog_channel", "omarchy_mirror",
+                  "omarchy_runtime_package", "omarchy_settings_package", "omarchy_image_ref", "package_set_sha256",
+                  "built")
+EDGE_RUNTIME = ("omarchy-dev", "omarchy-settings-dev")
+
+
+def servers(path: Path) -> list[str]:
+    return [line.split("=", 1)[1].strip() for line in path.read_text().splitlines()
+            if re.fullmatch(r"\s*Server\s*=.*", line)]
+
+
+def section_servers(path: Path, section: str) -> list[str]:
+    current, found = None, []
+    for line in path.read_text().splitlines():
+        if re.fullmatch(r"\[[^]]+\]", line.strip()):
+            current = line.strip()[1:-1]
+        elif current == section and re.fullmatch(r"\s*Server\s*=.*", line):
+            found.append(line.split("=", 1)[1].strip())
+    return found
+
+
+def check_lane_channel(root: Path, lane: str, candidates: Candidates) -> str:
+    """A release lane's image installs the clean runtime and names only its own repositories:
+    nothing from edge, neither its -dev packages nor its servers."""
+    for role in ("omarchy", "omarchy-settings"):
+        require(candidates.roles.get(role) == role, f"the {lane} set fills {role} with {candidates.roles.get(role)}")
+    stray = sorted(set(EDGE_RUNTIME) & set(installed_versions(root)))
+    require(not stray, f"the {lane} image installs edge's {', '.join(stray)}")
+    kind, template, mirrorlist = pacman_templates(root, lane)
+    require(kind == "the runtime's aarch64-apple" and template.is_file() and mirrorlist.parent.name == "aarch64-apple",
+            f"the runtime ships no Apple {lane} pacman configuration")
+    for path in (root / "etc/pacman.conf", root / "etc/pacman.d/mirrorlist"):
+        edge = [server for server in servers(path)
+                if "/edge/" in server or server.startswith("https://arm-mirror.omarchy.org/")]
+        require(not edge, f"/{path.relative_to(root)} names edge: {', '.join(edge)}")
+    omarchy = section_servers(root / "etc/pacman.conf", "omarchy")
+    require(omarchy and all(f"/{lane}/" in server for server in omarchy),
+            f"/etc/pacman.conf's [omarchy] is not the {lane} repository: {', '.join(omarchy) or 'no server'}")
+    return f"the clean runtime and the runtime's aarch64-apple {lane} repositories ({', '.join(omarchy)}), nothing from edge"
+
+
+def check_install_receipt(root: Path, lane: str, factory: Path | None, trust: Path, report: dict) -> str:
+    path = root / RECEIPT
+    require(path.is_file() and not path.is_symlink(), "the image carries no install receipt")
+    root_owned(path, 0o644)
+    lines = path.read_text().split("\n")
+    require(lines[-1] == "" and [line.partition("=")[0] for line in lines[:-1]] == list(RECEIPT_FIELDS)
+            and all("=" in line for line in lines[:-1]), "the install receipt is not format 1")
+    receipt = dict(line.split("=", 1) for line in lines[:-1])
+    require(receipt["format"] == "1", "the install receipt is not format 1")
+    require(receipt["lane"] == lane and receipt["catalog_channel"] == lane, f"the install receipt is not for the {lane} lane")
+    try:
+        contract = channel_set.lane_inputs(lane, receipt["release_tag"], trust)
+    except ValueError as error:
+        raise InspectionError(f"the install receipt: {error}") from None
+    require({"omarchy_" + key.removeprefix("OMARCHY_").lower(): value for key, value in contract.items()}
+            == {key: receipt[key] for key in RECEIPT_FIELDS if key.startswith("omarchy_")},
+            f"the install receipt does not name the {lane} lane's install contract")
+    require(re.fullmatch(r"[1-9][0-9]{0,2}", receipt["mac_revision"]) is not None, "the install receipt names no Mac revision")
+    target = read_image_target(root / "var/lib/omarchy/image/target", CHANNEL_TARGET_FIELDS)
+    for key in IDENTITY_FIELDS:
+        require(receipt[key] == target.get(key), f"the install receipt's {key} is not the image target's")
+    image = (rf"omarchy-mac-{re.escape(receipt['release_tag'].removeprefix('v'))}-r{receipt['mac_revision']}"
+             rf"-[0-9]{{4}}\.[0-9]{{2}}\.[0-9]{{2}}-{receipt['package_set_sha256'][:12]}")
+    require(re.fullmatch(image, receipt["image"]) is not None, f"the install receipt names another image: {receipt['image']}")
+    if factory is not None:
+        require((factory / RECEIPT).is_file() and (factory / RECEIPT).read_bytes() == path.read_bytes(),
+                "@factory's install receipt is not the image's")
+    report["install_receipt"] = receipt
+    return f"{receipt['image']}, {receipt['release_tag']} revision {receipt['mac_revision']} on the {lane} lane"
+
+
 def check_installed_system(root: Path, report: dict, candidates: Candidates) -> str:
     # A channel set's -dev desktop is its runtime, not a stray development package.
     verification = installed_system.verify(root, runtime_packages=candidates.runtime_names())
@@ -739,6 +816,9 @@ def inspect(root: Path, candidates_dir: Path, channel: str, factory: Path | None
         ("installed-system", lambda: check_installed_system(root, report, candidates)),
         ("speaker-routing", lambda: check_speaker_routing(root)),
     ]
+    if channel != "edge":
+        checks += [("lane-channel", lambda: check_lane_channel(root, channel, candidates)),
+                   ("install-receipt", lambda: check_install_receipt(root, channel, factory, trust, report))]
     if factory is not None:
         checks.append(("factory", lambda: check_factory(factory, root, candidates)))
     for identifier, check in checks:

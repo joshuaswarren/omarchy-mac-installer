@@ -1,12 +1,16 @@
-name: Mac image (edge)
+name: Mac image
 
-# Builds the public Apple Silicon image from the edge channel as it is now
-# (image-builder channel mode: the pinned edge omarchy.db, every package
-# checked against it and the Omarchy package key) with the native Recovery app
-# built from this checkout (recovery-app.yml), runs the release guard, and
-# keeps the image, its records and a build provenance attestation as workflow
-# artifacts. It publishes nothing: no release, no catalog, no upload. It uses
-# no secrets, takes no inputs, and never runs for pull requests.
+# Builds the public Apple Silicon image for a lane from its channel as it is
+# now (image-builder channel mode: the pinned omarchy.db of the lane, every
+# package checked against it and the Omarchy package key) with the native
+# Recovery app built from this checkout (recovery-app.yml), runs the release
+# guard, and keeps the image, its records and a build provenance attestation as
+# workflow artifacts. It publishes nothing: no release, no catalog, no upload.
+# It uses no secrets and never runs for pull requests.
+#
+# The lane is edge by default. An rc image takes its release tag (v4.5.0-rc2)
+# and Mac revision: it is built from the RC channel with the clean runtime of
+# that release and named from the tag (image-builder/bin/mac-image-check name).
 #
 # The installer finishes every public install with the native Recovery app
 # (its handoff needs the app's install configuration on the stub), so the
@@ -23,9 +27,22 @@ name: Mac image (edge)
 
 on:
   workflow_call:
+    inputs:
+      lane:
+        description: The lane to build, edge or rc
+        type: string
+        default: edge
+      release-tag:
+        description: An rc image's release tag (v4.5.0-rc2); empty for edge
+        type: string
+        default: ''
+      mac-revision:
+        description: An rc image's Mac revision (1 to 999); empty for 1
+        type: string
+        default: ''
     outputs:
       name:
-        description: The image name and artifact name, omarchy-mac-edge-<YYYY.MM.DD>-<package set id>-<image id>
+        description: The image name and artifact name, omarchy-mac-edge-<YYYY.MM.DD>-<package set id>-<image id> or omarchy-mac-<X.Y.Z-rcN>-r<revision>-<YYYY.MM.DD>-<package set id>
         value: ${{ jobs.build.outputs.name }}
       payload:
         description: The image zip's file name
@@ -34,12 +51,26 @@ on:
         description: The image zip's sha256
         value: ${{ jobs.build.outputs.sha256 }}
   workflow_dispatch:
+    inputs:
+      lane:
+        description: The lane to build
+        type: choice
+        options: [edge, rc]
+        default: edge
+      release-tag:
+        description: An rc image's release tag (v4.5.0-rc2); empty for edge
+        type: string
+        default: ''
+      mac-revision:
+        description: An rc image's Mac revision (1 to 999); empty for 1
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: mac-image-edge
+  group: mac-image-${{ inputs.lane || 'edge' }}
   cancel-in-progress: false
 
 defaults:
@@ -60,7 +91,7 @@ jobs:
       contents: read
 
   build:
-    name: Build the edge image
+    name: Build the ${{ inputs.lane || 'edge' }} image
     needs: recovery
     # Namespace's runners are ours: nothing a pull request starts reaches
     # them, and a build starts only from main, as the acceptance of its image.
@@ -76,6 +107,9 @@ jobs:
     timeout-minutes: 90
     env:
       RECOVERY_SHA256: ${{ needs.recovery.outputs.manifest-sha256 }}
+      LANE: ${{ inputs.lane || 'edge' }}
+      RELEASE_TAG: ${{ inputs.release-tag }}
+      MAC_REVISION: ${{ inputs.mac-revision }}
     outputs:
       name: ${{ steps.stage.outputs.name }}
       payload: ${{ steps.stage.outputs.payload }}
@@ -125,10 +159,13 @@ jobs:
           grep -Fxq "recovery_app_manifest_sha256=$RECOVERY_SHA256" "$WORK/recovery-input/source.txt"
           cp "$WORK/recovery-input/source.txt" "$WORK/evidence/recovery-source.txt"
 
-      - name: Resolve the edge inputs
+      - name: Resolve the lane's inputs
         run: |
           set -euo pipefail
-          bash image-builder/bin/mac-image-inputs resolve "$WORK/inputs" --channel-set --channel edge \
+          # The builder refuses a lane it does not enable and a tag that is not the lane's.
+          [[ $LANE == edge || $LANE == rc ]] || { echo "::error::the lane must be edge or rc, not $LANE"; exit 1; }
+          bash image-builder/bin/mac-image-inputs resolve "$WORK/inputs" --channel-set --channel "$LANE" \
+            ${RELEASE_TAG:+--release-tag "$RELEASE_TAG"} ${MAC_REVISION:+--mac-revision "$MAC_REVISION"} \
             --recovery-app "$WORK/recovery" --cache "$WORK/cache"
           tee "$WORK/evidence/inputs" <"$WORK/inputs"
           grep -Fxq "recovery_app_manifest_sha256=$RECOVERY_SHA256" "$WORK/inputs" ||
@@ -147,7 +184,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$WORK/out" "$WORK/cache"
           # Both hold a channel image to the native Recovery app: pinned, declared and in the ESP.
           for check in provenance descriptor; do
-            python3 image-builder/bin/mac-image-check "$check" edge "$WORK/out"
+            python3 image-builder/bin/mac-image-check "$check" "$LANE" "$WORK/out"
           done
           jq -e '.os_list[0].recovery_gui == "omarchy-native-v1"' "$WORK/out/installer_data.json" >/dev/null
           # Channel packages were verified after install from pacman's cache (builder/channel_set.py verify-installed).
@@ -169,7 +206,7 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          name=$(python3 image-builder/bin/mac-image-check name edge "$WORK/out")
+          name=$(python3 image-builder/bin/mac-image-check name "$LANE" "$WORK/out")
           stage=$WORK/stage/$name
           mkdir -p "$stage"
           zip=$(cd "$WORK/out" && ls ./*.zip)
@@ -177,9 +214,11 @@ jobs:
           mv "$WORK/out/$zip" "$stage/"
           (cd "$stage" && sha256sum "$zip" >"$zip.sha256")
           sha256=$(cut -d' ' -f1 "$stage/$zip.sha256")
-          [[ $zip =~ ^omarchy-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-aarch64-apple-silicon-mac-edge-os-package\.zip$ && $sha256 =~ ^[0-9a-f]{64}$ ]]
-          # The name ends in the zip's image id, so each build gets its own release.
-          [[ $name == *-"${sha256:0:12}" ]] || { echo "::error::$name does not name the zip's sha256 $sha256"; exit 1; }
+          [[ $zip =~ ^omarchy-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-aarch64-apple-silicon-mac-[a-z]+-os-package\.zip$ &&
+            $zip == *-mac-"$LANE"-os-package.zip && $sha256 =~ ^[0-9a-f]{64}$ ]]
+          # An edge name ends in the zip's image id, so each build gets its own
+          # release; an rc name is its tag and revision, and a respin takes the next.
+          [[ $LANE != edge || $name == *-"${sha256:0:12}" ]] || { echo "::error::$name does not name the zip's sha256 $sha256"; exit 1; }
           for file in installer_data.json IMAGE PROVENANCE INSPECTION inputs; do
             cp "$WORK/out/$file" "$stage/"
           done
@@ -196,7 +235,7 @@ jobs:
             echo '```'
             echo "payload $zip, $(stat -c %s "$stage/$zip") bytes"
             echo "sha256  $sha256"
-            grep -E '^(channel_set|omarchy_db_sha256|recovery_app_manifest_sha256|package_set_sha256|built|builder_commit)=' "$stage/IMAGE"
+            grep -E '^(channel_set|omarchy_db_sha256|release_tag|mac_revision|recovery_app_manifest_sha256|package_set_sha256|built|builder_commit)=' "$stage/IMAGE"
             echo '```'
           } >>"$GITHUB_STEP_SUMMARY"
 

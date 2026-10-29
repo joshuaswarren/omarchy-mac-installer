@@ -14,7 +14,7 @@ name: Mac catalog
 #            and publishes to a scratch directory only.
 #
 # Inputs and the evidence record are documented in docs/catalog-release.md.
-# A caller (the edge publish trigger) must grant contents: write.
+# A caller (the release pipeline) must grant contents: write.
 
 on:
   workflow_call:
@@ -44,7 +44,7 @@ on:
         type: string
         required: true
       channel:
-        description: Channel to publish (edge only until promotion is unparked)
+        description: Channel to publish, edge for an edge image or rc for an rc-lane image (stable comes from promotion)
         type: string
         default: edge
       dry-run:
@@ -102,7 +102,7 @@ on:
       channel:
         description: Channel to publish
         type: choice
-        options: [edge]
+        options: [edge, rc]
         default: edge
       dry-run:
         description: Sign and publish to a scratch directory only

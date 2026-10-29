@@ -269,6 +269,11 @@ CHANNEL_VERSIONS = dict(VERSIONS, **{"omarchy": "4.0.0.r6971.g492b883-1", "omarc
                                      "omarchy-mac": "0.1.4-1", "omarchy-mac-boot": "20261010-1"})
 
 
+# What rc serves for v4.5.0-rc2: the clean runtime, its pkgver the tag's version.
+RC_RELEASE = "v4.5.0-rc2"
+RC_VERSIONS = dict(CHANNEL_VERSIONS, **{"omarchy": "4.5.0rc2-1", "omarchy-settings": "4.5.0rc2-1"})
+
+
 def channel_trust(base: Path, candidate: Signer, channel: Signer) -> Path:
     """A trust directory pinning CANDIDATE as the candidate test key and CHANNEL as the channel key."""
     trust = base / "channel-trust"
@@ -299,12 +304,15 @@ def desc(name: str, version: str, filename: str, path: Path, arch: str, provides
 
 
 def make_channel(directory: Path, signer: Signer, *, versions=None, contents=None, extra=(), unsigned=(),
-                 signers=None, entry_edit=None) -> tuple[Path, str]:
-    """An edge snapshot in DIRECTORY: packages/ holds every set archive and its detached signature by
+                 signers=None, entry_edit=None, lane: str = "edge") -> tuple[Path, str]:
+    """A LANE snapshot in DIRECTORY: packages/ holds every set archive and its detached signature by
     SIGNER (SIGNERS per name, none for UNSIGNED), and omarchy.db lists them, plus EXTRA (name, version)
-    entries. ENTRY_EDIT(name, desc) may rewrite an entry. Returns the database and its sha256."""
+    entries. ENTRY_EDIT(name, desc) may rewrite an entry. Edge serves the -dev runtime, rc the clean
+    one of RC_RELEASE. Returns the database and its sha256."""
+    names = CHANNEL_NAMES if lane == "edge" else {}
     base_versions = dict(VERSIONS)
-    base_versions.update({role: version for role, version in CHANNEL_VERSIONS.items() if role in base_versions})
+    base_versions.update({role: version for role, version in
+                          (CHANNEL_VERSIONS if lane == "edge" else RC_VERSIONS).items() if role in base_versions})
     versions = dict(base_versions, **(versions or {}))
     contents = contents or channel_contents()
     packages = directory / "packages"
@@ -312,11 +320,13 @@ def make_channel(directory: Path, signer: Signer, *, versions=None, contents=Non
     entries = directory / "entries"
     entries.mkdir()
     signers = signers or {}
+    settings = names.get("omarchy-settings", "omarchy-settings")
     for role in base_versions:
-        name = CHANNEL_NAMES.get(role, role)
+        name = names.get(role, role)
         version = versions[role]
         filename = f"{name}-{version}-aarch64.pkg.tar.xz"
-        deps = ["omarchy-settings-dev"] if role == "omarchy" else ["omarchy"] if role == "omarchy-mac-boot" else []
+        settings_dep = settings if lane == "edge" else f"{settings}={versions['omarchy-settings'].rsplit('-', 1)[0]}"
+        deps = [settings_dep] if role == "omarchy" else ["omarchy"] if role == "omarchy-mac-boot" else []
         write_archive(packages / filename, name, version, contents.get(role, {}), deps)
         if name not in unsigned:
             signers.get(name, signer).sign(packages / filename)
@@ -526,9 +536,19 @@ def image_target(summary: dict, profile: str | None = None) -> str:
             f"package_set_sha256={PACKAGE_SET_SHA256}\nbuilt={BUILT}\n")
 
 
-def make_root(root: Path, candidates: Path, layout: str | None = None) -> None:
+def install_receipt(lane: str = "rc", tag: str = RC_RELEASE, revision: str = "1", date: str = "2026.09.28") -> str:
+    """The install receipt build-mac-image writes into a LANE image built for TAG."""
+    fields = {"format": "1", "image": f"omarchy-mac-{tag[1:]}-r{revision}-{date}-{PACKAGE_SET_SHA256[:12]}",
+              "release_tag": tag, "mac_revision": revision, "lane": lane, "catalog_channel": lane,
+              "omarchy_mirror": lane, "omarchy_runtime_package": "omarchy", "omarchy_settings_package": "omarchy-settings",
+              "omarchy_image_ref": tag, "package_set_sha256": PACKAGE_SET_SHA256, "built": BUILT}
+    return "".join(f"{key}={value}\n" for key, value in fields.items())
+
+
+def make_root(root: Path, candidates: Path, layout: str | None = None, lane: str = "edge") -> None:
     """An image root that passes inspection against the imported set CANDIDATES,
-    with the pacman templates of the runtime LAYOUT (RUNTIME_LAYOUTS)."""
+    with the pacman templates of the runtime LAYOUT (RUNTIME_LAYOUTS) for LANE,
+    and, on a release lane, its install receipt."""
     summary = json.loads((candidates / "import.json").read_text())
 
     def member(name: str, path: str) -> bytes:
@@ -603,6 +623,8 @@ def make_root(root: Path, candidates: Path, layout: str | None = None) -> None:
     state = root / "var/lib/omarchy"
     write(root, "var/lib/omarchy/image/target", image_target(summary))
     (state / "image").chmod(0o755)
+    if lane != "edge":
+        write(root, "var/lib/omarchy/install-receipt", install_receipt(lane))
     write(root, "var/lib/omarchy/mac-first-boot/pending", b"")
     write(root, "var/lib/omarchy/mac-first-boot/deferred-steps", "install/hardware/apple/limine-boot.sh\n")
     write(root, "var/lib/omarchy/provisioning/pending", b"")
@@ -615,7 +637,7 @@ def make_root(root: Path, candidates: Path, layout: str | None = None) -> None:
         (wants / unit).symlink_to(f"/usr/lib/systemd/system/{unit}")
     template = "[options]\nArchitecture = auto\n\n[asahi-alarm]\nServer = https://github.com/asahi-alarm/asahi-alarm/releases/download/aarch64\n"
     template += "".join(f"\n[{r}]\nInclude = /etc/pacman.d/mirrorlist\n" for r in ("core", "extra", "alarm", "aur"))
-    template += "\n[omarchy]\nServer = https://pkgs.omarchy.org/edge/$arch\n"
+    template += f"\n[omarchy]\nServer = https://pkgs.omarchy.org/{lane}/$arch\n"
     # A runtime with a platform template keeps asahi-alarm out of its plain aarch64 one.
     asahi = "\n[asahi-alarm]\nServer = https://github.com/asahi-alarm/asahi-alarm/releases/download/aarch64\n"
     templates = {"aarch64": (template.replace(asahi, "") if layout else template,
@@ -623,8 +645,8 @@ def make_root(root: Path, candidates: Path, layout: str | None = None) -> None:
     for name in RUNTIME_LAYOUTS[layout]["templates"] if layout else ():
         templates.setdefault(name, (f"# {name}\n" + template, f"Server = https://{name}.mirror.invalid/$arch/$repo\n"))
     for name, (conf, mirrors) in templates.items():
-        write(root, f"usr/share/omarchy/default/pacman/{name}/pacman-edge.conf", conf)
-        write(root, f"usr/share/omarchy/default/pacman/{name}/mirrorlist-edge", mirrors)
+        write(root, f"usr/share/omarchy/default/pacman/{name}/pacman-{lane}.conf", conf)
+        write(root, f"usr/share/omarchy/default/pacman/{name}/mirrorlist-{lane}", mirrors)
     conf, mirrors = RUNTIME_LAYOUTS[layout]["installed"] if layout else ("aarch64", "aarch64")
     write(root, "etc/pacman.conf", test_image_pin.render(templates[conf][0].encode(), test_image_pin.pinned(summary)))
     write(root, "etc/pacman.d/mirrorlist", templates[mirrors][1])

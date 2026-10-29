@@ -197,9 +197,11 @@ import_channel_set() {
   shift
   mkdir "$host_work/channel-packages"
   "$BASH" "$ROOT/bin/mac-image-inputs" packages "$inputs" "$host_work/channel-packages" "$@"
+  local tag
+  tag=$(record_field release_tag "$inputs")
   python3 "$ROOT/builder/channel_set.py" import --db "$host_work/dbs/omarchy.db" \
     --db-sha256 "$(record_field omarchy_db_sha256 "$inputs")" --lane "$(record_field omarchy_channel "$inputs")" \
-    --packages "$host_work/channel-packages" --output "$host_work/candidates" >"$host_work/import.txt" ||
+    ${tag:+--release-tag "$tag"} --packages "$host_work/channel-packages" --output "$host_work/candidates" >"$host_work/import.txt" ||
     fail "the channel set does not verify against the inputs record"
   rm -rf "$host_work/channel-packages"
   for key in set signer manifest_sha256; do
@@ -943,6 +945,31 @@ write_build_identity() {
   built=$time
 }
 
+# A release lane's install receipt: what a Mac installed from this image came
+# from, read by support and omarchy-m-test. The image, its release tag and Mac
+# revision, its lane and catalog channel, the lane's install contract
+# (channel_set.py lane, the x86 ISO's OMARCHY_* inputs) and the build identity,
+# in @ before @factory is sealed so a factory reset keeps it. An edge image
+# carries none. The payload's digest and what only an install knows (the
+# catalog sequence, the app and engine versions) are the installer's to add.
+write_install_receipt() {
+  local tag revision release_lane contract date receipt=$target/var/lib/omarchy/install-receipt
+  tag=$(field release_tag) revision=$(field mac_revision) release_lane=$(field omarchy_channel)
+  [[ -n $tag ]] || return 0
+  require_build_identity
+  contract=$(python3 "$ROOT/builder/channel_set.py" lane --lane "$release_lane" --release-tag "$tag") ||
+    fail "the inputs name no $release_lane release for the install receipt"
+  date=$(field resolved_at | cut -c1-10 | tr - .)
+  {
+    printf 'format=1\nimage=omarchy-mac-%s-r%s-%s-%s\n' "${tag#v}" "$revision" "$date" "${package_set_digest:0:12}"
+    printf 'release_tag=%s\nmac_revision=%s\nlane=%s\ncatalog_channel=%s\n' "$tag" "$revision" "$release_lane" "$release_lane"
+    awk -F= '{ printf "omarchy_%s=%s\n", tolower(substr($1, 9)), substr($0, index($0, "=") + 1) }' <<<"$contract"
+    printf 'package_set_sha256=%s\nbuilt=%s\n' "$package_set_digest" "$built"
+  } >"$receipt"
+  chmod 0644 "$receipt"
+  chown root:root "$receipt"
+}
+
 # IMAGE and PROVENANCE carry the identity the manifest recorded, or none is written.
 require_build_identity() {
   [[ $package_set_digest =~ ^[0123456789abcdef]{64}$ && -n $built ]] ||
@@ -1278,6 +1305,7 @@ configure_image() {
   # Recorded once the boot setup, which could change packages, is done.
   record_packages
   write_build_identity
+  write_install_receipt
   [[ -s $target/boot/efi/m1n1/boot.bin && -s $target/boot/efi/EFI/BOOT/BOOTAA64.EFI ]] ||
     fail "the boot chain is incomplete"
   [[ -d $target/boot/efi/omarchy && -z $(ls -A "$target/boot/efi/omarchy") ]] ||
@@ -1593,7 +1621,7 @@ write_installer_data() {
     --arg volume_id "$ESP_VOLUME_ID" \
     --arg recovery_app_manifest "$(field recovery_app_manifest_sha256)" \
     --args '{os_list: [{
-      name: "Omarchy MX Mac", default_os_name: "Omarchy", omarchy_target: "apple-silicon-full-os",
+      name: "Omarchy", default_os_name: "Omarchy", omarchy_target: "apple-silicon-full-os",
       boot_object: "m1n1.bin", next_object: "m1n1/boot.bin", package: $package, icon: "omarchy-volume.icns",
       supported_fw: $ARGS.positional,
       partitions: [
@@ -1660,6 +1688,9 @@ image_inputs() {
     echo candidate_set candidate_source_commit candidate_signer candidate_receipt_sha256 \
       candidate_manifest_sha256 omarchy_channel
   fi
+  if [[ -n $(field release_tag) ]]; then
+    echo release_tag mac_revision
+  fi
   if [[ -n $(field recovery_app_manifest_sha256) ]]; then
     echo recovery_app_manifest_sha256
   fi
@@ -1717,7 +1748,6 @@ interrupted() {
 
 container_main() {
   (($# == 0)) || usage_error "--in-container takes no arguments"
-  bash "$ROOT/bin/mac-image-inputs" check /inputs >/dev/null
   lane=$(field omarchy_channel)
   if [[ -d $lab_access_dir ]]; then
     [[ $lane == edge ]] || fail "a lab image is built for the edge lane only"
@@ -1737,6 +1767,9 @@ build_payload() {
   step() { printf '[%4ds] %s\n' "$((SECONDS - started))" "$1"; }
   step "preparing the toolchain from Arch Linux ARM"
   prepare_toolchain
+  # The host checked /inputs before starting the container; checking again needs
+  # the toolchain's python3 (channel_set.py lane), so it waits for it.
+  bash "$ROOT/bin/mac-image-inputs" check /inputs >/dev/null || fail "/inputs is not the checked inputs record"
   step "publishing $(set_name) as [omarchy-candidates]"
   read_repository_order
   step "repository order: omarchy-candidates ${repository_order[*]}"

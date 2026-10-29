@@ -1069,6 +1069,8 @@ class ChannelImageInspectionTest(unittest.TestCase):
         self.assertNotIn("test image pin", report["checks"]["pacman-config"]["detail"])
         self.assertEqual(report["installed_versions"]["omarchy-dev"], fixtures.CHANNEL_VERSIONS["omarchy"])
         self.assertEqual(len(report["supported_models"]), len(fixtures.MODELS))
+        self.assertFalse({"lane-channel", "install-receipt"} & set(report["checks"]), "edge inspects as it always has")
+        self.assertNotIn("install_receipt", report)
 
     def test_the_image_target_must_name_the_channel_set_as_a_public_image(self):
         target = self.root / "var/lib/omarchy/image/target"
@@ -1094,6 +1096,129 @@ class ChannelImageInspectionTest(unittest.TestCase):
     def test_the_factory_must_be_sealed_for_the_channel_set(self):
         fixtures.write(self.factory, "var/lib/omarchy/factory-sealed", "format=2\ncandidate_set=x\ncandidate_source_commit=y\n")
         self.assertFails("factory", "records another channel set")
+
+
+class RcChannelImageInspectionTest(unittest.TestCase):
+    """A public image built from an rc channel set for v4.5.0-rc2: the clean runtime, the rc
+    repositories and nothing from edge, and the install receipt that names the release."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.base = Path(cls.tmp.name)
+        cls.candidate = fixtures.Signer(cls.base / "candidate")
+        cls.channel = fixtures.Signer(cls.base / "channel", "Omarchy fixture <pkgs@example.invalid>")
+        cls.trust = fixtures.channel_trust(cls.base, cls.candidate, cls.channel)
+        database, sha256 = fixtures.make_channel(cls.base / "rc", cls.channel, lane="rc")
+        channel_set = fixtures.load("channel_set", "builder/channel_set.py")
+        cls.set = cls.base / "set"
+        cls.summary = channel_set.snapshot(database, sha256, "rc", cls.base / "rc/packages", cls.set, cls.trust,
+                                           release_tag=fixtures.RC_RELEASE)
+        cls.good = cls.base / "good"
+        fixtures.make_root(cls.good, cls.set, "e1b0e5e9b", lane="rc")
+
+    @classmethod
+    def tearDownClass(cls):
+        for signer in (cls.candidate, cls.channel):
+            signer.close()
+        for path in cls.base.rglob("*"):
+            if path.is_dir() and not path.is_symlink():
+                path.chmod(0o700)
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        work = Path(tempfile.mkdtemp(dir=self.base))
+        self.root = work / "root"
+        shutil.copytree(self.good, self.root, symlinks=True)
+        self.factory = work / "factory"
+        fixtures.make_factory(self.factory, self.root, self.summary)
+        SUBVOLUMES.clear()
+        SUBVOLUMES.add(self.root / ".snapshots")
+
+    def inspect(self):
+        return inspection.inspect(self.root, self.set, "rc", self.factory, trust=self.trust)
+
+    def assertFails(self, check, pattern):
+        report = self.inspect()
+        self.assertEqual(report["checks"][check]["result"], "failed", report["checks"][check])
+        self.assertRegex(report["checks"][check]["detail"], pattern)
+
+    def receipt(self, **changes):
+        text = fixtures.install_receipt()
+        for key, value in changes.items():
+            text = "".join(f"{key}={value}\n" if line.startswith(f"{key}=") else f"{line}\n"
+                           for line in text.splitlines())
+        for root in (self.root, self.factory):
+            fixtures.write(root, "var/lib/omarchy/install-receipt", text)
+
+    def test_an_rc_image_passes_with_its_receipt(self):
+        report = self.inspect()
+        failed = {name: check for name, check in report["checks"].items() if check["result"] != "passed"}
+        self.assertEqual(report["result"], "passed", failed)
+        self.assertEqual(report["channel"], "rc")
+        self.assertEqual(report["installed_versions"]["omarchy"], "4.5.0rc2-1")
+        self.assertNotIn("omarchy-dev", report["installed_versions"])
+        receipt = report["install_receipt"]
+        self.assertEqual((receipt["release_tag"], receipt["mac_revision"], receipt["lane"], receipt["catalog_channel"]),
+                         ("v4.5.0-rc2", "1", "rc", "rc"))
+        self.assertEqual((receipt["omarchy_mirror"], receipt["omarchy_runtime_package"],
+                          receipt["omarchy_settings_package"], receipt["omarchy_image_ref"]),
+                         ("rc", "omarchy", "omarchy-settings", "v4.5.0-rc2"))
+        self.assertEqual(receipt["image"], f"omarchy-mac-4.5.0-rc2-r1-2026.09.28-{fixtures.PACKAGE_SET_SHA256[:12]}")
+        self.assertIn("rc", report["checks"]["lane-channel"]["detail"])
+
+    def test_the_receipt_is_required_and_root_owned(self):
+        (self.root / "var/lib/omarchy/install-receipt").unlink()
+        self.assertFails("install-receipt", "carries no install receipt")
+        self.receipt()
+        (self.root / "var/lib/omarchy/install-receipt").chmod(0o666)
+        self.assertFails("install-receipt", "is not mode 644")
+
+    def test_the_receipt_must_name_this_lane_its_contract_and_its_build(self):
+        for changes, pattern in (({"lane": "edge"}, "is not for the rc lane"),
+                                 ({"catalog_channel": "stable"}, "is not for the rc lane"),
+                                 ({"release_tag": "v4.5.0"}, "v4.5.0 is not an rc release tag"),
+                                 ({"omarchy_runtime_package": "omarchy-dev"}, "does not name the rc lane's install contract"),
+                                 ({"omarchy_image_ref": "rc"}, "does not name the rc lane's install contract"),
+                                 ({"mac_revision": "0"}, "names no Mac revision"),
+                                 ({"package_set_sha256": "0" * 64}, "package_set_sha256 is not the image target's"),
+                                 ({"image": "omarchy-mac-4.5.0-rc2-r2-2026.09.28-" + fixtures.PACKAGE_SET_SHA256[:12]},
+                                  "names another image"),
+                                 ({"format": "2"}, "is not format 1")):
+            with self.subTest(changes=changes):
+                self.receipt(**changes)
+                self.assertFails("install-receipt", pattern)
+        self.receipt()
+        fixtures.write(self.root, "var/lib/omarchy/install-receipt", fixtures.install_receipt() + "extra=1\n")
+        self.assertFails("install-receipt", "is not format 1")
+
+    def test_the_factory_keeps_the_images_receipt(self):
+        fixtures.write(self.factory, "var/lib/omarchy/install-receipt", fixtures.install_receipt(revision="2"))
+        self.assertFails("install-receipt", "@factory's install receipt is not the image's")
+
+    def test_nothing_comes_from_edge(self):
+        for path in (self.root / "etc/pacman.conf",
+                     self.root / "usr/share/omarchy/default/pacman/aarch64-apple/pacman-rc.conf"):
+            path.write_text(path.read_text().replace("pkgs.omarchy.org/rc/", "pkgs.omarchy.org/edge/"))
+        self.assertFails("lane-channel", "/etc/pacman.conf names edge: https://pkgs.omarchy.org/edge/")
+
+    def test_an_edge_mirror_is_refused(self):
+        for path in (self.root / "etc/pacman.d/mirrorlist",
+                     self.root / "usr/share/omarchy/default/pacman/aarch64-apple/mirrorlist-rc"):
+            path.write_text("Server = https://arm-mirror.omarchy.org/$arch/$repo\n")
+        self.assertFails("lane-channel", "/etc/pacman.d/mirrorlist names edge")
+
+    def test_the_runtime_must_ship_the_apple_rc_configuration(self):
+        # Like omarchy-settings 4.5.0rc2: Apple templates for edge only, the plain aarch64 ones for rc.
+        apple = self.root / "usr/share/omarchy/default/pacman/aarch64-apple"
+        (apple / "pacman-rc.conf").unlink()
+        (apple / "mirrorlist-rc").unlink()
+        self.assertFails("lane-channel", "the runtime ships no Apple rc pacman configuration")
+
+    def test_edges_runtime_installed_on_rc_is_refused(self):
+        fixtures.local_package(self.root, "omarchy-dev", "4.0.0.r7195.g3ac4365-1", [], ("omarchy",))
+        self.assertFails("lane-channel", "the rc image installs edge's omarchy-dev")
+        self.assertFails("installed-system", "packages-no-legacy")
 
 
 class TestImagePinTest(unittest.TestCase):
