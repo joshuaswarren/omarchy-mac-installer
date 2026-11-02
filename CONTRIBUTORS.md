@@ -13,6 +13,7 @@
 - [@scottconrad](https://github.com/scottconrad)
 - [@scottjones](https://github.com/scottjones)
 - [@wickthumb](https://github.com/wickthumb)
+
 _Linked GitHub accounts only. Anonymous (unlinked) commit authors are
 enumerable through the API (anon=true) but are identified there only by
 name/email, which this registry does not publish; credit them by hand in
