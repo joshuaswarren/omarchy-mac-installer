@@ -110,3 +110,7 @@ reproduction steps.
 The original [MIT license](LICENSE), copyright notice and Git history are
 retained. Engine dependencies keep their own licenses. Their source revisions
 are in `Engine/source-lock.json`.
+
+## Contributors
+
+Everyone credited so far: [CONTRIBUTORS.md](CONTRIBUTORS.md).
