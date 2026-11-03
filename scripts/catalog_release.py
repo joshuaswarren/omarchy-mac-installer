@@ -47,6 +47,8 @@ import base64
 import binascii
 import datetime
 import hashlib
+import http.client
+import io
 import json
 import os
 import re
@@ -63,6 +65,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import supported_models  # noqa: E402
+import r2_s3  # noqa: E402
 
 IDENTITY = ROOT / "Packaging" / "identity.conf"
 DEFAULT_TRUST_ROOT = ROOT / "Release" / "trust-root.ed25519.pub"
@@ -70,12 +73,14 @@ SOURCE_LOCK = ROOT / "Engine" / "source-lock.json"
 PUBLISH_CHANNELS = ROOT / "scripts" / "publish-channels"
 
 SCHEMA_VERSION = 4
-# Channels a catalog is built for from an image and its VM evidence. rc and
-# stable get their catalogs only through promotion (parked until the kernel
-# work lands), which re-signs a published catalog's exact pins.
-CHANNELS = ("edge",)
+# Channels a catalog is built for from an image and its VM evidence: edge from
+# an edge image, rc from an rc-lane image (built from the RC channel for a
+# release tag, image-builder/bin/mac-image-check name rc). Stable gets its
+# catalog only through promotion (parked until the kernel work lands), which
+# re-signs a published catalog's exact pins.
+CHANNELS = ("edge", "rc")
 PROMOTED_CHANNELS = ("rc", "stable")
-SIGNED_CHANNELS = CHANNELS + PROMOTED_CHANNELS
+SIGNED_CHANNELS = ("edge", "rc", "stable")
 # A catalog is promoted only forward along this order: edge to rc or
 # stable, rc to stable.
 CHANNEL_ORDER = ("edge", "rc", "stable")
@@ -99,6 +104,12 @@ INSTALLER_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 # the image id was added (their releases, and the catalogs that pin them, are
 # live) are named without it, and a catalog may still be prepared for one.
 IMAGE_NAME = re.compile(r"^omarchy-mac-([a-z]+)-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{12}(?:-([0-9a-f]{12}))?$")
+# An rc-lane image is named from its release tag (without the v) and Mac
+# revision; its payload's sha256 stays its identity, and a respin takes the
+# next revision rather than replacing a published release.
+RC_IMAGE_NAME = re.compile(
+    r"^omarchy-mac-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-rc[1-9][0-9]*-r[1-9][0-9]{0,2}"
+    r"-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{12}$")
 FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
 
 # PKCS#8 and SubjectPublicKeyInfo prefixes of an Ed25519 key (RFC 8410).
@@ -243,15 +254,17 @@ def check_engine(document: object) -> dict:
 def pipeline_engine(document: object) -> dict:
     """The engine block for .github/mac-release-pipeline.json's run: the pin
     from Engine/source-lock.json, the only place the engine is pinned, plus the
-    config's downstreamRevision. The archive is served from its engine-<version>
-    release of this repository until mac.omarchy.org hosts it."""
+    config's downstreamRevision. The archive is served from the catalog base's
+    engine/<version>/, where mac-mirror.yml copies it from its published
+    engine-<version> release; --verify-remote refuses a catalog whose engine
+    was never mirrored."""
     document = check_keys(document, "engine", {"downstreamRevision"})
     lock = json.loads(SOURCE_LOCK.read_text())
     version = lock["downstream_overlay"]["version"]
     artifact = lock["validation_artifact"]
     engine = {
         "version": version,
-        "url": f"https://github.com/{stopgap_repo()}/releases/download/engine-{version}/{artifact['filename']}",
+        "url": f"{identity()['INSTALLER_CATALOG_BASE']}/engine/{version}/{artifact['filename']}",
         "fileName": artifact["filename"],
         "sizeBytes": artifact["size_bytes"],
         "sha256": artifact["sha256"],
@@ -300,7 +313,13 @@ def check_installer(document: object, engine: dict | None = None) -> dict:
 
 def check_image_name(name: object, channel: str, payload_sha256: str | None = None) -> str:
     """NAME, an image built for CHANNEL. A name with an image id must name
-    PAYLOAD_SHA256 when given; an older name without one is accepted as is."""
+    PAYLOAD_SHA256 when given; an older name without one is accepted as is.
+    An rc catalog takes only an rc-lane image, named from its release tag."""
+    if channel == "rc":
+        if not isinstance(name, str) or RC_IMAGE_NAME.fullmatch(name) is None:
+            raise Refusal("image must be omarchy-mac-<X.Y.Z-rcN>-r<revision>-<YYYY.MM.DD>-<12 hex package set id>,"
+                          f" not built for the rc lane: {name}")
+        return name
     match = IMAGE_NAME.fullmatch(name) if isinstance(name, str) else None
     if match is None:
         raise Refusal("image must be omarchy-mac-<channel>-<YYYY.MM.DD>-<12 hex package set id>-<12 hex image id>"
@@ -312,9 +331,33 @@ def check_image_name(name: object, channel: str, payload_sha256: str | None = No
     return name
 
 
+def check_rc_image(image: str, payload: dict, metadata: dict, evidence: dict) -> None:
+    """catalog-rc takes only the rc-lane image that passed VM acceptance. The rc
+    name carries no image id, so it is tied to the image three ways: the
+    evidence records that image (mac-acceptance-record.py --image, the build's
+    artifact name), the payload is that image's rc zip (the lane and date
+    mac-image.yml stages), and every artifact is in the image's own release (as
+    mac-upload.py publishes it). An edge payload and its evidence under an rc
+    name fail all three."""
+    recorded = evidence.get("image")
+    if recorded is None:
+        raise Refusal(f"the VM evidence names no image: catalog-rc takes only the rc image {image} that passed acceptance")
+    if recorded != image:
+        raise Refusal(f"the VM evidence is for {recorded}, not {image}")
+    date = re.search(r"-r[1-9][0-9]{0,2}-([0-9]{4}\.[0-9]{2}\.[0-9]{2})-[0-9a-f]{12}$", image).group(1)
+    expected = f"omarchy-{date}-aarch64-apple-silicon-mac-rc-os-package.zip"
+    if payload["fileName"] != expected:
+        raise Refusal(f"the payload {payload['fileName']} is not {image}'s rc zip ({expected})")
+    urls = [("payload", payload["url"]), *(("payload part", part["url"]) for part in payload.get("parts", [])),
+            ("installer_data", metadata["url"])]
+    for field, url in urls:
+        if urllib.parse.urlsplit(url).path.split("/")[-2] != image:
+            raise Refusal(f"{field} {url} is not in {image}'s release")
+
+
 def check_channel(channel: str) -> str:
     if channel not in CHANNELS:
-        raise Refusal(f"channel must be one of {', '.join(CHANNELS)} (rc and stable come from promotion): {channel}")
+        raise Refusal(f"channel must be one of {', '.join(CHANNELS)} (stable comes from promotion): {channel}")
     return channel
 
 
@@ -409,6 +452,8 @@ def build_catalog(
     metadata = check_artifact(metadata, "installer_data")
     engine = check_engine(engine)
     check_evidence(evidence, payload["sha256"])
+    if channel == "rc":
+        check_rc_image(image, payload, metadata, evidence)
     installer = check_installer(installer, engine)
 
     def plain(artifact: dict) -> dict:
@@ -585,24 +630,74 @@ class HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, new_url)
 
 
-def open_url(url: str, timeout: float = 60):
+def open_url(url: str, timeout: float = 60, headers: dict[str, str] | None = None):
     opener = urllib.request.build_opener(HttpsOnlyRedirects())
-    request = urllib.request.Request(url, headers={"User-Agent": "omarchy-mac-catalog"})
+    request = urllib.request.Request(url, headers={"User-Agent": "omarchy-mac-catalog", **(headers or {})})
     return opener.open(request, timeout=timeout)
 
 
-def remote_digest(url: str, expected_size: int, whole=None) -> tuple[str, int]:
+REMOTE_READ_ATTEMPTS = 8
+
+
+def remote_digest(url: str, expected_size: int, whole=None, exact: bool = True) -> tuple[str, int]:
+    # A multi-gigabyte read through the CDN can stall or close early; resume
+    # from the bytes already hashed instead of failing the catalog. With exact,
+    # expected_size is the pinned length; otherwise it is only an upper bound.
     digest = hashlib.sha256()
     size = 0
-    with open_url(url) as response:
-        while block := response.read(8 * 1024 * 1024):
-            size += len(block)
-            if size > expected_size:
-                raise Refusal(f"{url} serves more than its pinned {expected_size} bytes")
-            digest.update(block)
-            if whole is not None:
-                whole.update(block)
-    return digest.hexdigest(), size
+    for attempt in range(REMOTE_READ_ATTEMPTS):
+        headers = {"Range": f"bytes={size}-"} if size else None
+        try:
+            with (open_url(url, headers=headers) if headers else open_url(url)) as response:
+                if size and response.status != 206:
+                    raise Refusal(f"{url} ignored a resume request (HTTP {response.status})")
+                while block := response.read(8 * 1024 * 1024):
+                    size += len(block)
+                    if size > expected_size:
+                        raise Refusal(f"{url} serves more than its pinned {expected_size} bytes")
+                    digest.update(block)
+                    if whole is not None:
+                        whole.update(block)
+            if exact and size < expected_size:
+                raise http.client.IncompleteRead(b"", expected_size - size)
+            return digest.hexdigest(), size
+        except (TimeoutError, ConnectionError, http.client.IncompleteRead, urllib.error.URLError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                raise
+            if exact and size == expected_size:
+                return digest.hexdigest(), size
+            if attempt + 1 == REMOTE_READ_ATTEMPTS:
+                raise
+            print(f"{url}: read stopped at {size} bytes ({error!r}); resuming", file=sys.stderr)
+            time.sleep(5)
+    raise AssertionError("unreachable")
+
+
+# The installer dmg is not pinned by size in the catalog; this bounds the read.
+MAXIMUM_INSTALLER_BYTES = 1024 ** 3
+
+
+def verify_remote_installer(installer: dict) -> None:
+    """Download the app the catalog offers and check it against the .sha256
+    published beside it (publish-app writes it; mac-mirror.yml copies both),
+    so a catalog never names a dmg that isn't there or isn't what was released."""
+    url = installer["downloadURL"]
+    name = url.rsplit("/", 1)[1]
+    try:
+        with open_url(f"{url}.sha256") as response:
+            line = response.read(1024).decode(errors="replace")
+    except urllib.error.HTTPError as error:
+        raise Refusal(f"installer.downloadURL: {url}.sha256 answers HTTP {error.code}; mirror the app first") from None
+    match = re.fullmatch(r"([0-9a-f]{64})  (\S+)\n?", line)
+    if match is None or match.group(2) != name:
+        raise Refusal(f"installer.downloadURL: {url}.sha256 does not read '<sha256>  {name}'")
+    try:
+        digest, size = remote_digest(url, MAXIMUM_INSTALLER_BYTES, exact=False)
+    except urllib.error.HTTPError as error:
+        raise Refusal(f"installer.downloadURL: {url} answers HTTP {error.code}; mirror the app first") from None
+    if digest != match.group(1):
+        raise Refusal(f"installer.downloadURL: {url} serves sha256 {digest} ({size} bytes), not its .sha256's {match.group(1)}")
+    print(f"remote_verified=installer {digest}")
 
 
 def verify_remote_artifact(artifact: dict, field: str) -> None:
@@ -774,7 +869,7 @@ class ScratchHost:
     def describe(self, channel: str) -> str:
         return str(self.directory / f"catalog-{channel}.signed.json")
 
-    def fetch(self, channel: str) -> bytes | None:
+    def fetch(self, channel: str, timeout: float = 60) -> bytes | None:
         path = self.directory / f"catalog-{channel}.signed.json"
         return path.read_bytes() if path.is_file() else None
 
@@ -802,9 +897,9 @@ class GitHubReleaseHost:
     def describe(self, channel: str) -> str:
         return f"https://github.com/{self.repo}/releases/download/catalog-{channel}/catalog-{channel}.signed.json"
 
-    def fetch(self, channel: str) -> bytes | None:
+    def fetch(self, channel: str, timeout: float = 60) -> bytes | None:
         try:
-            with open_url(self.describe(channel)) as response:
+            with open_url(self.describe(channel), timeout=timeout, headers=NO_CACHE) as response:
                 data = response.read(MAXIMUM_CATALOG_BYTES * 2 + 1)
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -836,6 +931,9 @@ class GitHubReleaseHost:
         """Refuse while an earlier publish left its staged catalog behind: it
         may be newer than whatever is (or is not) served, so nothing may be
         published over it until someone resolves it by hand."""
+        release = self.release(f"catalog-{channel}")
+        if release is not None and (release.get("draft") or not release.get("prerelease")):
+            raise Refusal(f"the catalog-{channel} release must be a published prerelease")
         staged = f"catalog-{channel}.signed.json.next"
         if staged in self.asset_ids(f"catalog-{channel}"):
             raise Refusal(f"an earlier publish left {staged} on the catalog-{channel} release; "
@@ -877,12 +975,86 @@ class GitHubReleaseHost:
                       "rename it by hand to restore the channel")
 
 
+class R2CatalogHost:
+    """The catalog base (INSTALLER_CATALOG_BASE) on R2: catalog-<channel>.signed.json
+    under the base's path in the bucket, replaced in place by one PUT, as the
+    x86 side replaces its latest.json and omarchy.db. The publish job's
+    per-channel concurrency group keeps two publishes apart; a PUT that timed
+    out and lands after a newer one leaves an older sequence served, which the
+    next publish of the newer catalog repairs. The bucket's lock must not cover
+    these keys (only images, engines and apps are immutable)."""
+
+    def __init__(self, endpoint: r2_s3.Endpoint, base: str):
+        parsed = urllib.parse.urlsplit(base)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.query or not parsed.path.strip("/"):
+            raise Refusal(f"invalid catalog base: {base}")
+        self.endpoint = endpoint
+        self.base = base.rstrip("/")
+        self.prefix = parsed.path.strip("/") + "/"
+
+    @classmethod
+    def from_environment(cls) -> "R2CatalogHost":
+        try:
+            endpoint = r2_s3.Endpoint.parse(os.environ.get("R2_BUCKET", "") or "omarchy-mac",
+                                            os.environ.get("R2_ENDPOINT", ""), os.environ.get("R2_ACCESS_KEY_ID", ""),
+                                            os.environ.get("R2_SECRET_ACCESS_KEY", ""))
+        except r2_s3.R2Error as error:
+            raise Refusal(str(error)) from None
+        return cls(endpoint, identity()["INSTALLER_CATALOG_BASE"])
+
+    def describe(self, channel: str) -> str:
+        return f"{self.base}/catalog-{channel}.signed.json"
+
+    def fetch(self, channel: str, timeout: float = 60) -> bytes | None:
+        """What an app is served: the URL it fetches, unchanged."""
+        try:
+            with open_url(self.describe(channel), timeout=timeout, headers=NO_CACHE) as response:
+                data = response.read(MAXIMUM_CATALOG_BYTES * 2 + 1)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                return None
+            raise
+        if len(data) > MAXIMUM_CATALOG_BYTES * 2:
+            raise Refusal("the published catalog envelope is oversized")
+        return data
+
+    def preflight(self, channel: str) -> None:
+        pass
+
+    def publish(self, channel: str, envelope: Path) -> None:
+        data = envelope.read_bytes()
+        key = f"{self.prefix}catalog-{channel}.signed.json"
+        try:
+            with self.endpoint.request("PUT", key, headers={"Content-Type": "application/json"},
+                                       body=io.BytesIO(data), size=len(data),
+                                       payload_sha256=hashlib.sha256(data).hexdigest(), timeout=60) as response:
+                response.read()
+        except urllib.error.HTTPError as error:
+            text = r2_s3.refusal_text(f"store {key}", error)
+            if "ObjectLockedByBucketPolicy" in text:
+                text += "; the bucket lock covers the catalogs, which must stay replaceable"
+            raise Refusal(text) from None
+        except r2_s3.R2Error as error:
+            raise Refusal(str(error)) from None
+
+
 def catalog_host(spec: str):
     if spec.startswith("scratch:"):
         return ScratchHost(Path(spec[len("scratch:"):]))
     if spec == "github-release":
         return GitHubReleaseHost(stopgap_repo())
-    raise Refusal(f"unknown catalog host {spec!r} (github-release or scratch:DIR)")
+    if spec == "r2":
+        return R2CatalogHost.from_environment()
+    raise Refusal(f"unknown catalog host {spec!r} (r2, github-release or scratch:DIR)")
+
+
+def catalog_hosts(spec: str) -> list:
+    """A comma list of hosts, written in order: the first is the catalog base,
+    the rest mirror it (the GitHub stopgap, for apps that read it)."""
+    names = [name.strip() for name in spec.split(",")]
+    if "" in names or len(set(names)) != len(names):
+        raise Refusal(f"invalid catalog host list: {spec!r}")
+    return [catalog_host(name) for name in names]
 
 
 def live_sequence(host, channel: str, trust_root: bytes, openssl: str) -> int:
@@ -928,6 +1100,7 @@ def command_prepare(arguments) -> None:
         verify_remote_artifact(check_artifact(payload, "payload", True), "payload")
         verify_remote_artifact(check_engine(engine)["artifact"], "engine")
         verify_remote_artifact(check_artifact(metadata, "installer_data"), "installer_data")
+        verify_remote_installer(catalog["installer"])
     if arguments.check_live:
         trust_root = read_trust_root(arguments.trust_root)
         live = live_sequence(catalog_host(arguments.host), channel, trust_root, find_openssl())
@@ -946,11 +1119,19 @@ def command_prepare(arguments) -> None:
 
 
 def command_check_evidence(arguments) -> None:
-    # Evidence gates only the catalogs built from an image: edge.
-    check_channel(arguments.catalog.name.removeprefix("catalog-").removesuffix(".json"))
+    # Evidence gates only the catalogs built from an image: edge and rc.
+    channel = check_channel(arguments.catalog.name.removeprefix("catalog-").removesuffix(".json"))
     catalog = load_json(arguments.catalog, "catalog")
     digest = catalog_payload_digest(catalog)
-    check_evidence(load_json(arguments.evidence, "evidence") if arguments.evidence else None, digest)
+    evidence = check_evidence(load_json(arguments.evidence, "evidence") if arguments.evidence else None, digest)
+    if channel == "rc":
+        images = {model.get("evidenceRevision") for model in catalog["models"]}
+        if len(images) != 1:
+            raise Refusal("catalog-rc must name exactly one image")
+        image = check_image_name(images.pop(), "rc")
+        pin = catalog["models"][0]
+        check_rc_image(image, from_catalog("payload", pin["payloadArtifact"], pin["payloadDigest"], True),
+                       from_catalog("installer_data", pin["metadataArtifact"], pin["metadataDigest"]), evidence)
     print(f"evidence=passed {digest}")
 
 
@@ -1091,6 +1272,33 @@ def command_check_promotion(arguments) -> None:
     print(f"promotion=checked {source_channel} to {channel}, sequence {source['sequence']} to {promoted['sequence']}")
 
 
+# GitHub can keep serving a replaced release asset's old bytes for minutes
+# (2026-10-21: stale 61 s after the upload; 2026-10-24: about 120 s).
+READBACK_DELAYS = (5, 5, 10, 10, 15, 15, 20, 30, 30, 30, 30, 30, 30, 30)
+# Each readback fetch is bounded so that every attempt timing out, plus the
+# delays, still ends inside the publish job's 15 minutes.
+READBACK_TIMEOUT = 20
+NO_CACHE = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+
+
+def read_back(host, channel: str, data: bytes, sleep=time.sleep) -> None:
+    """Read the published catalog back as a client would, riding out
+    transient errors and a stale cache, and refuse if it never appears."""
+    for attempt, delay in enumerate((0, *READBACK_DELAYS), start=1):
+        if delay:
+            sleep(delay)
+        try:
+            served = host.fetch(channel, timeout=READBACK_TIMEOUT)
+        except (OSError, urllib.error.URLError) as error:
+            print(f"readback attempt {attempt}: {error}", file=sys.stderr)
+            continue
+        if served == data:
+            return
+        found = "nothing" if served is None else f"{len(served)} other bytes (sha256 {hashlib.sha256(served).hexdigest()[:12]})"
+        print(f"readback attempt {attempt}: {host.describe(channel)} serves {found}, not the new catalog", file=sys.stderr)
+    raise Refusal(f"{host.describe(channel)} does not serve the catalog just published")
+
+
 def command_publish(arguments) -> None:
     check_repository()
     channel = check_signed_channel(arguments.channel)
@@ -1098,31 +1306,24 @@ def command_publish(arguments) -> None:
     trust_root = read_trust_root(arguments.trust_root)
     data = arguments.envelope.read_bytes()
     document = verify_envelope(data, trust_root, openssl)
-    host = catalog_host(arguments.host)
-    if host.fetch(channel) == data:
-        # A retry after a publish whose readback failed: already live.
-        print(f"published={host.describe(channel)} (already live)")
-        return
-    host.preflight(channel)
-    live = live_sequence(host, channel, trust_root, openssl)
-    if document["sequence"] <= live:
-        raise Refusal(f"sequence {document['sequence']} does not follow the published {live}")
-    host.publish(channel, arguments.envelope)
-    # Read it back as a client would, riding out transient errors.
-    served = None
-    for attempt in range(12):
-        try:
-            served = host.fetch(channel)
-        except (OSError, urllib.error.URLError) as error:
-            print(f"readback attempt {attempt + 1}: {error}", file=sys.stderr)
-            served = None
-        if served == data:
-            break
-        time.sleep(5)
-    else:
-        raise Refusal(f"{host.describe(channel)} does not serve the catalog just published")
-    print(f"published={host.describe(channel)}")
-    print(f"sequence={document['sequence']} (was {live})")
+    # Every host is checked before any is written, so a refusal on the
+    # second never leaves the first ahead.
+    pending = []
+    for host in catalog_hosts(arguments.host):
+        if host.fetch(channel) == data:
+            # A retry after a publish whose readback failed: already live.
+            print(f"published={host.describe(channel)} (already live)")
+            continue
+        host.preflight(channel)
+        live = live_sequence(host, channel, trust_root, openssl)
+        if document["sequence"] <= live:
+            raise Refusal(f"sequence {document['sequence']} does not follow the published {live} at {host.describe(channel)}")
+        pending.append((host, live))
+    for host, live in pending:
+        host.publish(channel, arguments.envelope)
+        read_back(host, channel, data)
+        print(f"published={host.describe(channel)}")
+        print(f"sequence={document['sequence']} (was {live})")
 
 
 def command_public_key(arguments) -> None:

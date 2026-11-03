@@ -44,7 +44,10 @@ import AppKit
     precondition(sheets.active == nil && window.attachedSheet == nil, "issue sheet not dismissed")
     precondition(dismissals == 2)
     precondition(!sheets.present(panel(), on: nil), "presented without a window")
-    print("PASS sheet lifecycle: a sheet raised while another closes stays dismissible")
+
+    print(
+      "PASS sheet lifecycle: a sheet raised while another closes stays dismissible"
+    )
     window.orderOut(nil)
   }
 }

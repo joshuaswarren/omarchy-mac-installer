@@ -1,0 +1,112 @@
+name: Mac pipeline pins
+
+# Opens a pull request moving .github/mac-release-pipeline.json to a release
+# when it is published (scripts/pipeline_pins.py):
+#
+#   v<X.Y.Z>            the app's latestVersion and downloadURL
+#   engine-<version>    the engine's downstreamRevision, for the engine
+#                       Engine/source-lock.json pins
+#
+# installer.minimumVersion never moves here: it is the floor of apps a catalog
+# accepts and changes only in a pull request of its own. Any other release
+# (catalogs, images) moves nothing. A dispatch pins a published release by tag,
+# for a release published before this workflow or a run that failed.
+#
+# A pull request opened with the workflow token starts no pull_request runs,
+# so this dispatches Installer checks on the pull request's branch; its jobs
+# report on the branch's head commit, where the required checks look.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: A published app (v<X.Y.Z>) or engine (engine-<version>) release
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  # One group per release: a single group keeps only one waiting run, so a
+  # third release would drop a queued one. Each release has its own branch.
+  group: mac-pipeline-pins-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bump:
+    name: Bump the pins
+    if: github.repository == 'omacom/omarchy-mac-installer'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # the pull request's branch
+      pull-requests: write
+      actions: write # dispatch Installer checks on that branch
+    steps:
+      # The release event's ref is the tag; the pins move on main.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Read the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! $TAG =~ ^(v[0-9]+\.[0-9]+\.[0-9]+|engine-v[0-9A-Za-z+._-]+)$ ]]; then
+            echo "::notice::$TAG is not an app or engine release; no pins move"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" >"$RUNNER_TEMP/release.json"
+          # The commit the tag names, through an annotated tag too.
+          echo "commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" >>"$GITHUB_OUTPUT"
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+      - name: Bump
+        id: bump
+        if: steps.release.outputs.skip == 'false'
+        env:
+          COMMIT: ${{ steps.release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/pipeline_pins.py --release "$RUNNER_TEMP/release.json" --tag-commit "$COMMIT" \
+            --body "$RUNNER_TEMP/body.md" | tee -a "$GITHUB_OUTPUT"
+      - name: Test the bumped config
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p 'test_release_pipeline.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_catalog_release.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_pipeline_pins.py'
+      - name: Open the pull request
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          TITLE: ${{ steps.bump.outputs.title }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -q -am "$TITLE"
+          # The branch is this workflow's own; a re-run replaces it.
+          git push -q --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$BRANCH"
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json url --jq '.[0].url // ""')
+          if [[ -n $existing ]]; then
+            gh pr edit "$existing" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+            url=$existing
+          else
+            url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "$TITLE" \
+              --body-file "$RUNNER_TEMP/body.md")
+          fi
+          gh workflow run checks.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          echo "::notice::$url"

@@ -4,7 +4,7 @@
       "boot_object": "m1n1.bin",
       "default_os_name": "Omarchy",
       "icon": "omarchy-volume.icns",
-      "name": "Omarchy MX Mac",
+      "name": "Omarchy",
       "next_object": "m1n1/boot.bin",
       "omarchy_target": "apple-silicon-full-os",
       "package": "omarchy-2026.09.06-aarch64-apple-silicon-asahi-os-package.zip",

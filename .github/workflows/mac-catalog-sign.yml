@@ -3,8 +3,8 @@ name: Mac catalog sign
 # The one place the Omacom catalog key is used. Both catalog writers call it
 # after building an unsigned catalog in their own no-secret job:
 #
-#   mac-catalog.yml  a new edge catalog for an image with passing VM evidence
-#                    (gate: evidence)
+#   mac-catalog.yml  a new edge or rc catalog for an image of that lane with
+#                    passing VM evidence (gate: evidence)
 #   mac-promote.yml  an rc or stable catalog re-signing a published catalog's
 #                    exact pins (gate: promotion; parked)
 #
@@ -15,8 +15,10 @@ name: Mac catalog sign
 #            re-runs the caller's gate, signs with CATALOG_SIGNING_KEY and
 #            verifies the envelope against Release/trust-root.ed25519.pub. A
 #            dry run then publishes to a scratch directory and stops.
-#   publish  contents: write, no key: replaces the catalog on the host and
-#            reads it back
+#   publish  contents: write, no key: replaces the catalog on each host in
+#            catalog-hosts (R2, the catalog base, first; then the GitHub
+#            stopgap that released apps read) and reads each back. With r2 it
+#            runs in the publish environment, for the R2 key.
 #
 # The caller uploads the artifact catalog-unsigned holding `channel`,
 # catalog-<channel>.json and its gate's inputs (evidence.json, or
@@ -35,7 +37,7 @@ on:
         type: string
         required: true
       gate:
-        description: evidence (a new edge catalog) or promotion (a promoted rc or stable catalog)
+        description: evidence (a new edge or rc catalog) or promotion (a promoted rc or stable catalog)
         type: string
         required: true
       source-sha256:
@@ -46,11 +48,22 @@ on:
         description: Sign and publish to a scratch directory only
         type: boolean
         default: true
+      catalog-hosts:
+        description: github-release, or r2,github-release (the catalog base, then the stopgap apps read)
+        type: string
+        default: github-release
     secrets:
       # An environment secret of catalog-release. GitHub still needs the
       # caller to pass it (`secrets: inherit`); otherwise it resolves to empty
       # and the signer refuses.
       CATALOG_SIGNING_KEY:
+        required: false
+      # The publish environment's R2 key, for catalog-hosts with r2.
+      R2_ENDPOINT:
+        required: false
+      R2_ACCESS_KEY_ID:
+        required: false
+      R2_SECRET_ACCESS_KEY:
         required: false
 
 permissions: {}
@@ -95,10 +108,11 @@ jobs:
           [[ $(<"$inputs/channel") == "$CHANNEL" ]]
           catalog=$inputs/catalog-$CHANNEL.json
           [[ $(sha256sum "$catalog" | cut -d' ' -f1) == "$EXPECTED" ]]
-          # Each gate signs only its own channels: evidence writes edge,
-          # promotion writes rc or stable (both commands refuse others too).
+          # Each gate signs only its own channels: evidence writes edge or rc
+          # (from an image of that lane), promotion writes rc or stable (both
+          # commands refuse others too).
           case "$GATE:$CHANNEL" in
-            evidence:edge)
+            evidence:edge | evidence:rc)
               python3 scripts/catalog_release.py check-evidence --catalog "$catalog" --evidence "$inputs/evidence.json"
               ;;
             promotion:rc | promotion:stable)
@@ -166,7 +180,10 @@ jobs:
     needs: sign
     if: ${{ success() && needs.sign.result == 'success' && !inputs.dry-run }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Two hosts' readbacks, each at worst about 10 minutes.
+    timeout-minutes: 25
+    # R2's key lives in the publish environment (main only).
+    environment: ${{ contains(inputs.catalog-hosts, 'r2') && 'publish' || '' }}
     permissions:
       contents: write # replace the catalog asset of the catalog-<channel> release
     concurrency:
@@ -187,12 +204,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CHANNEL: ${{ inputs.channel }}
           EXPECTED: ${{ inputs.catalog-sha256 }}
+          HOSTS: ${{ inputs.catalog-hosts }}
+          R2_ENDPOINT: ${{ contains(inputs.catalog-hosts, 'r2') && secrets.R2_ENDPOINT || '' }}
+          R2_ACCESS_KEY_ID: ${{ contains(inputs.catalog-hosts, 'r2') && secrets.R2_ACCESS_KEY_ID || '' }}
+          R2_SECRET_ACCESS_KEY: ${{ contains(inputs.catalog-hosts, 'r2') && secrets.R2_SECRET_ACCESS_KEY || '' }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'omarchy-mac' }}
         run: |
           set -euo pipefail
+          case $HOSTS in
+            github-release | r2,github-release) ;;
+            *) echo "::error::catalog-hosts must be github-release or r2,github-release, not $HOSTS"; exit 1 ;;
+          esac
           envelope=$RUNNER_TEMP/catalog-signed/catalog-$CHANNEL.signed.json
           python3 scripts/catalog_release.py verify-envelope --envelope "$envelope" --expect-sha256 "$EXPECTED"
           python3 scripts/catalog_release.py publish --channel "$CHANNEL" --envelope "$envelope" \
-            --host github-release | tee "$RUNNER_TEMP/publish.log"
+            --host "$HOSTS" | tee "$RUNNER_TEMP/publish.log"
           {
             echo '### Published'
             echo '```'

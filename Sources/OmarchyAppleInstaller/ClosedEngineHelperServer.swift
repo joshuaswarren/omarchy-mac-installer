@@ -213,13 +213,15 @@
         let record = try await Task.detached {
           try RecoveryAccountInstaller.inspect(completed.target)
         }.value
-        return RecoveryAccountReply(ticket: id, target: completed.target, record: record)
+        return RecoveryAccountReply(
+          ticket: id, target: completed.target, record: record,
+          accountDeferred: completed.accountDeferred)
       }
       guard let (approved, expiry) = recoveryAccountTargets[ticket], expiry > Date(),
         let observed = try await Task.detached(operation: {
           try RecoveryAccountHandoff.discover(in: directory, binding: approved.binding)
         }).value,
-        observed == approved
+        observed.isSameInstallation(as: approved)
       else {
         throw AccountSetupFailure(
           "The account target changed or expired. Reopen this installer to inspect it again.")
@@ -232,7 +234,9 @@
 
       }.value
       recoveryAccountTargets[ticket] = (observed, Date().addingTimeInterval(1800))
-      return RecoveryAccountReply(ticket: ticket, target: observed.target, record: record)
+      return RecoveryAccountReply(
+        ticket: ticket, target: observed.target, record: record,
+        accountDeferred: observed.accountDeferred)
     }
 
     public func removal(

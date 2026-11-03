@@ -26,7 +26,15 @@ name        a public build directory (descriptor, from a channel set): prints
             omarchy-mac-<lane>-<YYYY.MM.DD>-<package set id>-<image id>, the
             date its inputs were resolved (the payload's date), the first 12
             hex digits of IMAGE's package_set_sha256 and the first 12 hex
-            digits of the payload zip's sha256.
+            digits of the payload zip's sha256. An rc image is named from its
+            release tag and Mac revision instead,
+            omarchy-mac-<tag without v>-r<revision>-<YYYY.MM.DD>-<package set id>;
+            its sha256 stays its identity, and a respin takes a new revision.
+
+An rc build's records name its release tag and Mac revision (release_tag=,
+mac_revision=, from its inputs record), and its image carries the install
+receipt (/var/lib/omarchy/install-receipt) that names them and the image; an
+edge build names neither and carries none.
 
 A channel build (its inputs record names channel_set=, builder/channel_set.py)
 names its channel set, signer and manifest and the channel database's sha256
@@ -147,7 +155,7 @@ def expected_metadata(package: str, native_recovery: bool = False) -> dict:
                 "boot_object": "m1n1.bin",
                 "default_os_name": "Omarchy",
                 "icon": ICON,
-                "name": "Omarchy MX Mac",
+                "name": "Omarchy",
                 "next_object": "m1n1/boot.bin",
                 "omarchy_target": "apple-silicon-full-os",
                 "package": package,
@@ -777,6 +785,7 @@ def check_provenance(lane: str, directory: Path) -> None:
         sources[name] = commit
     require(sources and sources == report.get("runtime_sources"),
             "PROVENANCE's candidate sources do not match INSPECTION's runtime sources")
+    check_receipt_record(lane, report.get("install_receipt"), fields, payload)
     channel = is_channel(fields, "input.")
     if channel:
         # The -dev runtime ships no source revision; the channel database and its archives name it.
@@ -798,6 +807,23 @@ def check_provenance(lane: str, directory: Path) -> None:
             "PROVENANCE or INSPECTION records a retired hardware profile")
     check_payload(lane, payload, installer_data, profile,
                   fields.get("input.recovery_app_manifest_sha256", [""])[0])
+
+
+def check_receipt_record(lane: str, receipt: object, fields: dict[str, list[str]], payload: Path) -> None:
+    """The install receipt INSPECTION read in the image names this build: its release, lane and image."""
+    if lane == "edge":
+        require(receipt is None, "an edge image carries no install receipt")
+        return
+    require(isinstance(receipt, dict), "INSPECTION records no install receipt")
+    for key, field in (("release_tag", "input.release_tag"), ("mac_revision", "input.mac_revision"),
+                       ("package_set_sha256", "package_set_sha256"), ("built", "built")):
+        require(receipt.get(key) is not None and [receipt[key]] == fields.get(field),
+                f"the install receipt's {key} does not match PROVENANCE")
+    for key in ("lane", "catalog_channel"):
+        require(receipt.get(key) == lane, f"the install receipt's {key} does not match the {lane} lane")
+    expected = release_image_name(receipt["release_tag"], receipt["mac_revision"], payload_date(payload),
+                                  receipt["package_set_sha256"])
+    require(receipt.get("image") == expected, f"the install receipt names the image {receipt.get('image')}, not {expected}")
 
 
 def is_channel(fields: dict[str, list[str]], prefix: str = "") -> bool:
@@ -860,6 +886,8 @@ IMAGE_INPUTS = ("candidate_set", "candidate_source_commit", "candidate_signer", 
                 "candidate_manifest_sha256", "omarchy_channel")
 CHANNEL_IMAGE_INPUTS = ("channel_set", "channel_signer", "channel_manifest_sha256", "omarchy_channel",
                         "omarchy_db_sha256")
+# What a release lane's IMAGE and inputs record add: the release it builds.
+RELEASE_INPUTS = ("release_tag", "mac_revision")
 
 
 def check_descriptor(lane: str, directory: Path) -> None:
@@ -870,7 +898,8 @@ def check_descriptor(lane: str, directory: Path) -> None:
     require(fields.get("lane") == [lane], f"IMAGE does not describe a {lane} image")
     require(fields.get("platform") == [PLATFORM], f"IMAGE does not describe an {PLATFORM} image")
     channel = is_channel(fields)
-    image_inputs = CHANNEL_IMAGE_INPUTS if channel else IMAGE_INPUTS
+    image_inputs = (*(CHANNEL_IMAGE_INPUTS if channel else IMAGE_INPUTS), *(RELEASE_INPUTS if lane != "edge" else ()))
+    require(lane != "edge" or not set(RELEASE_INPUTS) & set(fields), "an edge IMAGE names no release")
     for key in (*image_inputs, "input_digest", "package_set_sha256", "hardware_setup", "builder_commit",
                 "builder_tree_clean"):
         once(fields, key, "IMAGE")
@@ -932,6 +961,18 @@ def check_descriptor(lane: str, directory: Path) -> None:
 PACKAGE_SET_ID_LENGTH = 12
 IMAGE_ID_LENGTH = 12
 IMAGE_NAME = re.compile(r"^omarchy-mac-(edge|rc|stable)-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{12}-[0-9a-f]{12}$")
+RELEASE_IMAGE_NAME = re.compile(
+    r"^omarchy-mac-(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-rc[1-9]\d*)?-r[1-9]\d{0,2}"
+    r"-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{12}$")
+
+
+def payload_date(payload: Path) -> str:
+    return re.match(r"^omarchy-(\d{4}\.\d{2}\.\d{2})-", payload.name).group(1)
+
+
+def release_image_name(tag: str, revision: str, date: str, package_set_sha256: str) -> str:
+    """A release lane's image name: its tag without the v, its Mac revision, its date and package set id."""
+    return f"omarchy-mac-{tag.removeprefix('v')}-r{revision}-{date}-{package_set_sha256[:PACKAGE_SET_ID_LENGTH]}"
 
 
 def image_name(lane: str, directory: Path) -> str:
@@ -942,7 +983,11 @@ def image_name(lane: str, directory: Path) -> str:
     digest = once(fields, "package_set_sha256", "IMAGE")
     require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "IMAGE's package_set_sha256 is malformed")
     payload = payload_in(directory, lane)
-    date = re.match(r"^omarchy-(\d{4}\.\d{2}\.\d{2})-", payload.name).group(1)
+    date = payload_date(payload)
+    if lane != "edge":
+        name = release_image_name(once(fields, "release_tag", "IMAGE"), once(fields, "mac_revision", "IMAGE"), date, digest)
+        require(RELEASE_IMAGE_NAME.fullmatch(name) is not None, f"{name} is not a release image name")
+        return name
     image_id = file_sha256(payload)[:IMAGE_ID_LENGTH]
     name = f"omarchy-mac-{lane}-{date}-{digest[:PACKAGE_SET_ID_LENGTH]}-{image_id}"
     require(IMAGE_NAME.fullmatch(name) is not None, f"{name} is not an image name")

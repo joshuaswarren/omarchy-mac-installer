@@ -786,6 +786,56 @@ pass "a channel record installs the -dev runtime by its roles and records a rele
 )
 pass "PROVENANCE names a source commit only for runtime packages that ship one"
 
+# ── rc lane ────────────────────────────────────────────────────────────────
+# An rc record names its release tag and Mac revision: IMAGE carries them and
+# the image its install receipt. An edge image carries no receipt.
+rc=$scratch/rc
+mkdir -p "$rc/target/var/lib/omarchy"
+sed -e 's/^channel_set=omarchy-edge-/channel_set=omarchy-rc-/' -e 's/^omarchy_channel=edge$/omarchy_channel=rc/' \
+  -e 's|pkgs.omarchy.org/edge/|pkgs.omarchy.org/rc/|' -e 's|^omarchy_db_sha256=.*|&\nrelease_tag=v4.5.0-rc2\nmac_revision=1|' \
+  -e 's|^alarm_server=.*|alarm_server=https://arm-rc-mirror.omarchy.org/$arch/$repo|' "$channel/inputs" >"$rc/inputs"
+"$BASH" "$here/bin/mac-image-inputs" check "$rc/inputs" >/dev/null || fail "the rc fixture is a canonical record"
+(
+  candidates=$channel/candidates target=$rc/target
+  field() { sed -n "s/^$1=//p" "$rc/inputs"; }
+  fail() { builder_fail "$@"; }
+  chown() { :; }
+  [[ $(image_inputs | paste -sd' ' -) == \
+    "channel_set channel_signer channel_manifest_sha256 omarchy_channel omarchy_db_sha256 release_tag mac_revision" ]] ||
+    fail "an rc IMAGE names its release tag and Mac revision: $(image_inputs | paste -sd' ' -)"
+  if (package_set_digest="" built=""; write_install_receipt) >/dev/null 2>&1; then
+    fail "the receipt is not written before the build recorded its identity"
+  fi
+  package_set_digest=$(printf 'a%.0s' {1..64}) built=2026-10-28T09:10:11Z
+  write_install_receipt
+  [[ $(<"$target/var/lib/omarchy/install-receipt") == "format=1
+image=omarchy-mac-4.5.0-rc2-r1-2026.10.14-aaaaaaaaaaaa
+release_tag=v4.5.0-rc2
+mac_revision=1
+lane=rc
+catalog_channel=rc
+omarchy_mirror=rc
+omarchy_runtime_package=omarchy
+omarchy_settings_package=omarchy-settings
+omarchy_image_ref=v4.5.0-rc2
+package_set_sha256=$package_set_digest
+built=$built" ]] || fail "the rc receipt names the image, release, lane, contract and build" "$(<"$target/var/lib/omarchy/install-receipt")"
+  [[ $(stat -c %a "$target/var/lib/omarchy/install-receipt" 2>/dev/null || stat -f %Lp "$target/var/lib/omarchy/install-receipt") == 644 ]] ||
+    fail "the receipt is mode 644"
+)
+(
+  target=$rc/edge-target
+  mkdir -p "$target/var/lib/omarchy"
+  field() { sed -n "s/^$1=//p" "$channel/inputs"; }
+  fail() { builder_fail "$@"; }
+  package_set_digest=$(printf 'a%.0s' {1..64}) built=2026-10-28T09:10:11Z
+  write_install_receipt
+  [[ ! -e $target/var/lib/omarchy/install-receipt ]] || fail "an edge image carries no install receipt"
+  [[ $(image_inputs) == "channel_set channel_signer channel_manifest_sha256 omarchy_channel omarchy_db_sha256" ]] ||
+    fail "an edge IMAGE names no release"
+)
+pass "an rc image names its release in IMAGE and its install receipt; an edge image names none"
+
 mkdir -p "$scratch/lab"
 for options in "--candidates $channel|takes no --candidates" "--lab-access $scratch/lab|built from a candidate set only"; do
   IFS='|' read -r option expected <<<"$options"
@@ -1024,3 +1074,12 @@ pass "base and Apple runtime requests use the reviewed Mesa, Vulkan and bless pa
   [[ $(<"$scratch/runtime-transaction") == "-S omarchy-candidates/omarchy-dev hyprland omarchy-candidates/mesa-aurora omarchy-candidates/vulkan-aurora" ]]
 ) || fail "the runtime transaction does not carry the reviewed Mesa"
 pass "the runtime installs the reviewed Mesa and Vulkan"
+
+# The container starts without python3; the inputs check (channel_set.py lane)
+# runs only once the toolchain is in place.
+! declare -f container_main | grep -q 'mac-image-inputs" check' ||
+  fail "container_main checks /inputs before the toolchain has python3"
+declare -f build_payload | awk '/prepare_toolchain/ { toolchain = NR } /mac-image-inputs" check/ { check = NR }
+  END { exit !(toolchain && check > toolchain) }' ||
+  fail "build_payload checks /inputs after prepare_toolchain"
+pass "the in-container inputs check waits for the toolchain's python3"

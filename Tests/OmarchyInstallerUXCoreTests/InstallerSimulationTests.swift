@@ -147,8 +147,17 @@
           }
           XCTAssertFalse(session.canStartInstallation)
           continue
-        case .existingInstall:
+        case .existingInstall, .skippedRecoveryAccount, .startedRecoveryAccount:
           guard case .existingInstallRefused = session.phase else { return XCTFail(scenario.title) }
+          XCTAssertEqual(session.canSetUpRecoveryAccount, scenario != .existingInstall)
+          XCTAssertEqual(session.recoveryAccountStarted, scenario == .startedRecoveryAccount)
+          if scenario != .existingInstall {
+            session.setUpRecoveryAccount()
+            XCTAssertTrue(session.shutDown())
+            XCTAssertTrue(
+              try XCTUnwrap(session.shutdownMessage).contains("Simulation complete"),
+              scenario.title)
+          }
           continue
         default: break
         }

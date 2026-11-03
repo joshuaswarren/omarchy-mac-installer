@@ -68,6 +68,11 @@ PAYLOAD = b"".join(PAYLOAD_PARTS)
 IMAGE = f"omarchy-mac-edge-2026.10.14-0123456789ab-{sha(PAYLOAD)[:12]}"
 # An image named before image ids were added: its release and the catalog pinning it are live.
 LEGACY_IMAGE = "omarchy-mac-edge-2026.10.14-0123456789ab"
+# An rc-lane image (mac-image-check name rc): its release tag, Mac revision, date and package set id.
+RC_IMAGE = "omarchy-mac-4.5.0-rc2-r1-2026.10.28-0123456789ab"
+# The zips mac-image.yml stages: each lane's, named for the date its inputs were resolved.
+RC_ZIP = "omarchy-2026.10.28-aarch64-apple-silicon-mac-rc-os-package.zip"
+EDGE_ZIP = "omarchy-2026.10.28-aarch64-apple-silicon-mac-edge-os-package.zip"
 ENGINE = b"engine-tarball" * 30
 METADATA = b'{"os_list": []}\n'
 ZIP = f"{IMAGE}.zip"
@@ -292,11 +297,11 @@ class CatalogReleaseTests(ReleaseTestCase):
                               "--evidence", str(self.write("e.json", evidence_document("e" * 64))))
         self.assert_refused(other, "not " + sha(PAYLOAD))
         self.assert_refused(self.run_tool("check-evidence", "--catalog", str(catalog)), "no VM evidence")
-        renamed = self.directory / "catalog-rc.json"
+        renamed = self.directory / "catalog-stable.json"
         shutil.copyfile(catalog, renamed)
         self.assert_refused(self.run_tool("check-evidence", "--catalog", str(renamed),
                                           "--evidence", str(self.write("e.json", evidence_document()))),
-                            "rc and stable come from promotion")
+                            "stable comes from promotion")
 
     # ── inputs ───────────────────────────────────────────────────────────────
 
@@ -322,7 +327,7 @@ class CatalogReleaseTests(ReleaseTestCase):
     def test_refuses_another_channel_or_image_name(self) -> None:
         result = self.run_tool("prepare", "--channel", "stable", "--image", IMAGE, "--payload", "x",
                                "--engine", "x", "--installer-data", "x", "--installer", "x", "--out", str(self.directory / "o"))
-        self.assert_refused(result, "rc and stable come from promotion")
+        self.assert_refused(result, "stable comes from promotion")
         with self.assertRaisesRegex(release.Refusal, "image must be"):
             release.check_image_name("omarchy-mac-edge-latest", "edge")
 
@@ -335,8 +340,88 @@ class CatalogReleaseTests(ReleaseTestCase):
                      f"{LEGACY_IMAGE}-", "omarchy-mac-edge-2026.10.14", f" {IMAGE}", 7):
             with self.subTest(name), self.assertRaisesRegex(release.Refusal, "image must be"):
                 release.check_image_name(name, "edge")
-        with self.assertRaisesRegex(release.Refusal, "not built for the rc channel"):
+        with self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
             release.check_image_name(IMAGE, "rc")
+
+    def test_rc_takes_an_rc_lane_image_named_from_its_tag(self) -> None:
+        self.assertEqual(release.check_image_name(RC_IMAGE, "rc", sha(PAYLOAD)), RC_IMAGE)
+        with self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
+            release.check_image_name(IMAGE, "rc", sha(PAYLOAD))
+        with self.assertRaisesRegex(release.Refusal, "image must be"):
+            release.check_image_name(RC_IMAGE, "edge", sha(PAYLOAD))
+        for name in ("omarchy-mac-4.5.0-r1-2026.10.28-0123456789ab", "omarchy-mac-4.5.0-rc2-r0-2026.10.28-0123456789ab",
+                     "omarchy-mac-v4.5.0-rc2-r1-2026.10.28-0123456789ab", f"{RC_IMAGE}-0123456789ab"):
+            with self.subTest(name), self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
+                release.check_image_name(name, "rc")
+
+    def rc_inputs(self, image: str = RC_IMAGE, recorded: str | None = RC_IMAGE) -> tuple[dict, dict, dict]:
+        """The rc image's upload, as mac-upload.py reports it (its lane's zip in its own release), and its
+        VM evidence, which records the image it tested (RECORDED, none when None)."""
+        payload = artifact(image, RC_ZIP, PAYLOAD)
+        metadata = artifact(image, "installer_data.json", METADATA)
+        evidence = evidence_document()
+        if recorded is not None:
+            evidence["image"] = recorded
+        return payload, metadata, evidence
+
+    def build_rc(self, payload: dict, metadata: dict, evidence: object, image: str = RC_IMAGE) -> dict:
+        now = datetime.datetime(2026, 10, 28, tzinfo=datetime.timezone.utc)
+        return release.build_catalog("rc", image, payload, engine_document(), metadata, evidence,
+                                     installer_document(), now)
+
+    def test_a_catalog_rc_entry_takes_the_rc_image_that_passed_acceptance(self) -> None:
+        catalog = self.build_rc(*self.rc_inputs())
+        self.assertEqual({model["evidenceRevision"] for model in catalog["models"]}, {RC_IMAGE})
+        self.assertEqual({model["payloadDigest"] for model in catalog["models"]}, {f"sha256:{sha(PAYLOAD)}"})
+        self.assertEqual({model["payloadArtifact"]["fileName"] for model in catalog["models"]}, {RC_ZIP})
+        payload, metadata, _ = self.rc_inputs()
+        for evidence, message in ((None, "no VM evidence record"),
+                                  (dict(evidence_document("e" * 64), image=RC_IMAGE), "not " + sha(PAYLOAD)),
+                                  (dict(evidence_document(), result="fail", image=RC_IMAGE), "did not pass")):
+            with self.subTest(message), self.assertRaisesRegex(release.Refusal, message):
+                self.build_rc(payload, metadata, evidence)
+
+    def test_an_edge_payload_under_an_rc_name_is_refused(self) -> None:
+        # An edge upload and its passing evidence, offered as catalog-rc under an invented rc name.
+        with self.assertRaisesRegex(release.Refusal, "the VM evidence names no image"):
+            self.build_rc(payload_document(), artifact(IMAGE, "installer_data.json", METADATA), evidence_document())
+        with self.assertRaisesRegex(release.Refusal, f"the VM evidence is for {IMAGE}, not {RC_IMAGE}"):
+            self.build_rc(payload_document(), artifact(IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=IMAGE))
+        # Even with evidence that names the rc image, an edge zip is not the rc image's.
+        with self.assertRaisesRegex(release.Refusal, f"is not {RC_IMAGE}'s rc zip"):
+            self.build_rc(artifact(RC_IMAGE, EDGE_ZIP, PAYLOAD), artifact(RC_IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=RC_IMAGE))
+        with self.assertRaisesRegex(release.Refusal, f"is not in {RC_IMAGE}'s release"):
+            self.build_rc(artifact(IMAGE, RC_ZIP, PAYLOAD), artifact(RC_IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=RC_IMAGE))
+
+    def test_a_recorded_name_that_is_not_the_catalogs_is_refused(self) -> None:
+        respin = RC_IMAGE.replace("-r1-", "-r2-")
+        payload, metadata, evidence = self.rc_inputs(recorded=respin)
+        with self.assertRaisesRegex(release.Refusal, f"the VM evidence is for {respin}, not {RC_IMAGE}"):
+            self.build_rc(payload, metadata, evidence)
+        # The rc zip of another day under this name.
+        payload, metadata, evidence = self.rc_inputs()
+        other_day = artifact(RC_IMAGE, RC_ZIP.replace("2026.10.28", "2026.10.27"), PAYLOAD)
+        with self.assertRaisesRegex(release.Refusal, f"is not {RC_IMAGE}'s rc zip"):
+            self.build_rc(other_day, metadata, evidence)
+        # Its parts and installer data stay in its release too.
+        payload, metadata, evidence = self.rc_inputs()
+        with self.assertRaisesRegex(release.Refusal, f"is not in {RC_IMAGE}'s release"):
+            self.build_rc(payload, artifact(IMAGE, "installer_data.json", METADATA), evidence)
+
+    def test_the_signing_job_holds_catalog_rc_to_its_image_again(self) -> None:
+        payload, metadata, evidence = self.rc_inputs()
+        catalog = self.directory / "catalog-rc.json"
+        catalog.write_bytes(release.catalog_bytes(self.build_rc(payload, metadata, evidence)))
+        ok = self.run_tool("check-evidence", "--catalog", str(catalog), "--evidence", str(self.write("e.json", evidence)))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for other, message in ((evidence_document(), "the VM evidence names no image"),
+                               (dict(evidence_document(), image=IMAGE), f"the VM evidence is for {IMAGE}, not {RC_IMAGE}")):
+            with self.subTest(message):
+                self.assert_refused(self.run_tool("check-evidence", "--catalog", str(catalog),
+                                                  "--evidence", str(self.write("e.json", other))), message)
 
     def test_a_catalog_names_its_image_and_still_takes_an_older_name(self) -> None:
         now = datetime.datetime(2026, 10, 14, tzinfo=datetime.timezone.utc)
@@ -415,6 +500,63 @@ class CatalogReleaseTests(ReleaseTestCase):
         (scratch / "catalog-edge.signed.json").write_text("{}")
         self.assert_refused(publish(newer), "does not verify")
 
+    def publish_to(self, envelope: Path, *hosts: Path) -> subprocess.CompletedProcess:
+        return self.run_tool("publish", "--channel", "edge", "--envelope", str(envelope),
+                             "--host", ",".join(f"scratch:{host}" for host in hosts), "--trust-root", str(self.trust_root))
+
+    def test_a_catalog_goes_to_every_host_in_order(self) -> None:
+        base, mirror = self.directory / "base", self.directory / "mirror"
+        envelope = self.signed_at(NOW, "both")
+        result = self.publish_to(envelope, base, mirror)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for host in (base, mirror):
+            self.assertEqual((host / "catalog-edge.signed.json").read_bytes(), envelope.read_bytes())
+        published = [line for line in result.stdout.splitlines() if line.startswith("published=")]
+        self.assertEqual(published, [f"published={base}/catalog-edge.signed.json", f"published={mirror}/catalog-edge.signed.json"])
+
+    def test_every_host_is_checked_before_any_is_written(self) -> None:
+        base, mirror = self.directory / "base", self.directory / "mirror"
+        older, newer = self.signed_at("2026-10-13T00:00:00Z", "older"), self.signed_at(NOW, "newer")
+        self.assertEqual(self.publish_to(newer, mirror).returncode, 0)
+        self.assert_refused(self.publish_to(older, base, mirror), f"does not follow the published {SEQUENCE} at {mirror}")
+        self.assertFalse((base / "catalog-edge.signed.json").exists(), "the base must not get ahead of a refused mirror")
+
+    def test_a_host_already_serving_the_catalog_is_skipped_and_the_next_still_published(self) -> None:
+        base, mirror = self.directory / "base", self.directory / "mirror"
+        envelope = self.signed_at(NOW, "retry")
+        self.assertEqual(self.publish_to(envelope, base).returncode, 0)
+        result = self.publish_to(envelope, base, mirror)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"published={base}/catalog-edge.signed.json (already live)", result.stdout)
+        self.assertEqual((mirror / "catalog-edge.signed.json").read_bytes(), envelope.read_bytes())
+
+    def test_a_failed_first_host_writes_no_mirror(self) -> None:
+        base, mirror = self.directory / "base", self.directory / "mirror"
+        base.write_text("not a directory: the base host's write fails")
+        result = self.publish_to(self.signed_at(NOW, "first-fails"), base, mirror)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((mirror / "catalog-edge.signed.json").exists(), "the mirror must never get ahead of the base")
+
+    def test_a_failed_mirror_resumes_without_rewriting_the_base(self) -> None:
+        base, mirror = self.directory / "base", self.directory / "mirror"
+        envelope = self.signed_at(NOW, "mirror-fails")
+        mirror.write_text("not a directory: the mirror's write fails")
+        self.assertNotEqual(self.publish_to(envelope, base, mirror).returncode, 0)
+        self.assertEqual((base / "catalog-edge.signed.json").read_bytes(), envelope.read_bytes())
+        written = (base / "catalog-edge.signed.json").stat().st_mtime_ns
+        mirror.unlink()
+        result = self.publish_to(envelope, base, mirror)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"published={base}/catalog-edge.signed.json (already live)", result.stdout)
+        self.assertEqual((base / "catalog-edge.signed.json").stat().st_mtime_ns, written)
+        self.assertEqual((mirror / "catalog-edge.signed.json").read_bytes(), envelope.read_bytes())
+
+    def test_a_host_list_names_each_host_once(self) -> None:
+        for spec in ("github-release,github-release", "r2,", "", "s3"):
+            with self.subTest(spec):
+                with self.assertRaises(release.Refusal):
+                    release.catalog_hosts(spec)
+
     def fake_github(self) -> Path:
         """A gh stand-in holding one repository's releases in a directory."""
         state = self.directory / "github"
@@ -467,17 +609,17 @@ else:
 """)
         return state
 
-    def publish_to_fake_github(self, envelope: Path, state: Path) -> tuple[int, str]:
+    def publish_to_fake_github(self, envelope: Path, state: Path, hosts: str = "github-release") -> tuple[int, str]:
         host = release.GitHubReleaseHost(release.stopgap_repo())
         served = state / "assets" / "catalog-edge.signed.json"
 
-        def fake_open(url, timeout=60):
+        def fake_open(url, timeout=60, headers=None):
             self.assertEqual(url, host.describe("edge"))
             if not served.exists():
                 raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO())
             return contextlib.closing(io.BytesIO(served.read_bytes()))
 
-        arguments = ["publish", "--channel", "edge", "--envelope", str(envelope), "--host", "github-release",
+        arguments = ["publish", "--channel", "edge", "--envelope", str(envelope), "--host", hosts,
                      "--trust-root", str(self.trust_root)]
         saved = release.open_url, dict(os.environ)
         release.open_url = fake_open
@@ -542,6 +684,33 @@ else:
         finally:
             release.time.sleep = saved_sleep
 
+    def test_a_staged_leftover_on_the_stopgap_holds_back_the_base_too(self) -> None:
+        state = self.fake_github()
+        base = self.directory / "base"
+        saved_sleep = release.time.sleep
+        release.time.sleep = lambda seconds: None
+        try:
+            self.assertEqual(self.publish_to_fake_github(self.signed_at("2026-10-14T00:00:00Z", "a"), state)[0], 0)
+            (state / "rename-fails").touch()
+            self.assertEqual(self.publish_to_fake_github(self.signed_at("2026-10-16T00:00:00Z", "c"), state)[0], 1)
+            (state / "rename-fails").unlink()
+            status, output = self.publish_to_fake_github(self.signed_at("2026-10-17T00:00:00Z", "d"), state,
+                                                         f"scratch:{base},github-release")
+            self.assertEqual(status, 1, output)
+            self.assertIn("left catalog-edge.signed.json.next", output)
+            self.assertFalse((base / "catalog-edge.signed.json").exists())
+        finally:
+            release.time.sleep = saved_sleep
+
+    def test_a_draft_stopgap_release_holds_back_the_base_too(self) -> None:
+        state = self.fake_github()
+        base = self.directory / "base"
+        (state / "release.json").write_text('{"draft": true, "prerelease": true, "assets": []}')
+        status, output = self.publish_to_fake_github(self.signed_at(NOW, "draft-mirror"), state, f"scratch:{base},github-release")
+        self.assertEqual(status, 1)
+        self.assertIn("must be a published prerelease", output)
+        self.assertFalse((base / "catalog-edge.signed.json").exists())
+
     def test_the_github_release_host_refuses_a_draft(self) -> None:
         state = self.fake_github()
         (state / "release.json").write_text('{"draft": true, "prerelease": true, "assets": []}')
@@ -574,6 +743,109 @@ else:
         finally:
             release.open_url = saved
 
+    def test_remote_digest_resumes_a_stalled_read(self) -> None:
+        data = bytes(range(256)) * 64
+        requests = []
+
+        class Stalling(io.BytesIO):
+            status = 200
+
+            def read(self, size=-1):
+                if self.tell() >= 4096:
+                    raise TimeoutError("stalled")
+                return super().read(min(size, 1024))
+
+        def serve(url, timeout=60, headers=None):
+            requests.append(headers)
+            if headers is None:
+                return contextlib.closing(Stalling(data))
+            body = io.BytesIO(data[int(headers["Range"][6:-1]):])
+            body.status = 206
+            return contextlib.closing(body)
+
+        saved, sleep = release.open_url, release.time.sleep
+        release.open_url, release.time.sleep = serve, lambda seconds: None
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=4096-"}])
+
+            def ignore_range(url, timeout=60, headers=None):
+                return contextlib.closing(Stalling(data))
+
+            release.open_url = ignore_range
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(release.Refusal, "ignored a resume request"):
+                    release.remote_digest("https://example.test/p", len(data))
+
+            requests.clear()
+
+            def close_early(url, timeout=60, headers=None):
+                requests.append(headers)
+                start = int(headers["Range"][6:-1]) if headers else 0
+                body = io.BytesIO(data[start:] if headers else data[:3000])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            release.open_url = close_early
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=3000-"}])
+
+            class StallAfterEnd(io.BytesIO):
+                status = 206
+
+                def read(self, size=-1):
+                    block = super().read(size)
+                    if not block:
+                        raise TimeoutError("stalled before the end of the body")
+                    return block
+
+            def always_stall(url, timeout=60, headers=None):
+                start = int(headers["Range"][6:-1]) if headers else 0
+                stop = len(data) if len(requests) + 1 >= release.REMOTE_READ_ATTEMPTS else start + 512
+                requests.append(headers)
+                body = StallAfterEnd(data[start:stop])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            requests.clear()
+            release.open_url = always_stall
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(len(requests), release.REMOTE_READ_ATTEMPTS)
+        finally:
+            release.open_url, release.time.sleep = saved, sleep
+
+    def test_remote_verification_reads_the_app_against_its_sidecar(self) -> None:
+        base = release.identity()["INSTALLER_CATALOG_BASE"]
+        url = f"{base}/installer/2.4.0/App-2.4.0.dmg"
+        dmg = b"notarized disk image"
+        served = {url: dmg, f"{url}.sha256": f"{hashlib.sha256(dmg).hexdigest()}  App-2.4.0.dmg\n".encode()}
+
+        def fake_open(requested, timeout=60, headers=None):
+            if requested not in served:
+                raise urllib.error.HTTPError(requested, 404, "Not Found", {}, io.BytesIO())
+            return contextlib.closing(io.BytesIO(served[requested]))
+        saved = release.open_url
+        release.open_url = fake_open
+        self.addCleanup(setattr, release, "open_url", saved)
+        installer = {"minimumVersion": "2.4.0", "latestVersion": "2.4.0", "downloadURL": url}
+        with contextlib.redirect_stdout(io.StringIO()):
+            release.verify_remote_installer(installer)
+        served[url] = b"tampered"
+        with self.assertRaisesRegex(release.Refusal, "not its .sha256's"):
+            release.verify_remote_installer(installer)
+        served[f"{url}.sha256"] = b"%s  Other.dmg\n" % hashlib.sha256(dmg).hexdigest().encode()
+        with self.assertRaisesRegex(release.Refusal, "does not read"):
+            release.verify_remote_installer(installer)
+        del served[f"{url}.sha256"]
+        with self.assertRaisesRegex(release.Refusal, "answers HTTP 404; mirror the app first"):
+            release.verify_remote_installer(installer)
+
     # ── the workflows ────────────────────────────────────────────────────────
 
     def test_the_key_is_read_in_one_approved_step_of_one_workflow(self) -> None:
@@ -585,23 +857,30 @@ else:
         self.assertEqual([name for name, text in texts.items() if "environment: catalog-release" in text],
                          ["mac-catalog-sign.yml"])
         text = texts["mac-catalog-sign.yml"]
-        self.assertEqual(text.count("secrets."), 1)
+        self.assertEqual(text.count("secrets.CATALOG_SIGNING_KEY"), 1)
         self.assertEqual(text.count("environment: catalog-release"), 1)
+        # The key and the R2 write key never share a job.
+        publish_job = text.split("\n  publish:\n")[1]
+        self.assertNotIn("CATALOG_SIGNING_KEY", publish_job)
+        self.assertEqual(sorted({line.split("secrets.")[1].split()[0] for line in publish_job.splitlines() if "secrets." in line}),
+                         ["R2_ACCESS_KEY_ID", "R2_ENDPOINT", "R2_SECRET_ACCESS_KEY"])
         self.assertIn("on:\n  workflow_call:\n", text)
         self.assertNotIn("workflow_dispatch", text)
         sign_job = text.split("\n  sign:\n")[1].split("\n  publish:\n")[0]
         self.assertIn("environment: catalog-release", sign_job)
+        self.assertNotIn("R2_", sign_job)
         self.assertIn("secrets.CATALOG_SIGNING_KEY", sign_job)
         self.assertIn("contents: read", sign_job)
         self.assertIn("github.repository == 'omacom/omarchy-mac-installer'", sign_job)
         self.assertIn("github.ref == 'refs/heads/main'", sign_job)
         # Each gate runs only for its own channels, before the key is read.
         gate_step = sign_job.split("Check the catalog")[1].split("- name: Sign")[0]
-        self.assertIn("evidence:edge)", gate_step)
+        self.assertIn("evidence:edge | evidence:rc)", gate_step)
+        self.assertNotIn("evidence:stable", gate_step)
         self.assertIn("promotion:rc | promotion:stable)", gate_step)
         publish_job = text.split("\n  publish:\n")[1]
         self.assertIn("needs.sign.result == 'success' && !inputs.dry-run", publish_job)
-        self.assertNotIn("secrets.", publish_job)
+        self.assertNotIn("secrets.CATALOG_SIGNING_KEY", publish_job)
 
     def test_both_catalog_writers_sign_through_the_shared_job(self) -> None:
         for workflow, gate in ((WORKFLOW, "evidence"), (PROMOTE_WORKFLOW, "promotion")):
@@ -714,7 +993,7 @@ class PromotionTests(ReleaseTestCase):
         served[artifact(IMAGE, "installer_data.json", METADATA)["url"]] = METADATA
         requested = []
 
-        def fake_open(url, timeout=60):
+        def fake_open(url, timeout=60, headers=None):
             requested.append(url)
             return contextlib.closing(io.BytesIO(served[url]))
 
@@ -838,6 +1117,170 @@ class PromotionTests(ReleaseTestCase):
         self.assertEqual(self.publish("rc", self.directory / "newer-signed" / "catalog-rc.signed.json").returncode, 0)
         self.assert_refused(self.promote("rc", "edge", LATER, "older"), "does not follow the published rc")
 
+
+
+class R2CatalogHostTests(unittest.TestCase):
+    ENDPOINT = release.r2_s3.Endpoint("account.r2.cloudflarestorage.com", "omarchy-mac", "id", "secret")
+    BASE = release.identity()["INSTALLER_CATALOG_BASE"]
+
+    def host(self, answer=None):
+        host = release.R2CatalogHost(self.ENDPOINT, self.BASE)
+        sent = []
+
+        def request(method, key, **kwargs):
+            sent.append((method, key, kwargs, kwargs["body"].read() if kwargs.get("body") else None))
+            if isinstance(answer, Exception):
+                raise answer
+            return io.BytesIO(b"")
+        host.endpoint = type("Endpoint", (), {"request": staticmethod(request)})()
+        return host, sent
+
+    def test_the_catalog_is_one_put_at_the_url_apps_read(self) -> None:
+        host, sent = self.host()
+        envelope = Path(tempfile.mkdtemp()) / "catalog-edge.signed.json"
+        self.addCleanup(shutil.rmtree, envelope.parent)
+        envelope.write_bytes(b'{"catalog": "x"}')
+        host.publish("edge", envelope)
+        self.assertEqual(host.describe("edge"), f"{self.BASE}/catalog-edge.signed.json")
+        self.assertEqual(host.prefix, self.BASE.split("/", 3)[3] + "/")
+        [(method, key, kwargs, body)] = sent
+        self.assertEqual((method, key, body), ("PUT", "v1/catalog-edge.signed.json", b'{"catalog": "x"}'))
+        self.assertEqual(kwargs["headers"], {"Content-Type": "application/json"})
+        self.assertEqual(kwargs["payload_sha256"], hashlib.sha256(b'{"catalog": "x"}').hexdigest())
+
+    def test_a_bucket_lock_over_the_catalogs_is_named(self) -> None:
+        locked = urllib.error.HTTPError("x", 403, "Forbidden", None,
+                                        io.BytesIO(b"<Error><Code>ObjectLockedByBucketPolicy</Code></Error>"))
+        host, _ = self.host(locked)
+        envelope = Path(tempfile.mkdtemp()) / "e.json"
+        self.addCleanup(shutil.rmtree, envelope.parent)
+        envelope.write_bytes(b"{}")
+        with self.assertRaisesRegex(release.Refusal, "403 ObjectLockedByBucketPolicy.*bucket lock covers the catalogs"):
+            host.publish("edge", envelope)
+
+    def test_fetch_reads_the_unchanged_url_without_a_cached_copy(self) -> None:
+        opened = []
+
+        def recording_open(url, timeout=60, headers=None):
+            opened.append((url, timeout, headers))
+            return io.BytesIO(b"catalog")
+        original, release.open_url = release.open_url, recording_open
+        self.addCleanup(setattr, release, "open_url", original)
+        host, _ = self.host()
+        self.assertEqual(host.fetch("edge", timeout=release.READBACK_TIMEOUT), b"catalog")
+        self.assertEqual(opened, [(f"{self.BASE}/catalog-edge.signed.json", release.READBACK_TIMEOUT, release.NO_CACHE)])
+
+    def test_without_credentials_r2_is_refused_before_anything(self) -> None:
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("R2_")}
+        original = os.environ.copy()
+        os.environ.clear()
+        os.environ.update(environment)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(original)))
+        with self.assertRaisesRegex(release.Refusal, "no R2 credentials"):
+            release.catalog_host("r2")
+
+
+class ReadBackTests(unittest.TestCase):
+    """The publish readback outlasts a stale cache, but not forever."""
+
+    class Host:
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.fetches = 0
+            self.timeouts: list[float] = []
+
+        def describe(self, channel: str) -> str:
+            return f"host/catalog-{channel}.signed.json"
+
+        def fetch(self, channel: str, timeout: float = 60) -> bytes | None:
+            self.fetches += 1
+            self.timeouts.append(timeout)
+            reply = self.replies.pop(0) if self.replies else b"stale"
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    def read_back(self, host) -> list[int]:
+        slept: list[int] = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            release.read_back(host, "edge", b"new", sleep=slept.append)
+        return slept
+
+    def test_a_cache_stale_for_over_a_minute_is_ridden_out(self) -> None:
+        host = self.Host([b"old"] * 8 + [b"new"])
+        slept = self.read_back(host)
+        self.assertEqual(host.fetches, 9)
+        self.assertGreater(sum(slept), 61, "2026-10-21 served the old asset 61 s after the upload")
+        self.assertLessEqual(sum(slept), sum(release.READBACK_DELAYS))
+
+    def test_the_first_read_needs_no_wait(self) -> None:
+        self.assertEqual(self.read_back(self.Host([b"new"])), [])
+
+    def test_transient_errors_are_retried(self) -> None:
+        host = self.Host([OSError("reset"), urllib.error.URLError("timeout"), None, b"new"])
+        self.assertEqual(len(self.read_back(host)), 3)
+        self.assertEqual(host.fetches, 4)
+
+    def test_a_catalog_that_never_appears_is_refused(self) -> None:
+        host = self.Host([])
+        with self.assertRaisesRegex(release.Refusal, "does not serve the catalog just published"):
+            self.read_back(host)
+        self.assertEqual(host.fetches, len(release.READBACK_DELAYS) + 1)
+
+    def test_the_window_stays_bounded(self) -> None:
+        self.assertGreaterEqual(sum(release.READBACK_DELAYS), 240)
+        self.assertLessEqual(sum(release.READBACK_DELAYS), 600)
+
+    def test_every_fetch_hanging_still_ends_inside_the_publish_job(self) -> None:
+        host = self.Host([])
+        with self.assertRaises(release.Refusal):
+            self.read_back(host)
+        self.assertEqual(set(host.timeouts), {release.READBACK_TIMEOUT})
+        worst = sum(release.READBACK_DELAYS) + (len(release.READBACK_DELAYS) + 1) * release.READBACK_TIMEOUT
+        self.assertLess(worst, 12 * 60, "mac-catalog-sign.yml's publish job has 15 minutes, checkout and the swap included")
+
+    def test_a_stale_read_is_logged(self) -> None:
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            release.read_back(self.Host([b"old", b"new"]), "edge", b"new", sleep=lambda seconds: None)
+        self.assertIn("serves 3 other bytes", log.getvalue())
+
+    def test_the_github_host_asks_for_an_uncached_copy(self) -> None:
+        sent = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def recording_open(url, timeout=60, headers=None):
+            sent.append((url, timeout, headers))
+            return Response(b"catalog")
+        original, release.open_url = release.open_url, recording_open
+        self.addCleanup(setattr, release, "open_url", original)
+        host = release.GitHubReleaseHost("omacom/omarchy-mac-installer")
+        self.assertEqual(host.fetch("edge", timeout=release.READBACK_TIMEOUT), b"catalog")
+        self.assertEqual(sent, [(host.describe("edge"), release.READBACK_TIMEOUT, release.NO_CACHE)])
+        self.assertEqual(release.NO_CACHE["Cache-Control"], "no-cache")
+
+    def test_open_url_puts_the_headers_on_the_request(self) -> None:
+        opened = []
+
+        class Opener:
+            def open(self, request, timeout=None):
+                opened.append((request, timeout))
+                return io.BytesIO(b"")
+        original = release.urllib.request.build_opener
+        release.urllib.request.build_opener = lambda *handlers: Opener()
+        self.addCleanup(setattr, release.urllib.request, "build_opener", original)
+        release.open_url("https://example.invalid/catalog", timeout=7, headers=release.NO_CACHE)
+        request, timeout = opened[0]
+        self.assertEqual(timeout, 7)
+        self.assertEqual(request.get_header("Cache-control"), "no-cache")
+        self.assertEqual(request.get_header("Pragma"), "no-cache")
+        self.assertEqual(request.get_header("User-agent"), "omarchy-mac-catalog")
 
 
 if __name__ == "__main__":

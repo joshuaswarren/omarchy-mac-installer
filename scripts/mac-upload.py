@@ -56,7 +56,6 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -72,6 +71,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import r2_s3  # noqa: E402
+from r2_s3 import EMPTY_SHA256, S3_NAMESPACE, sigv4_headers  # noqa: E402,F401
+
 GITHUB_PART_BYTES = 1992294400
 MAXIMUM_PART_COUNT = 16
 READ_BLOCK_BYTES = 8 * 1024 * 1024
@@ -82,6 +85,11 @@ LISTING_ATTEMPTS = 6
 # a rebuild on the same packages and day never lands in a published release,
 # and the same bytes always go to the same one.
 IMAGE_NAME = re.compile(r"^omarchy-mac-(edge|rc|stable)-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{12}-([0-9a-f]{12})$")
+# An rc-lane image is named from its release tag and Mac revision instead
+# (mac-image-check name rc): no image id, so the destination's immutability
+# keeps a rebuild out of a published release, and a respin takes a new revision.
+RELEASE_IMAGE_NAME = re.compile(
+    r"^omarchy-mac-(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-rc[1-9]\d*-r[1-9]\d{0,2}-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{12}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 RUN_ID = re.compile(r"^[1-9][0-9]{0,19}$")
@@ -95,9 +103,6 @@ REQUIRED_SCENARIOS = ("first-boot", "conversion", "second-boot")
 DRY_RUN_PREFIX = "dryrun-"
 # R2 takes at most 5 GiB in one PUT; larger needs a multipart upload.
 R2_PUT_BYTES = 5 * 1024 ** 3
-R2_BUCKET = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
-S3_NAMESPACE = "{http://s3.amazonaws.com/doc/2006-03-01/}"
-EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 IMMUTABLE = "public, max-age=31536000, immutable"
 # Scratch is public while a dry run lasts; the edge must not keep it after.
 SCRATCH_CACHE = "no-store"
@@ -139,10 +144,13 @@ class HashSink:
 
 def check_inputs(image: str, sha256: str, dry_run: bool, run_ids: list[str], part_bytes: str) -> None:
     name = IMAGE_NAME.fullmatch(image)
-    require(name is not None,
-            f"{image!r} is not an image name (omarchy-mac-<lane>-<YYYY.MM.DD>-<package set id>-<image id>)")
+    release = RELEASE_IMAGE_NAME.fullmatch(image) is not None
+    require(name is not None or release,
+            f"{image!r} is not an image name (omarchy-mac-<lane>-<YYYY.MM.DD>-<package set id>-<image id>,"
+            " or omarchy-mac-<X.Y.Z-rcN>-r<revision>-<YYYY.MM.DD>-<package set id>)")
     require(SHA256_HEX.fullmatch(sha256) is not None, "the expected image sha256 must be 64 lowercase hex digits")
-    require(name.group(2) == sha256[:12], f"{image} names image id {name.group(2)}, not the zip's sha256 {sha256}")
+    if not release:
+        require(name.group(2) == sha256[:12], f"{image} names image id {name.group(2)}, not the zip's sha256 {sha256}")
     for run_id in run_ids:
         require(run_id == "" or RUN_ID.fullmatch(run_id) is not None, f"{run_id!r} is not a run id")
     if part_bytes:
@@ -485,39 +493,6 @@ class GitHubReleaseDestination:
         require(self._tag_commit() == commit, f"the tag {self.release} does not name the uploaded commit {commit}")
 
 
-def sigv4_headers(*, method: str, host: str, path: str, query: dict[str, str], headers: dict[str, str],
-                  payload_sha256: str, access_key: str, secret_key: str, region: str, amz_date: str,
-                  service: str = "s3") -> dict[str, str]:
-    """AWS Signature Version 4 request headers, Authorization included.
-
-    `path` is already URI-encoded, as sent.
-    """
-    def quote(value: str) -> str:
-        return urllib.parse.quote(value, safe="-_.~")
-
-    signed_headers = {key.lower(): " ".join(value.split()) for key, value in headers.items()}
-    signed_headers |= {"host": host, "x-amz-content-sha256": payload_sha256, "x-amz-date": amz_date}
-    names = ";".join(sorted(signed_headers))
-    canonical = "\n".join([
-        method,
-        path,
-        "&".join(f"{quote(key)}={quote(value)}" for key, value in sorted(query.items())),
-        "".join(f"{key}:{signed_headers[key]}\n" for key in sorted(signed_headers)),
-        names,
-        payload_sha256,
-    ])
-    day = amz_date[:8]
-    scope = f"{day}/{region}/{service}/aws4_request"
-    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical.encode()).hexdigest()])
-    key = f"AWS4{secret_key}".encode()
-    for part in (day, region, service, "aws4_request"):
-        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
-    signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
-    signed_headers["authorization"] = (f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, "
-                                       f"SignedHeaders={names}, Signature={signature}")
-    return signed_headers
-
-
 def content_type(name: str) -> str:
     if name.endswith(".zip"):
         return "application/zip"
@@ -541,23 +516,16 @@ class R2Destination:
 
     def __init__(self, bucket: str, release: str, *, endpoint: str, access_key: str, secret_key: str,
                  public_base: str = "https://mac.omarchy.org") -> None:
-        require(R2_BUCKET.fullmatch(bucket) is not None, f"invalid R2 bucket name: {bucket}")
-        require(access_key != "" and secret_key != "", "no R2 credentials (R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)")
-        parsed = urllib.parse.urlsplit(endpoint)
-        # The secret endpoint is never printed: it names the account.
-        require(parsed.scheme == "https" and parsed.hostname and not parsed.query and not parsed.fragment
-                and not parsed.username and parsed.port is None,
-                "R2_ENDPOINT must be https://<account>.r2.cloudflarestorage.com")
-        require(parsed.path.strip("/") in ("", bucket),
-                "R2_ENDPOINT has a path other than the bucket's name; set it to the account's S3 endpoint")
+        try:
+            self.endpoint = r2_s3.Endpoint.parse(bucket, endpoint, access_key, secret_key)
+        except r2_s3.R2Error as error:
+            raise Refusal(str(error)) from None
         public = urllib.parse.urlsplit(public_base)
         require(public.scheme == "https" and public.hostname and public.path.strip("/") == "" and not public.query,
                 f"R2_PUBLIC_BASE must be an https origin, not {public_base}")
         self.bucket = bucket
         self.release = release
-        self.host = parsed.hostname
-        self.access_key = access_key
-        self.secret_key = secret_key
+        self.host = self.endpoint.host
         self.public_base = f"https://{public.hostname}/"
         self.prefix = f"dryrun/{release}/" if release.startswith(DRY_RUN_PREFIX) else f"v1/releases/{release}/"
 
@@ -570,34 +538,14 @@ class R2Destination:
     def _request(self, method: str, key: str, *, query: dict[str, str] | None = None,
                  headers: dict[str, str] | None = None, body: BinaryIO | None = None, size: int = 0,
                  payload_sha256: str = EMPTY_SHA256):
-        path = f"/{self.bucket}/" + urllib.parse.quote(key, safe="/-_.~")
-        query = query or {}
-        signed = sigv4_headers(method=method, host=self.host, path=path, query=query, headers=headers or {},
-                               payload_sha256=payload_sha256, access_key=self.access_key,
-                               secret_key=self.secret_key, region="auto",
-                               amz_date=time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))
-        url = f"https://{self.host}{path}"
-        if query:
-            url += "?" + urllib.parse.urlencode(sorted(query.items()), quote_via=urllib.parse.quote, safe="-_.~")
-        request = urllib.request.Request(url, data=body, method=method)
-        for name, value in signed.items():
-            if name != "host":
-                request.add_unredirected_header(name.title(), value)
-        if body is not None:
-            request.add_unredirected_header("Content-Length", str(size))
         try:
-            return urllib.request.urlopen(request, timeout=600)
-        except urllib.error.HTTPError:
-            raise
-        except (urllib.error.URLError, OSError) as error:
-            # Not the URL: its host names the account.
-            reason = getattr(error, "reason", error)
-            raise Refusal(f"could not reach R2 for {method} {key or self.prefix}: {type(reason).__name__}") from None
+            return self.endpoint.request(method, key, query=query, headers=headers, body=body, size=size,
+                                         payload_sha256=payload_sha256)
+        except r2_s3.R2Error as error:
+            raise Refusal(str(error)) from None
 
     def _refusal(self, action: str, error: urllib.error.HTTPError) -> Refusal:
-        detail = error.read().decode(errors="replace")
-        code = re.search(r"<Code>([^<]{1,100})</Code>", detail)
-        return Refusal(f"R2 refused to {action} ({error.code}{f' {code.group(1)}' if code else ''})")
+        return Refusal(r2_s3.refusal_text(action, error))
 
     def listing(self) -> dict[str, Remote]:
         remote: dict[str, Remote] = {}

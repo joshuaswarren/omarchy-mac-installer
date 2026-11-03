@@ -449,5 +449,79 @@
           Data(#"{"schema":1,"status":"installed","mode":"raw"}"#.utf8),
           hasPendingOperation: true))
     }
+
+    func testOnlyAnInstalledReceiptThatSkippedTheAccountIsDeferred() {
+      XCTAssertTrue(
+        RecoveryAccountHandoff.isAccountDeferredReceipt(
+          Data(#"{"status":"installed","recoveryAccountDeferred":true}"#.utf8)))
+      XCTAssertFalse(
+        RecoveryAccountHandoff.isAccountDeferredReceipt(
+          Data(#"{"schema":1,"status":"installed","mode":"raw"}"#.utf8)))
+      XCTAssertFalse(
+        RecoveryAccountHandoff.isAccountDeferredReceipt(
+          Data(#"{"status":"installed","recoveryAccountDeferred":false}"#.utf8)))
+      XCTAssertFalse(
+        RecoveryAccountHandoff.isAccountDeferredReceipt(
+          Data(#"{"status":"prepared","recoveryAccountDeferred":true}"#.utf8)))
+      XCTAssertFalse(RecoveryAccountHandoff.isAccountDeferredReceipt(Data("not json".utf8)))
+      XCTAssertFalse(
+        RecoveryAccountHandoff.isAccountDeferredReceipt(
+          Data(#"{"status":"installed","recoveryAccountDeferred":true}"#.utf8),
+          hasPendingOperation: true))
+    }
+
+    func testOnlyAFinishedReceiptEndsTheHandoffAndOnlyASkippedAccountIsDeferred() {
+      func state(_ json: String?, pending: Bool = false) -> Bool? {
+        RecoveryAccountHandoff.handoffAccountDeferred(
+          receipt: json.map { (Data($0.utf8), pending) })
+      }
+      XCTAssertNil(state(#"{"schema":1,"status":"installed","mode":"raw"}"#))
+      XCTAssertEqual(state(#"{"status":"installed","recoveryAccountDeferred":true}"#), true)
+      XCTAssertEqual(state(nil), false)
+      XCTAssertEqual(state(#"{"status":"prepared"}"#), false)
+      XCTAssertEqual(state("not json"), false)
+      XCTAssertEqual(state(#"{"status":"installed"}"#, pending: true), false)
+      XCTAssertEqual(
+        state(#"{"status":"installed","recoveryAccountDeferred":true}"#, pending: true), false)
+    }
+
+    func testAHandoffMatchesItsInstallationWhateverTheReceiptSaid() {
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy", systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      let esp = "55555555-5555-4555-8555-555555555555"
+      let approved = CompletedRecoveryInstallation(
+        binding: "binding", target: target, espUUID: esp, accountDeferred: false)
+      XCTAssertTrue(
+        CompletedRecoveryInstallation(
+          binding: "binding", target: target, espUUID: esp, accountDeferred: true
+        ).isSameInstallation(as: approved))
+      let other = RecoveryAccountTarget(
+        volumeName: "Omarchy", systemUUID: "66666666-6666-4666-8666-666666666666",
+        dataUUID: target.dataUUID, groupUUID: target.groupUUID, prebootUUID: target.prebootUUID)
+      XCTAssertFalse(
+        CompletedRecoveryInstallation(binding: "binding", target: other, espUUID: esp)
+          .isSameInstallation(as: approved))
+      XCTAssertFalse(
+        CompletedRecoveryInstallation(
+          binding: "binding", target: target, espUUID: "77777777-7777-4777-8777-777777777777"
+        ).isSameInstallation(as: approved))
+      XCTAssertFalse(
+        CompletedRecoveryInstallation(binding: "other", target: target, espUUID: esp)
+          .isSameInstallation(as: approved))
+    }
+
+    func testDeferredFlagSurvivesTheHelperReply() throws {
+      let reply = RecoveryAccountReply(ticket: "t", accountDeferred: true)
+      let decoded = try JSONDecoder().decode(
+        RecoveryAccountReply.self, from: JSONEncoder().encode(reply))
+      XCTAssertEqual(decoded.accountDeferred, true)
+      // A reply without the field is an unfinished installation, as before.
+      let older = try JSONDecoder().decode(
+        RecoveryAccountReply.self, from: Data(#"{"ticket":"t"}"#.utf8))
+      XCTAssertNil(older.accountDeferred)
+    }
   }
 #endif

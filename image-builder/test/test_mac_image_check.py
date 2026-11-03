@@ -41,6 +41,10 @@ CHANNEL_INPUTS = {
     "omarchy_channel": "edge",
     "omarchy_db_sha256": CHANNEL_DB,
 }
+# An rc build's inputs (resolve --channel rc --release-tag v4.5.0-rc2): the lane's set, tag and revision.
+RC_INPUTS = dict(CHANNEL_INPUTS, channel_set=f"omarchy-rc-{CHANNEL_DB[:12]}", omarchy_channel="rc",
+                 release_tag="v4.5.0-rc2", mac_revision="1")
+RC_NAME = "omarchy-2026.09.25-aarch64-apple-silicon-mac-rc-os-package.zip"
 CHANNEL_PACKAGES = [
     ("omarchy-dev", "4.0.0.r6971.g492b883-1", "omarchy-candidates", "omarchy-dev-4.0.0.r6971.g492b883-1-aarch64.pkg.tar.zst",
      "3" * 64),
@@ -67,14 +71,15 @@ def package_set(packages) -> str:
 def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="passed", image_edit=None,
           profile=(), provenance_profile=None, name=None, inspection_digest=None, target_edit=None,
           sources=(("omarchy", "a" * 40),), runtime_sources=None, provenance_edit=None, legacy=False,
-          inputs=INPUTS, pin=None, report_edit=None, recovery_app=None, builder_commit="c" * 40, grow=None) -> None:
+          inputs=INPUTS, pin=None, report_edit=None, recovery_app=None, builder_commit="c" * 40, grow=None,
+          lane="edge") -> None:
     """A build directory as build-mac-image writes it; LEGACY, as a build before builds recorded their identity.
     With CHANNEL_INPUTS, a channel build: the image target names the channel set and database, INSPECTION the
     set it inspected, and PIN (the test image pin, empty for a public image) is recorded. BUILDER_COMMIT names
     the builder, and GROW (fixtures.write_payload) changes the payload's bytes, as a builder fix would."""
     lab = "profile=lab" in profile
     channel = "channel_set" in inputs
-    name = name or (LAB_NAME if lab else NAME)
+    name = name or (LAB_NAME if lab else NAME if lane == "edge" else RC_NAME)
     zip_path = out / name
     fixtures.write_payload(zip_path, check.BOOT_UUID, check.ROOT_UUID, recovery_app=recovery_app, grow=grow)
     (out / "installer_data.json").write_text(json.dumps(check.expected_metadata(name, recovery_app is not None)))
@@ -97,11 +102,18 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
         report.update(profile="lab", lab_access_sha256=digest)
     if channel:
         report.update(set_kind="channel", set=inputs["channel_set"], database_sha256=inputs["omarchy_db_sha256"])
+    if "release_tag" in inputs:
+        tag, revision = inputs["release_tag"], inputs["mac_revision"]
+        report["install_receipt"] = {
+            "format": "1", "image": f"omarchy-mac-{tag[1:]}-r{revision}-2026.09.25-{package_set(packages)[:12]}",
+            "release_tag": tag, "mac_revision": revision, "lane": lane, "catalog_channel": lane,
+            "omarchy_mirror": lane, "omarchy_runtime_package": "omarchy", "omarchy_settings_package": "omarchy-settings",
+            "omarchy_image_ref": tag, "package_set_sha256": package_set(packages), "built": BUILT}
     if report_edit:
         report_edit(report)
     (out / "INSPECTION").write_text(json.dumps(report))
     (out / "inputs").write_text("format=2\n" + "".join(f"{k}={v}\n" for k, v in inputs.items()))
-    lines = ["format=2", "kind=mac-image", "lane=edge", "kernel=linux-aurora", "platform=apple-silicon",
+    lines = ["format=2", "kind=mac-image", f"lane={lane}", "kernel=linux-aurora", "platform=apple-silicon",
              "builder_commit=" + builder_commit, "builder_tree_clean=true", f"inputs_sha256={sha(out / 'inputs')}"]
     lines += [f"input.{k}={v}" for k, v in inputs.items()]
     lines += [f"candidate={n}|{v}|{f}|{s}" for n, v, _, f, s in candidates]
@@ -116,8 +128,8 @@ def build(out: Path, packages=PACKAGES, candidates=PACKAGES[:2], inspection="pas
     if provenance_edit:
         lines = provenance_edit(lines)
     (out / "PROVENANCE").write_text("\n".join(lines) + "\n")
-    digests = check.check_payload("edge", zip_path, out / "installer_data.json", "lab" if name == LAB_NAME else "release")
-    image = ["format=2", "lane=edge", "platform=apple-silicon", "builder_commit=" + builder_commit, "builder_tree_clean=true",
+    digests = check.check_payload(lane, zip_path, out / "installer_data.json", "lab" if name == LAB_NAME else "release")
+    image = ["format=2", f"lane={lane}", "platform=apple-silicon", "builder_commit=" + builder_commit, "builder_tree_clean=true",
              *[f"{k}={v}" for k, v in inputs.items()],
              "hardware_setup=build", *([] if pin is None else [f"test_image_pin={pin}"]), *profile,
              f"package_set_sha256={package_set(packages)}",
@@ -342,6 +354,103 @@ class ChannelBuildDirectoryTest(unittest.TestCase):
                 self.build(**options)
                 with self.assertRaisesRegex(check.CheckError, message):
                     check.image_name("edge", self.out)
+
+
+class RcBuildDirectoryTest(unittest.TestCase):
+    """An rc build's records carry its release tag and Mac revision, its image carries the install
+    receipt that names them, and its name comes from the tag."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name) / "out"
+        self.recovery = Path(self.tmp.name) / "recovery"
+        self.inputs = dict(RC_INPUTS, recovery_app_manifest_sha256=fixtures.make_recovery_app(self.recovery))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def build(self, **options):
+        if self.out.exists():
+            shutil.rmtree(self.out)
+        self.out.mkdir()
+        settings = dict(packages=CHANNEL_PACKAGES, candidates=CHANNEL_PACKAGES[:2], inputs=self.inputs, pin="",
+                        sources=(("omarchy-mac", "b" * 40),), recovery_app=self.recovery, lane="rc")
+        build(self.out, **{**settings, **options})
+
+    def refused(self, pattern, mode="descriptor", **options):
+        self.build(**options)
+        with self.assertRaisesRegex(check.CheckError, pattern):
+            getattr(check, f"check_{mode}")("rc", self.out)
+
+    def test_an_rc_build_passes_and_is_named_from_its_tag_and_revision(self):
+        self.build()
+        check.check_descriptor("rc", self.out)
+        check.check_provenance("rc", self.out)
+        expected = f"omarchy-mac-4.5.0-rc2-r1-2026.09.25-{package_set(CHANNEL_PACKAGES)[:12]}"
+        self.assertEqual(check.image_name("rc", self.out), expected)
+        self.assertRegex(expected, check.RELEASE_IMAGE_NAME)
+        result = subprocess.run([sys.executable, str(ROOT / "bin/mac-image-check"), "name", "rc", str(self.out)],
+                                capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stdout), (0, f"{expected}\n"))
+
+    def test_a_respin_takes_the_next_revision_and_keeps_its_bytes_out_of_the_name(self):
+        self.inputs["mac_revision"] = "2"
+        self.build(grow={"esp/limine.conf": 1})
+        self.assertEqual(check.image_name("rc", self.out),
+                         f"omarchy-mac-4.5.0-rc2-r2-2026.09.25-{package_set(CHANNEL_PACKAGES)[:12]}")
+
+    def test_image_must_name_the_tag_and_revision_the_inputs_pin(self):
+        self.refused("IMAGE does not name release_tag once",
+                     image_edit=lambda lines: [l for l in lines if not l.startswith("release_tag=")])
+        self.refused("IMAGE release_tag does not match the inputs record",
+                     image_edit=lambda lines: [l.replace("v4.5.0-rc2", "v4.5.0-rc3") for l in lines])
+        self.refused("IMAGE mac_revision does not match PROVENANCE",
+                     provenance_edit=lambda lines: [l.replace("input.mac_revision=1", "input.mac_revision=2") for l in lines])
+
+    def test_an_edge_image_names_no_release(self):
+        out = Path(self.tmp.name) / "edge"
+        out.mkdir()
+        build(out, packages=CHANNEL_PACKAGES, candidates=CHANNEL_PACKAGES[:2], pin="", sources=(("omarchy-mac", "b" * 40),),
+              recovery_app=self.recovery, inputs=dict(CHANNEL_INPUTS, recovery_app_manifest_sha256=self.inputs[
+                  "recovery_app_manifest_sha256"]),
+              image_edit=lambda lines: lines[:-1] + ["release_tag=v4.5.0-rc2", "mac_revision=1", lines[-1]])
+        with self.assertRaisesRegex(check.CheckError, "an edge IMAGE names no release"):
+            check.check_descriptor("edge", out)
+
+    def test_the_receipt_must_name_this_build(self):
+        def receipt(**changes):
+            return lambda report: report["install_receipt"].update(changes)
+        for changes, pattern in (({"release_tag": "v4.5.0-rc3"}, "the install receipt's release_tag does not match"),
+                                 ({"mac_revision": "2"}, "the install receipt's mac_revision does not match"),
+                                 ({"lane": "edge"}, "the install receipt's lane does not match"),
+                                 ({"image": "omarchy-mac-4.5.0-rc2-r1-2026.09.26-" + "0" * 12},
+                                  "the install receipt names the image omarchy-mac-4.5.0-rc2-r1-2026.09.26"),
+                                 ({"package_set_sha256": "0" * 64},
+                                  "the install receipt's package_set_sha256 does not match")):
+            with self.subTest(changes=changes):
+                self.refused(pattern, mode="provenance", report_edit=receipt(**changes))
+        self.refused("INSPECTION records no install receipt", mode="provenance",
+                     report_edit=lambda report: report.pop("install_receipt"))
+
+    def test_an_edge_build_carries_no_receipt(self):
+        out = Path(self.tmp.name) / "edge"
+        out.mkdir()
+        build(out, packages=CHANNEL_PACKAGES, candidates=CHANNEL_PACKAGES[:2], pin="", sources=(("omarchy-mac", "b" * 40),),
+              recovery_app=self.recovery, inputs=dict(CHANNEL_INPUTS, recovery_app_manifest_sha256=self.inputs[
+                  "recovery_app_manifest_sha256"]),
+              report_edit=lambda report: report.update(install_receipt={"lane": "edge"}))
+        with self.assertRaisesRegex(check.CheckError, "an edge image carries no install receipt"):
+            check.check_provenance("edge", out)
+
+    def test_the_release_name_pattern(self):
+        for name, matches in (("omarchy-mac-4.5.0-rc2-r1-2026.10.28-71656b684cbe", True),
+                              ("omarchy-mac-4.5.0-r3-2026.10.28-71656b684cbe", True),
+                              ("omarchy-mac-4.5.0-rc2-r0-2026.10.28-71656b684cbe", False),
+                              ("omarchy-mac-v4.5.0-rc2-r1-2026.10.28-71656b684cbe", False),
+                              ("omarchy-mac-4.5.0-rc2-r1-2026.10.28-71656b684cbe-0123456789ab", False),
+                              ("omarchy-mac-edge-2026.10.28-71656b684cbe-0123456789ab", False)):
+            with self.subTest(name):
+                self.assertEqual(check.RELEASE_IMAGE_NAME.fullmatch(name) is not None, matches)
 
 
 class BuildDirectoryTest(unittest.TestCase):

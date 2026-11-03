@@ -12,10 +12,20 @@ candidate-trust/policy.json and the key file it pins by sha256 and fingerprint;
 the candidate test key is never accepted here, and the Omarchy key is never
 accepted for a candidate set.
 
+A lane (edge, rc or stable) is the channel an image is built from. The
+policy's channel section names one entry per enabled lane, and each entry maps
+the lane's runtime roles to the packages that fill them. Edge is the default
+and takes the -dev runtime; rc takes the clean omarchy and omarchy-settings of
+its release. Any other lane is refused by name. A lane's inputs follow the x86
+install contract: OMARCHY_MIRROR (the lane's channel on the Omarchy server),
+OMARCHY_RUNTIME_PACKAGE and OMARCHY_SETTINGS_PACKAGE (what fills omarchy and
+omarchy-settings) and OMARCHY_IMAGE_REF: edge itself, or the release tag
+(omacom/omarchy's, v4.5.0-rc2) an rc build is for. That runtime's version must
+be the tag's (omarchy 4.5.0rc2 for v4.5.0-rc2).
+
 The channel's runtime may be named apart from its role: edge serves the
 desktop as omarchy-dev and omarchy-settings-dev, which provide (and conflict
-with) omarchy and omarchy-settings. The policy maps each runtime role to the
-package that fills it, and that package must provide the role.
+with) omarchy and omarchy-settings. The fill package must provide its role.
 
 The frozen set has candidate_set.py's layout (import.json beside the archives
 and their signatures, read-only), so the builder installs and inspects it the
@@ -25,9 +35,10 @@ manifest and its digest. A runtime package records its source commit when it
 ships a source revision file; the -dev runtime ships none, and is identified
 by its version and archive digest.
 
+  channel_set.py lane --lane LANE [--release-tag TAG]
   channel_set.py files --db FILE --lane LANE
-  channel_set.py import --db FILE --db-sha256 HEX --lane LANE --packages DIR --output DIR
-  channel_set.py describe --db FILE --lane LANE --packages DIR
+  channel_set.py import --db FILE --db-sha256 HEX --lane LANE [--release-tag TAG] --packages DIR --output DIR
+  channel_set.py describe --db FILE --lane LANE [--release-tag TAG] --packages DIR
   channel_set.py verify-installed --db FILE --db-sha256 HEX --records FILE --cache DIR
 """
 import argparse
@@ -44,7 +55,13 @@ HERE = Path(__file__).resolve().parent
 TRUST = HERE / 'candidate-trust'
 HEX40 = re.compile(r'[0-9A-F]{40}')
 HEX64 = re.compile(r'[0-9a-f]{64}')
-LANE = re.compile(r'edge|rc|stable')
+LANES = ('edge', 'rc', 'stable')
+DEFAULT_LANE = 'edge'
+NUMBER = r'(0|[1-9][0-9]{0,3})'
+RELEASE_TAGS = {
+    'rc': re.compile(rf'v{NUMBER}\.{NUMBER}\.{NUMBER}-rc([1-9][0-9]{{0,3}})'),
+    'stable': re.compile(rf'v{NUMBER}\.{NUMBER}\.{NUMBER}'),
+}
 # What a pacman version and name look like in a repository database.
 NAME = re.compile(r'[A-Za-z0-9@._+-]+')
 VERSION = re.compile(r'([0-9]+:)?[A-Za-z0-9._+]+-[0-9]+(\.[0-9]+)?')
@@ -62,8 +79,9 @@ require = candidate_set.require
 digest = candidate_set.digest
 
 
-def load_policy(trust=TRUST):
-    """The candidate policy and its channel section, with the channel key checked against its pins."""
+def load_policy(trust=TRUST, lane=DEFAULT_LANE):
+    """The candidate policy and its channel section for LANE (the trust root, the lane's name and the
+    runtime packages its policy entry maps), with the channel key checked against its pins."""
     policy = candidate_set.load_policy(trust)
     channel = policy.get('channel')
     require(isinstance(channel, dict), 'the trust policy names no channel trust root')
@@ -74,12 +92,43 @@ def load_policy(trust=TRUST):
         require(HEX40.fullmatch(channel.get(field, '')) is not None, 'invalid channel trust anchor fingerprint')
     require(channel['primary_fingerprint'] != policy['primary_fingerprint'].upper(),
             'the channel trust root is the candidate test key')
-    roles = channel.get('runtime_packages')
-    require(isinstance(roles, dict) and set(roles) == set(policy['runtime_packages'])
-            and all(isinstance(n, str) and NAME.fullmatch(n) for n in roles.values())
-            and len(set(roles.values())) == len(roles), 'invalid channel runtime packages')
-    require(isinstance(channel.get('lanes'), list) and channel['lanes'], 'the trust policy names no channel lane')
-    return policy, channel
+    lanes = channel.get('lanes')
+    require(isinstance(lanes, dict) and lanes, 'the trust policy names no channel lane')
+    for name, entry in lanes.items():
+        require(name in LANES, f'the trust policy names an unknown lane {name}')
+        require(isinstance(entry, dict) and set(entry) == {'runtime_packages'}, f'invalid {name} lane')
+        roles = entry['runtime_packages']
+        require(isinstance(roles, dict) and set(roles) == set(policy['runtime_packages'])
+                and all(isinstance(n, str) and NAME.fullmatch(n) for n in roles.values())
+                and len(set(roles.values())) == len(roles), f'invalid {name} lane runtime packages')
+    require(lane in LANES, f'unknown lane {lane}: a lane is edge, rc or stable')
+    require(lane in lanes, f'lane {lane} is not enabled')
+    root = {key: value for key, value in channel.items() if key != 'lanes'}
+    return policy, dict(root, lane=lane, runtime_packages=lanes[lane]['runtime_packages'])
+
+
+def release_version(lane, tag):
+    """The runtime pkgver LANE's release TAG ships (4.5.0rc2 for v4.5.0-rc2); edge has no release."""
+    if lane == 'edge':
+        require(tag is None, 'the edge lane takes no release tag')
+        return None
+    require(tag is not None, f'the {lane} lane needs a release tag')
+    match = RELEASE_TAGS[lane].fullmatch(tag)
+    require(match is not None, f"{tag} is not {'an' if lane == 'rc' else 'a'} {lane} release tag")
+    version = '.'.join(match.groups()[:3])
+    return f'{version}rc{match.group(4)}' if lane == 'rc' else version
+
+
+def lane_inputs(lane, release_tag=None, trust=TRUST):
+    """The install-contract inputs LANE bakes into an image built for RELEASE_TAG."""
+    _, channel = load_policy(trust, lane)
+    release_version(lane, release_tag)
+    return {
+        'OMARCHY_MIRROR': lane,
+        'OMARCHY_RUNTIME_PACKAGE': channel['runtime_packages']['omarchy'],
+        'OMARCHY_SETTINGS_PACKAGE': channel['runtime_packages']['omarchy-settings'],
+        'OMARCHY_IMAGE_REF': release_tag or lane,
+    }
 
 
 def desc_fields(text):
@@ -185,24 +234,27 @@ def verify_archive(home, path, entry, channel):
 
 
 def files(database, lane, trust=TRUST):
-    policy, channel = load_policy(trust)
-    require(LANE.fullmatch(lane) is not None and lane in channel['lanes'], f'channel mode does not build {lane}')
+    policy, channel = load_policy(trust, lane)
     return [e['FILENAME'][0] for _, _, e in resolve(read_database(database), policy, channel)]
 
 
-def snapshot(database, database_sha256, lane, packages, destination, trust=TRUST):
+def snapshot(database, database_sha256, lane, packages, destination, trust=TRUST, release_tag=None):
     """Verifies the set the pinned DATABASE names from the archives in PACKAGES and freezes it in DESTINATION."""
     require(HEX64.fullmatch(database_sha256) is not None, 'invalid database hash')
-    require(LANE.fullmatch(lane) is not None, 'invalid channel')
     require(packages.is_dir() and not packages.is_symlink(), 'unsafe package directory')
-    policy, channel = load_policy(trust)
-    require(lane in channel['lanes'], f'channel mode does not build {lane}')
+    policy, channel = load_policy(trust, lane)
+    release = release_version(lane, release_tag)
     destination.mkdir(mode=0o700)  # Exclusive: a failed import is never reused.
     candidate_set.copy_file(database.parent, database.name, destination)
     frozen = destination / database.name
     require(digest(frozen) == database_sha256, 'the channel database changed since it was pinned')
     chosen = resolve(read_database(frozen), policy, channel)
     frozen.unlink()
+    for role, _, entry in chosen:
+        version = entry['VERSION'][0]
+        require(release is None or role not in ('omarchy', 'omarchy-settings')
+                or re.sub(r'^[0-9]+:', '', version).rsplit('-', 1)[0] == release,
+                f"{entry['NAME'][0]} {version} is not the release {release_tag}")
     record = manifest(chosen, lane, database_sha256, channel)
     text = json.dumps(record, indent=2, sort_keys=True) + '\n'
     (destination / 'manifest.json').write_text(text)
@@ -266,10 +318,10 @@ def snapshot(database, database_sha256, lane, packages, destination, trust=TRUST
     return summary
 
 
-def describe(database, lane, packages, trust=TRUST):
+def describe(database, lane, packages, trust=TRUST, release_tag=None):
     """Verifies the set in a scratch copy and prints the values an inputs record pins."""
     with tempfile.TemporaryDirectory(prefix='channel-describe-') as scratch:
-        summary = snapshot(database, digest(database), lane, packages, Path(scratch) / 'set', trust)
+        summary = snapshot(database, digest(database), lane, packages, Path(scratch) / 'set', trust, release_tag)
         for path in (Path(scratch) / 'set').iterdir():
             path.chmod(0o644)
         (Path(scratch) / 'set').chmod(0o755)
@@ -303,14 +355,17 @@ def verify_installed(database, database_sha256, records, cache, trust=TRUST):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
+    laned = commands.add_parser('lane')
     listed = commands.add_parser('files')
     imported = commands.add_parser('import')
     described = commands.add_parser('describe')
     installed = commands.add_parser('verify-installed')
     for command in (listed, imported, described, installed):
         command.add_argument('--db', type=Path, required=True)
-    for command in (listed, imported, described):
+    for command in (laned, listed, imported, described):
         command.add_argument('--lane', required=True)
+    for command in (laned, imported, described):
+        command.add_argument('--release-tag')
     for command in (imported, described):
         command.add_argument('--packages', type=Path, required=True)
     for command in (imported, installed):
@@ -320,6 +375,9 @@ def main(argv=None):
     installed.add_argument('--cache', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.command == 'lane':
+            print(''.join(f'{key}={value}\n' for key, value in lane_inputs(args.lane, args.release_tag).items()), end='')
+            return 0
         if args.command == 'files':
             print('\n'.join(files(args.db, args.lane)))
             return 0
@@ -328,9 +386,10 @@ def main(argv=None):
             print(f'verified={count}')
             return 0
         if args.command == 'import':
-            summary = snapshot(args.db, args.db_sha256, args.lane, args.packages, args.output)
+            summary = snapshot(args.db, args.db_sha256, args.lane, args.packages, args.output,
+                               release_tag=args.release_tag)
         else:
-            summary = describe(args.db, args.lane, args.packages)
+            summary = describe(args.db, args.lane, args.packages, release_tag=args.release_tag)
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
         print(f'channel_set: {error}', file=sys.stderr)
         return 1

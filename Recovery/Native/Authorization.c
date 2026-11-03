@@ -25,7 +25,7 @@
 enum { INVALID=-1, PTY_FAILED=-2, TERMINAL_FAILED=-3, FORK_FAILED=-4,
        TIMED_OUT=-5, UNEXPECTED_CONFIRMATION=-6, REPEATED_CONFIRMATION=-7,
        REPEATED_PASSWORD=-8, REPEATED_USERNAME=-9, INPUT_FAILED=-10,
-       OUTPUT_FAILED=-11, WAIT_FAILED=-12, CHILD_SIGNAL=-13 };
+       OUTPUT_FAILED=-11, WAIT_FAILED=-12, CHILD_SIGNAL=-13, PASSWORD_REJECTED=-14 };
 
 const char *aurora_authorization_failure(int result)
 {
@@ -43,8 +43,38 @@ const char *aurora_authorization_failure(int result)
     case OUTPUT_FAILED: return "could not read command output";
     case WAIT_FAILED: return "could not collect the command result";
     case CHILD_SIGNAL: return "command was terminated by a signal";
+    case PASSWORD_REJECTED: return "the password was not accepted";
     default: return "command exited unsuccessfully";
     }
+}
+
+/* The command refused the password. For bputil, REPEATED_PASSWORD is usually
+ * not a second prompt: its "failed to set credential: ... Password rejected"
+ * line contains a colon and "password", so it reads as one. Keep this case if
+ * the prompt matcher is ever tightened. */
+int aurora_authorization_password_rejected(int result)
+{
+    return result==REPEATED_PASSWORD || result==PASSWORD_REJECTED;
+}
+
+/* bputil reports LocalAuthentication's refusal with these lines. They are
+ * matched in the raw output: redaction would hide them whenever the typed
+ * password is a substring of them. */
+static bool rejection_output(const char *raw, size_t length)
+{
+    static const char *const markers[]={
+        "password rejected",
+        "failed to create acm context with provided username and password",
+    };
+    for(size_t m=0;m<sizeof(markers)/sizeof(*markers);m++) {
+        size_t size=strlen(markers[m]);
+        for(size_t pos=0;pos+size<=length;pos++) {
+            size_t i=0;
+            while(i<size && tolower((unsigned char)raw[pos+i])==markers[m][i])i++;
+            if(i==size)return true;
+        }
+    }
+    return false;
 }
 
 static int send_line(int fd, const char *line)
@@ -196,6 +226,8 @@ static int authorization_run_logged(const char *executable, char *const argument
     kill(-child,SIGKILL);
     if(!exited) { kill(child,SIGKILL);while(waitpid(child,&status,0)<0 && errno==EINTR){} }
     output_snapshot(raw,raw_used,password,truncated,output,context);
+    /* Only a command that failed can have refused the password. */
+    if(result>0 && rejection_output(raw,raw_used))result=PASSWORD_REJECTED;
     volatile char *wipe=pending;for(size_t i=0;i<sizeof(pending);i++)wipe[i]=0;
     wipe=line;for(size_t i=0;i<sizeof(line);i++)wipe[i]=0;
     wipe=raw;for(size_t i=0;i<raw_used;i++)wipe[i]=0;

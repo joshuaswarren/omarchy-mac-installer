@@ -17,11 +17,13 @@ ALARM_KEY_FINGERPRINT=68B3537F39A313B3E574D06777193F152BDBE6A6
 DEFAULT_OMARCHY_SERVER='https://pkgs.omarchy.org/%s/$arch'
 DEFAULT_ASAHI_ALARM_SERVER=https://github.com/asahi-alarm/asahi-alarm/releases/download/aarch64
 DEFAULT_ALARM_SERVER='https://ca.us.mirror.archlinuxarm.org/$arch/$repo'
+# The rc lane builds from the Arch Linux ARM snapshot the rc mirror list serves.
+RC_ALARM_SERVER='https://arm-rc-mirror.omarchy.org/$arch/$repo'
 
 usage() {
   cat <<'USAGE'
 Usage: bin/mac-image-inputs resolve FILE (--candidates DIR | --channel-set) [--channel edge|rc|stable] [--recovery-app DIR]
-         [--omarchy-server URL] [--asahi-alarm-server URL] [--alarm-server URL] [--cache DIR]
+         [--release-tag TAG [--mac-revision N]] [--omarchy-server URL] [--asahi-alarm-server URL] [--alarm-server URL] [--cache DIR]
        bin/mac-image-inputs check FILE
        bin/mac-image-inputs rootfs FILE DEST [--cache DIR]
        bin/mac-image-inputs dbs FILE DEST [--cache DIR]
@@ -31,8 +33,14 @@ Usage: bin/mac-image-inputs resolve FILE (--candidates DIR | --channel-set) [--c
   resolve     verify the signed candidate set in DIR, download every package
               database and the root filesystem now, and write the record to
               FILE. --cache keeps the databases and root filesystem for builds.
-              The Omarchy server defaults to pkgs.omarchy.org's CHANNEL
-              (default edge); URLs may use pacman's $arch and $repo.
+              --channel names the lane (default edge); a lane the trust
+              policy does not enable (stable) is refused before any download.
+              rc needs --release-tag, the omacom/omarchy tag it builds
+              (v4.5.0-rc2), and takes --mac-revision (1 to 999, default 1);
+              edge takes neither. The Omarchy server defaults to the lane's
+              mirror on pkgs.omarchy.org, the Arch Linux ARM server to the rc
+              mirror for rc; an rc record names no edge server. URLs may use
+              pacman's $arch and $repo.
               --channel-set builds from the channel itself (a public image):
               the set is what the pinned omarchy.db names for the trust
               policy's channel runtime and boot packages, each archive checked
@@ -41,7 +49,7 @@ Usage: bin/mac-image-inputs resolve FILE (--candidates DIR | --channel-set) [--c
               --recovery-app DIR pins the native Recovery build inventory;
               supply that directory again to build-mac-image. A channel set
               requires it: every public image carries the native Recovery app.
-  check       FILE is a canonical record; prints it
+  check       FILE is a canonical record for an enabled lane; prints it
   rootfs      put the record's root filesystem at DEST after checking its
               signature and recorded sha256
   dbs         put each database the record pins in the directory DEST, as
@@ -91,6 +99,7 @@ record_body() {
   fi
   [[ -z ${recovery_app_manifest:-} ]] || printf 'recovery_app_manifest_sha256=%s\n' "$recovery_app_manifest"
   printf 'omarchy_channel=%s\nomarchy_server=%s\nomarchy_db_sha256=%s\n' "$omarchy_channel" "$omarchy_server" "$omarchy_db"
+  [[ -z ${release_tag:-} ]] || printf 'release_tag=%s\nmac_revision=%s\n' "$release_tag" "$mac_revision"
   printf 'asahi_alarm_server=%s\nasahi_alarm_db_sha256=%s\n' "$asahi_alarm_server" "$asahi_alarm_db"
   printf 'alarm_server=%s\n' "$alarm_server"
   for repository in "${ALARM_REPOSITORIES[@]}"; do
@@ -100,6 +109,26 @@ record_body() {
 }
 
 declare -A alarm_db=()
+
+# LANE's install-contract inputs for the release tag TAG, if any
+# (OMARCHY_MIRROR=... lines), or the reason the trust policy refuses them.
+lane_inputs() {
+  python3 "$ROOT/builder/channel_set.py" lane --lane "$1" ${2:+--release-tag "$2"}
+}
+
+# Whether the server URL is edge's: its packages or its Arch Linux ARM mirror.
+from_edge() {
+  [[ $1 == */edge/* || $1 == https://arm-mirror.omarchy.org/* ]]
+}
+
+# An rc image's servers are its lane's: nothing it installs or names comes from edge.
+check_release_servers() {
+  local server
+  [[ $omarchy_channel != edge ]] || return 0
+  for server in "$omarchy_server" "$asahi_alarm_server" "$alarm_server"; do
+    ! from_edge "$server" || fail "an $omarchy_channel image takes nothing from edge: $server"
+  done
+}
 
 valid_server() {
   [[ $1 =~ ^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~%/\$-]*)?$ && $1 != *..* && $1 != */ ]]
@@ -131,6 +160,8 @@ load_record() {
       omarchy_channel) omarchy_channel=$value ;;
       omarchy_server) omarchy_server=$value ;;
       omarchy_db_sha256) omarchy_db=$value ;;
+      release_tag) release_tag=$value ;;
+      mac_revision) mac_revision=$value ;;
       asahi_alarm_server) asahi_alarm_server=$value ;;
       asahi_alarm_db_sha256) asahi_alarm_db=$value ;;
       alarm_server) alarm_server=$value ;;
@@ -145,6 +176,9 @@ load_record() {
   [[ ${resolved_at:-} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
     ${omarchy_channel:-} =~ ^(edge|rc|stable)$ && ${omarchy_db:-} =~ $hex ]] || fail "$file is not an inputs record"
   [[ -z ${recovery_app_manifest:-} || $recovery_app_manifest =~ $hex ]] || fail "invalid Recovery app digest"
+  lane_inputs "$omarchy_channel" "${release_tag:-}" >/dev/null || exit 1
+  [[ ( -z ${release_tag:-} && -z ${seen[mac_revision]:-} ) || ${mac_revision:-} =~ ^[1-9][0-9]{0,2}$ ]] ||
+    fail "$file is not an inputs record"
   # Either a candidate set or a channel set, never parts of both. A channel set
   # is named for its channel and the database it was resolved from.
   if [[ -n ${channel_set:-} ]]; then
@@ -164,6 +198,7 @@ load_record() {
   for value in "${asahi_alarm_db:-}" "${alarm_rootfs:-}"; do
     [[ $value =~ $hex ]] || fail "$file is not an inputs record"
   done
+  check_release_servers
   for key in "${ALARM_REPOSITORIES[@]}"; do
     [[ ${alarm_db[$key]:-} =~ $hex ]] || fail "$file is not an inputs record"
   done
@@ -255,7 +290,8 @@ resolve() {
     mkdir "$work/packages"
     fetch_channel_packages "$work/db/omarchy.db" "$work/packages"
     described=$(python3 "$ROOT/builder/channel_set.py" describe --db "$work/db/omarchy.db" --lane "$omarchy_channel" \
-      --packages "$work/packages") || fail "the channel set in omarchy.db does not verify"
+      ${release_tag:+--release-tag "$release_tag"} --packages "$work/packages") ||
+      fail "the channel set in omarchy.db does not verify"
     channel_set=$(sed -n 's/^set=//p' <<<"$described")
     channel_signer=$(sed -n 's/^signer=//p' <<<"$described")
     channel_manifest=$(sed -n 's/^manifest_sha256=//p' <<<"$described")
@@ -297,11 +333,11 @@ esac
 
 positionals=()
 cache="" candidates="" channel_mode="" channel=edge omarchy_server="" asahi_alarm_server=$DEFAULT_ASAHI_ALARM_SERVER
-alarm_server=$DEFAULT_ALARM_SERVER
+alarm_server="" release_tag="" mac_revision=""
 recovery_app=""
 while (($#)); do
   case $1 in
-    --cache|--candidates|--channel|--recovery-app|--omarchy-server|--asahi-alarm-server|--alarm-server)
+    --cache|--candidates|--channel|--recovery-app|--omarchy-server|--asahi-alarm-server|--alarm-server|--release-tag|--mac-revision)
       (($# > 1)) && [[ -n $2 ]] || usage_error "$1 requires a value"
       [[ $mode == resolve || ( $1 == --cache && ( $mode == rootfs || $mode == dbs || $mode == packages ) ) ]] ||
         usage_error "$1 does not apply to $mode"
@@ -314,6 +350,8 @@ while (($#)); do
           channel=$2
           ;;
         --omarchy-server) omarchy_server=$2 ;;
+        --release-tag) release_tag=$2 ;;
+        --mac-revision) mac_revision=$2 ;;
         --asahi-alarm-server) asahi_alarm_server=$2 ;;
         --alarm-server) alarm_server=$2 ;;
       esac
@@ -338,6 +376,10 @@ trap 'rm -rf "$work"' EXIT
 
 case $mode in
   resolve)
+    contract=$(lane_inputs "$channel" "$release_tag") || exit 1
+    [[ -n $release_tag || -z $mac_revision ]] || usage_error "--mac-revision needs --release-tag"
+    [[ -z $release_tag ]] || mac_revision=${mac_revision:-1}
+    [[ -z $mac_revision || $mac_revision =~ ^[1-9][0-9]{0,2}$ ]] || usage_error "the Mac revision must be 1 to 999"
     if [[ -n $channel_mode ]]; then
       [[ -z $candidates ]] || usage_error "--candidates and --channel-set exclude each other"
       [[ -n $recovery_app ]] || usage_error "--channel-set requires --recovery-app: every public image carries the native Recovery app"
@@ -346,10 +388,18 @@ case $mode in
     fi
     omarchy_channel=$channel
     # shellcheck disable=SC2059
-    [[ -n $omarchy_server ]] || printf -v omarchy_server "$DEFAULT_OMARCHY_SERVER" "$channel"
+    [[ -n $omarchy_server ]] || printf -v omarchy_server "$DEFAULT_OMARCHY_SERVER" "$(sed -n 's/^OMARCHY_MIRROR=//p' <<<"$contract")"
+    if [[ -z $alarm_server && $channel == rc ]]; then
+      alarm_server=$RC_ALARM_SERVER
+    fi
+    alarm_server=${alarm_server:-$DEFAULT_ALARM_SERVER}
     for value in "$omarchy_server" "$asahi_alarm_server" "$alarm_server"; do
       valid_server "$value" || usage_error "not an https server URL: $value"
     done
+    check_release_servers
+    # A release lane's image is its channel's set; inspection reads that set's fields.
+    [[ -n $channel_mode || $channel == edge ]] ||
+      usage_error "the $channel lane builds from its channel's set: use --channel-set, not --candidates"
     resolve "${positionals[0]}"
     load_record "${positionals[0]}"
     cat "${positionals[0]}"

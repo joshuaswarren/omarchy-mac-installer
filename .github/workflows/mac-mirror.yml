@@ -1,0 +1,71 @@
+name: Mac release mirror
+
+# Copies a published release artifact from this repository's GitHub releases
+# to R2 (scripts/mirror_release_artifact.py), written once and never
+# replaced, then reads it back through mac.omarchy.org:
+#
+#   engine  the engine Engine/source-lock.json pins, from its published
+#           engine-<version> release, to v1/engine/<version>/<file>
+#   app     the notarized installer dmg and its .sha256 from the published
+#           v<version> release, to v1/installer/<version>/
+#
+# Run it after the release is published on GitHub and before a catalog points
+# at the R2 copy. The GitHub release stays: catalogs already signed pin it.
+# Dispatched by hand from main only; the publish environment, which holds the
+# R2 key, deploys from main only too. Never for pull requests.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact:
+        description: What to mirror
+        type: choice
+        options: [engine, app]
+        default: engine
+      version:
+        description: The app version, X.Y.Z (app only)
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  mirror:
+    name: Mirror the ${{ inputs.artifact }}
+    if: github.repository == 'omacom/omarchy-mac-installer' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: publish
+    permissions:
+      contents: read # read the release
+    concurrency:
+      group: mac-mirror-${{ inputs.artifact }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ inputs.artifact }}
+          VERSION: ${{ inputs.version }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'omarchy-mac' }}
+        run: |
+          set -euo pipefail
+          case $ARTIFACT in
+            engine) [[ -z $VERSION ]] || { echo "::error::the engine is the lock's; version is for app only"; exit 1; }
+                    args=(engine) ;;
+            app) args=(app "$VERSION") ;;
+          esac
+          python3 -I scripts/mirror_release_artifact.py "${args[@]}" | tee "$RUNNER_TEMP/mirror.log"
+          {
+            echo "### Mirrored the $ARTIFACT"
+            echo '```'
+            cat "$RUNNER_TEMP/mirror.log"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

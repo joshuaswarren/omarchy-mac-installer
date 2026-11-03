@@ -9,15 +9,20 @@
     public let target: RecoveryAccountTarget?
     public let record: RecoveryAccountRecord?
     public let message: String?
+    /// Recovery finished the installation and only the optional recovery
+    /// account was skipped, so the handoff offers that account alone.
+    public let accountDeferred: Bool?
 
     public init(
       ticket: String? = nil, target: RecoveryAccountTarget? = nil,
-      record: RecoveryAccountRecord? = nil, message: String? = nil
+      record: RecoveryAccountRecord? = nil, message: String? = nil,
+      accountDeferred: Bool? = nil
     ) {
       self.ticket = ticket
       self.target = target
       self.record = record
       self.message = message
+      self.accountDeferred = accountDeferred
     }
   }
 
@@ -25,6 +30,12 @@
     let binding: String
     let target: RecoveryAccountTarget
     let espUUID: String
+    var accountDeferred = false
+
+    /// The same installation, whatever its receipt said when it was read.
+    func isSameInstallation(as other: CompletedRecoveryInstallation) -> Bool {
+      binding == other.binding && target == other.target && espUUID == other.espUUID
+    }
   }
 
   /// The code identity the helper holds the native Recovery template to
@@ -435,11 +446,12 @@
               try requireLivePartitions(evidence: evidence, listing: diskList)
             } catch { continue }
             // Recovery already finished this one: it is installed, not waiting.
-            if recoveryFinished(current) { continue }
+            guard let deferred = handoffAccountDeferred(receipt: recoveryReceipt(current))
+            else { continue }
             found.append(
               CompletedRecoveryInstallation(
                 binding: file.deletingPathExtension().lastPathComponent, target: current,
-                espUUID: identity.esp))
+                espUUID: identity.esp, accountDeferred: deferred))
           }
         } catch {
           // A historical or incomplete record is not a current handoff.
@@ -467,26 +479,50 @@
         && receipt["recoveryAccountDeferred"] as? Bool != true
     }
 
-    /// Whether Recovery completed the installation on `target`. The System
-    /// volume is mounted read-only to look, if macOS has not mounted it.
-    static func recoveryFinished(_ target: RecoveryAccountTarget) -> Bool {
-      guard var info = try? AccountNativeCommand.disk(target.systemUUID) else { return false }
+    /// Recovery finished, but the person skipped the optional recovery
+    /// account. The installation is done; only the account remains on offer.
+    static func isAccountDeferredReceipt(_ data: Data, hasPendingOperation: Bool = false) -> Bool {
+      guard !hasPendingOperation,
+        let receipt = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else { return false }
+      return receipt["status"] as? String == "installed"
+        && receipt["recoveryAccountDeferred"] as? Bool == true
+    }
+
+    /// Whether an installation still has a handoff, read from Recovery's
+    /// receipt: nil when Recovery finished it, true when only the optional
+    /// recovery account was skipped, and false when Recovery has not
+    /// finished it (or its receipt is missing or unreadable).
+    static func handoffAccountDeferred(receipt: (data: Data, pending: Bool)?) -> Bool? {
+      guard let receipt else { return false }
+      if isFinishedRecoveryReceipt(receipt.data, hasPendingOperation: receipt.pending) {
+        return nil
+      }
+      return isAccountDeferredReceipt(receipt.data, hasPendingOperation: receipt.pending)
+    }
+
+    /// Recovery's receipt on `target`, and whether an operation is still
+    /// pending beside it. The System volume is mounted read-only to look, if
+    /// macOS has not mounted it.
+    static func recoveryReceipt(_ target: RecoveryAccountTarget) -> (data: Data, pending: Bool)? {
+      guard var info = try? AccountNativeCommand.disk(target.systemUUID) else { return nil }
       if (info["MountPoint"] as? String ?? "").isEmpty {
         _ = try? AccountNativeCommand.checked(
           "/usr/sbin/diskutil", ["mount", "readOnly", target.systemUUID])
-        guard let mounted = try? AccountNativeCommand.disk(target.systemUUID) else { return false }
+        guard let mounted = try? AccountNativeCommand.disk(target.systemUUID) else { return nil }
         info = mounted
       }
       guard let mount = info["MountPoint"] as? String, !mount.isEmpty,
         let receipt = try? RecoveryAccountInstaller.protectedRead(
           URL(fileURLWithPath: mount).appendingPathComponent(recoveryReceiptPath), limit: 65536)
-      else { return false }
+      else { return nil }
       let pending = URL(fileURLWithPath: mount).appendingPathComponent(
         "Aurora/Recovery/State/installation.pending.json")
-      return isFinishedRecoveryReceipt(
+      return (
         receipt,
-        hasPendingOperation: FileManager.default.fileExists(atPath: pending.path)
-          || (try? FileManager.default.destinationOfSymbolicLink(atPath: pending.path)) != nil)
+        FileManager.default.fileExists(atPath: pending.path)
+          || (try? FileManager.default.destinationOfSymbolicLink(atPath: pending.path)) != nil
+      )
     }
 
     static func requireLivePartitions(evidence: [String: Data], listing: [String: Any]) throws {

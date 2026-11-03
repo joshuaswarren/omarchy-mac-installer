@@ -115,6 +115,8 @@ class Triggers(unittest.TestCase):
         "mac-upload.yml": {"workflow_call", "workflow_dispatch"},
         "mac-catalog.yml": {"workflow_call", "workflow_dispatch"},
         "edge-dispatch.yml": {"repository_dispatch"},
+        "mac-mirror.yml": {"workflow_dispatch"},
+        "mac-pipeline-pins.yml": {"release", "workflow_dispatch"},
     }
 
     def test_no_pipeline_workflow_runs_for_pull_requests_pushes_or_other_runs(self):
@@ -147,7 +149,7 @@ class Ordering(unittest.TestCase):
         self.assertEqual(field(self.jobs["acceptance"], "needs"), "build")
         self.assertEqual(field(self.jobs["upload"], "needs"), "[build, acceptance, catalog-inputs]")
         self.assertEqual(field(self.jobs["catalog-inputs"], "needs"), "acceptance")
-        self.assertEqual(field(self.jobs["catalog"], "needs"), "[build, acceptance, upload, catalog-inputs]")
+        self.assertEqual(field(self.jobs["catalog"], "needs"), "[plan, build, acceptance, upload, catalog-inputs]")
         for job, workflow in (("build", "mac-image"), ("acceptance", "mac-acceptance"), ("upload", "mac-upload"),
                               ("catalog", "mac-catalog")):
             self.assertEqual(field(self.jobs[job], "uses"), f"./.github/workflows/{workflow}.yml")
@@ -178,7 +180,8 @@ class Ordering(unittest.TestCase):
             self.assertIn(line, upload_job)
         for line in ("image: ${{ needs.build.outputs.name }}", "payload: ${{ needs.upload.outputs.payload }}",
                      "installer-data: ${{ needs.upload.outputs.installer-data }}",
-                     "evidence: ${{ needs.upload.outputs.evidence }}", "channel: edge", "dry-run: false"):
+                     "evidence: ${{ needs.upload.outputs.evidence }}", "channel: ${{ needs.plan.outputs.lane }}",
+                     "dry-run: false"):
             self.assertIn(line, catalog_job)
 
     def test_called_workflows_declare_what_the_pipeline_reads(self):
@@ -189,6 +192,68 @@ class Ordering(unittest.TestCase):
                 with self.subTest(f"{workflow} {output}"):
                     self.assertRegex(text(WORKFLOWS / workflow),
                                      rf"\n      {re.escape(output)}:\n        description: [^\n]*\n        value: \$\{{\{{ jobs\.")
+
+
+class Lanes(unittest.TestCase):
+    """A run without a release tag is an edge run, as the edge trigger starts it; a release tag makes
+    an rc run, which builds the rc image for that tag and publishes to catalog-rc after acceptance."""
+
+    def plan(self, tag: str = "", revision: str = "", ref: str = "refs/heads/main") -> tuple[int, str]:
+        directory = Path(tempfile.mkdtemp(prefix="omarchy-pipeline-plan-"))
+        self.addCleanup(shutil.rmtree, directory)
+        output = directory / "output"
+        output.write_text("")
+        env = {"PATH": os.environ["PATH"], "EVENT": "workflow_dispatch", "GITHUB_REF": ref, "DRY_RUN": "true",
+               "RELEASE_TAG": tag, "MAC_REVISION": revision, "GITHUB_OUTPUT": str(output)}
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-c", step_script(PIPELINE, "Refuse a run off main")],
+                                cwd=ROOT, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.output = result.stdout + result.stderr
+        return result.returncode, output.read_text()
+
+    def test_a_run_without_a_tag_is_edge(self):
+        self.assertEqual(self.plan(), (0, "lane=edge\nrelease-tag=\nmac-revision=\n"), self.output)
+
+    def test_a_release_tag_makes_an_rc_run_at_revision_one_by_default(self):
+        self.assertEqual(self.plan("v4.5.0-rc2"), (0, "lane=rc\nrelease-tag=v4.5.0-rc2\nmac-revision=1\n"), self.output)
+        self.assertEqual(self.plan("v4.5.0-rc2", "3")[1], "lane=rc\nrelease-tag=v4.5.0-rc2\nmac-revision=3\n")
+
+    def test_a_malformed_tag_or_revision_never_reaches_the_build(self):
+        for tag, revision in (("v4.5.0", ""), ("4.5.0-rc2", ""), ("v4.5.0-rc2;id", ""), ("v4.5.0-rc0", ""),
+                              ("v4.5.0-rc2", "0"), ("v4.5.0-rc2", "1a"), ("", "2")):
+            with self.subTest(tag=tag, revision=revision):
+                self.assertEqual(self.plan(tag, revision), (1, ""))
+        self.assertEqual(self.plan("v4.5.0-rc2", ref="refs/heads/feature"), (1, ""))
+
+    def test_the_build_takes_the_lane_and_the_catalog_its_channel(self):
+        pipeline = jobs(PIPELINE)
+        for line in ("lane: ${{ needs.plan.outputs.lane }}", "release-tag: ${{ needs.plan.outputs.release-tag }}",
+                     "mac-revision: ${{ needs.plan.outputs.mac-revision }}"):
+            self.assertIn(line, pipeline["build"])
+        self.assertIn("channel: ${{ needs.plan.outputs.lane }}", pipeline["catalog"])
+        # catalog-rc, like catalog-edge, waits for passing VM acceptance and a real run.
+        self.assertEqual(field(pipeline["catalog"], "if"), "needs.acceptance.outputs.result == 'pass' && !inputs.dry-run")
+
+    def test_the_image_build_defaults_to_edge_and_reads_its_inputs_from_the_environment(self):
+        image = text(IMAGE)
+        self.assertEqual(image.count("        default: edge\n"), 2, "both triggers default to the edge lane")
+        self.assertIn("group: mac-image-${{ inputs.lane || 'edge' }}", image)
+        self.assertIn("name: Build the ${{ inputs.lane || 'edge' }} image", image)
+        for name, value in (("LANE", "${{ inputs.lane || 'edge' }}"), ("RELEASE_TAG", "${{ inputs.release-tag }}"),
+                            ("MAC_REVISION", "${{ inputs.mac-revision }}")):
+            self.assertIn(f"      {name}: {value}\n", image)
+        build = jobs(IMAGE)["build"]
+        run_blocks = re.findall(r"run: \|\n((?:          .*\n|\n)+)", text(IMAGE))
+        self.assertTrue(run_blocks)
+        for block in run_blocks:
+            self.assertNotIn("${{ inputs.", block, "inputs reach scripts only through the environment")
+        self.assertIn('--channel "$LANE"', build)
+        self.assertIn('${RELEASE_TAG:+--release-tag "$RELEASE_TAG"}', build)
+
+    def test_the_signer_takes_evidence_for_edge_and_rc_alone(self):
+        sign = text(WORKFLOWS / "mac-catalog-sign.yml")
+        self.assertIn("evidence:edge | evidence:rc)", sign)
+        self.assertNotIn("evidence:stable", sign)
+        self.assertIn("options: [edge, rc]", text(WORKFLOWS / "mac-catalog.yml"))
 
 
 class Secrets(unittest.TestCase):
@@ -204,35 +269,71 @@ class Secrets(unittest.TestCase):
 
     R2_SECRETS = ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
 
-    def test_the_pipeline_passes_the_catalog_key_to_the_catalog_and_r2_to_the_upload_only(self):
+    def test_the_pipeline_passes_the_catalog_key_to_the_catalog_and_r2_to_upload_and_catalog(self):
         pipeline_jobs = jobs(PIPELINE)
+        r2 = [f"{name}: ${{{{ secrets.{name} }}}}" for name in self.R2_SECRETS]
         for job, body in pipeline_jobs.items():
             with self.subTest(job):
                 expected = {
-                    "catalog": ["CATALOG_SIGNING_KEY: ${{ secrets.CATALOG_SIGNING_KEY }}"],
-                    "upload": [f"{name}: ${{{{ secrets.{name} }}}}" for name in self.R2_SECRETS],
+                    "catalog": ["CATALOG_SIGNING_KEY: ${{ secrets.CATALOG_SIGNING_KEY }}", *r2],
+                    "upload": r2,
                 }.get(job, [])
                 self.assertEqual([line.strip() for line in body.splitlines() if "secrets." in line], expected)
                 self.assertNotIn("environment:", body)
 
-    def test_r2_credentials_are_read_only_by_the_upload_job_in_publish(self):
+    # Who reads the R2 key: the image upload and the catalog publish, each in
+    # publish and only when its host is r2. Every other job only passes it on.
+    R2_READERS = {
+        "mac-upload.yml upload": "inputs.host == 'r2' && secrets.R2_",
+        "mac-catalog-sign.yml publish": "contains(inputs.catalog-hosts, 'r2') && secrets.R2_",
+        "mac-mirror.yml mirror": "${{ secrets.R2_",
+    }
+    R2_PASSERS = ("./.github/workflows/mac-upload.yml", "./.github/workflows/mac-catalog.yml")
+
+    def test_r2_credentials_are_read_only_by_the_upload_and_catalog_publish_in_publish(self):
         readers = []
         for workflow in sorted(WORKFLOWS.glob("*.yml")):
             for job, body in jobs(workflow).items():
                 if not any(f"secrets.{name}" in body for name in self.R2_SECRETS):
                     continue
-                with self.subTest(f"{workflow.name} {job}"):
+                name = f"{workflow.name} {job}"
+                with self.subTest(name):
                     if field(body, "uses").startswith("./.github/workflows/"):
-                        self.assertEqual(field(body, "uses"), "./.github/workflows/mac-upload.yml")
-                        for name in self.R2_SECRETS:
-                            self.assertRegex(body, rf"(?m)^      {name}: \$\{{\{{ secrets\.{name} \}}\}}$")
+                        self.assertIn(field(body, "uses"), self.R2_PASSERS)
+                        for secret in self.R2_SECRETS:
+                            self.assertRegex(body, rf"(?m)^      {secret}: \$\{{\{{ secrets\.{secret} \}}\}}$")
                     else:
-                        readers.append(f"{workflow.name} {job}")
-                        self.assertIn("'publish'", field(body, "environment"))
+                        readers.append(name)
+                        self.assertIn(field(body, "environment").strip("'"),
+                                      ("publish", "${{ (!inputs.dry-run || inputs.host == 'r2') && 'publish' || '' }}",
+                                       "${{ contains(inputs.catalog-hosts, 'r2') && 'publish' || '' }}"))
                         for line in body.splitlines():
                             if "secrets.R2_" in line:
-                                self.assertIn("inputs.host == 'r2' && secrets.R2_", line)
-        self.assertEqual(readers, ["mac-upload.yml upload"])
+                                self.assertIn(self.R2_READERS.get(name, "unexpected reader"), line)
+        self.assertEqual(sorted(readers), sorted(self.R2_READERS))
+
+    def test_the_mirror_runs_by_hand_from_main_only(self):
+        mirror = text(WORKFLOWS / "mac-mirror.yml")
+        self.assertEqual(triggers(WORKFLOWS / "mac-mirror.yml"), {"workflow_dispatch"})
+        job = jobs(WORKFLOWS / "mac-mirror.yml")["mirror"]
+        self.assertEqual(field(job, "if"), "github.repository == 'omacom/omarchy-mac-installer' && github.ref == 'refs/heads/main'")
+        self.assertEqual(field(job, "environment"), "publish")
+        self.assertEqual(field(job, "runs-on"), "ubuntu-24.04")
+        self.assertIn("\npermissions: {}\n", mirror)
+        self.assertRegex(job, r"\n    permissions:\n      contents: read # [^\n]*\n    concurrency:")
+        self.assertNotIn("pull_request", mirror)
+
+    def test_catalogs_stay_on_github_until_r2_is_chosen(self):
+        for workflow in ("mac-catalog.yml", "mac-catalog-sign.yml"):
+            with self.subTest(workflow):
+                self.assertRegex(text(WORKFLOWS / workflow),
+                                 r"catalog-hosts:\n        description: [^\n]*\n        type: string\n        default: github-release")
+        self.assertNotIn("catalog-hosts", text(WORKFLOWS / "mac-promote.yml"))
+        self.assertNotIn("catalog-hosts", text(PIPELINE))
+        catalog = text(WORKFLOWS / "mac-catalog.yml")
+        self.assertRegex(catalog, r"catalog-hosts:\n        description: [^\n]*\n        type: choice\n"
+                                  r"        options: \[github-release, 'r2,github-release'\]\n        default: github-release")
+        self.assertIn("catalog-hosts: ${{ inputs.catalog-hosts }}", jobs(WORKFLOWS / "mac-catalog.yml")["release"])
 
     def test_the_key_is_read_only_in_the_catalog_release_environment(self):
         # Wherever the signing job lives, only a job in catalog-release reads
@@ -262,7 +363,7 @@ class Secrets(unittest.TestCase):
 
 class Hardening(unittest.TestCase):
     PIPELINE_FILES = ("mac-release-pipeline.yml", "mac-acceptance.yml", "mac-image.yml", "recovery-app.yml",
-                      "mac-upload.yml", "mac-catalog.yml", "edge-dispatch.yml")
+                      "mac-upload.yml", "mac-catalog.yml", "edge-dispatch.yml", "mac-mirror.yml")
 
     def test_every_action_is_pinned_to_a_commit(self):
         for workflow in sorted(WORKFLOWS.glob("*.yml")):
@@ -748,8 +849,10 @@ class NativeRecovery(unittest.TestCase):
         (download / "source.txt").write_text(f"source_commit={'a' * 40}\nrecovery_app_manifest_sha256={digest}\n")
         return digest
 
-    def run_step(self, name: str, digest: str, cwd: Path = ROOT, path: str = "") -> subprocess.CompletedProcess:
-        env = {"PATH": path + os.environ["PATH"], "WORK": str(self.work), "RECOVERY_SHA256": digest}
+    def run_step(self, name: str, digest: str, cwd: Path = ROOT, path: str = "",
+                 lane: tuple[str, str, str] = ("edge", "", "")) -> subprocess.CompletedProcess:
+        env = {"PATH": path + os.environ["PATH"], "WORK": str(self.work), "RECOVERY_SHA256": digest,
+               "LANE": lane[0], "RELEASE_TAG": lane[1], "MAC_REVISION": lane[2]}
         return subprocess.run(["bash", "--noprofile", "--norc", "-e", "-c", step_script(IMAGE, name)], cwd=cwd,
                               env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
 
@@ -779,7 +882,7 @@ class NativeRecovery(unittest.TestCase):
     def test_the_resolver_must_pin_the_app_the_build_then_takes(self):
         digest = "a" * 64
         checkout = self.stub_tools(digest)
-        for step in ("Resolve the edge inputs", "Build the image"):
+        for step in ("Resolve the lane's inputs", "Build the image"):
             result = self.run_step(step, digest, cwd=checkout)
             self.assertEqual(result.returncode, 0, result.stderr)
         calls = (Path(self.tmp.name) / "calls").read_text().splitlines()
@@ -789,9 +892,21 @@ class NativeRecovery(unittest.TestCase):
         self.assertIn(recovery, calls[0])
         self.assertTrue(calls[1].startswith(f"build-mac-image --inputs {self.work}/inputs {recovery} "), calls[1])
 
+    def test_an_rc_build_resolves_its_tag_and_revision(self):
+        digest = "a" * 64
+        checkout = self.stub_tools(digest)
+        result = self.run_step("Resolve the lane's inputs", digest, cwd=checkout, lane=("rc", "v4.5.0-rc2", "2"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        call = (Path(self.tmp.name) / "calls").read_text()
+        self.assertTrue(call.startswith(f"mac-image-inputs resolve {self.work}/inputs --channel-set --channel rc "
+                                        "--release-tag v4.5.0-rc2 --mac-revision 2 "), call)
+        result = self.run_step("Resolve the lane's inputs", digest, cwd=checkout, lane=("stable", "v4.5.0", ""))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the lane must be edge or rc", result.stdout + result.stderr)
+
     def test_inputs_pinning_another_app_stop_the_build(self):
         checkout = self.stub_tools("b" * 64)
-        result = self.run_step("Resolve the edge inputs", "a" * 64, cwd=checkout)
+        result = self.run_step("Resolve the lane's inputs", "a" * 64, cwd=checkout)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("does not pin the Recovery app built for this run", result.stdout + result.stderr)
 
@@ -803,7 +918,8 @@ class NativeRecovery(unittest.TestCase):
 
 class Plan(unittest.TestCase):
     def plan(self, dry_run: str, ref: str, event: str = "workflow_dispatch") -> int:
-        env = {"PATH": os.environ["PATH"], "DRY_RUN": dry_run, "GITHUB_REF": ref, "EVENT": event}
+        env = {"PATH": os.environ["PATH"], "DRY_RUN": dry_run, "GITHUB_REF": ref, "EVENT": event,
+               "RELEASE_TAG": "", "MAC_REVISION": "", "GITHUB_OUTPUT": os.devnull}
         return subprocess.run(["bash", "--noprofile", "--norc", "-c", step_script(PIPELINE, "Refuse a run off main")], env=env,
                               stdin=subprocess.DEVNULL, capture_output=True).returncode
 
@@ -846,8 +962,11 @@ class Config(unittest.TestCase):
         self.assertEqual((lock["validation_artifact"]["filename"], lock["validation_artifact"]["size_bytes"],
                           lock["validation_artifact"]["sha256"], lock["downstream_overlay"]["version"]),
                          (engine["fileName"], engine["sizeBytes"], engine["sha256"], engine["version"]))
-        self.assertEqual(engine["url"], f"https://github.com/{catalog.stopgap_repo()}/releases/download/"
-                                        f"engine-{engine['version']}/{engine['fileName']}")
+        # Served from the catalog base, where mac-mirror.yml copies the engine
+        # from its published engine-<version> release.
+        self.assertEqual(engine["url"], f"{catalog.identity()['INSTALLER_CATALOG_BASE']}/engine/"
+                                        f"{engine['version']}/{engine['fileName']}")
+        self.assertTrue(engine["url"].startswith(tuple(catalog.artifact_bases())))
         template = json.loads((SCRIPTS / "release-inputs.template.json").read_text())
         self.assertEqual(engine["downstreamRevision"], template["downstream_revision"])
 
