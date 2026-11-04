@@ -56,6 +56,12 @@ public struct RecoveryAccountRecord: Codable, Equatable, Sendable {
   }
 }
 
+/// The recovery account's password was refused.
+public struct RecoveryAccountPasswordRejected: Error, LocalizedError, Sendable {
+  public init() {}
+  public var errorDescription: String? { "Enter the recovery account’s password to resume." }
+}
+
 public struct AccountSetupFailure: Error, LocalizedError, Sendable {
   public let message: String
   public init(_ message: String) { self.message = message }
@@ -734,8 +740,10 @@ public enum RecoveryAccountInstaller {
     guard var record = try inspect(target) else {
       throw AccountSetupFailure("Create the recovery account before authorizing it.")
     }
-    guard try authenticate(ctx, record.username, password),
-      (try user(ctx, record.username))["generateduid"] as? [String] == [record.generatedUID]
+    guard try authenticate(ctx, record.username, password) else {
+      throw RecoveryAccountPasswordRejected()
+    }
+    guard (try user(ctx, record.username))["generateduid"] as? [String] == [record.generatedUID]
     else { throw AccountSetupFailure("Enter the recovery account’s password to resume.") }
     try prepareLookup(ctx)
     let candidates = try users(target)

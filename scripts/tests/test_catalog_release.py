@@ -68,6 +68,14 @@ PAYLOAD = b"".join(PAYLOAD_PARTS)
 IMAGE = f"omarchy-mac-edge-2026.10.14-0123456789ab-{sha(PAYLOAD)[:12]}"
 # An image named before image ids were added: its release and the catalog pinning it are live.
 LEGACY_IMAGE = "omarchy-mac-edge-2026.10.14-0123456789ab"
+# An rc-lane image (mac-image-check name rc): its release tag, Mac revision, date and package set id.
+RC_IMAGE = "omarchy-mac-4.5.0-rc2-r1-2026.10.28-0123456789ab"
+# The zips mac-image.yml stages: each lane's, named for the date its inputs were resolved.
+RC_ZIP = "omarchy-2026.10.28-aarch64-apple-silicon-mac-rc-os-package.zip"
+STABLE_IMAGE = "omarchy-mac-4.5.0-r1-2026.10.28-0123456789ab"
+FINAL_ON_RC_IMAGE = "omarchy-mac-4.5.0-rc-r1-2026.10.28-0123456789ab"
+STABLE_ZIP = "omarchy-2026.10.28-aarch64-apple-silicon-mac-stable-os-package.zip"
+EDGE_ZIP = "omarchy-2026.10.28-aarch64-apple-silicon-mac-edge-os-package.zip"
 ENGINE = b"engine-tarball" * 30
 METADATA = b'{"os_list": []}\n'
 ZIP = f"{IMAGE}.zip"
@@ -292,11 +300,16 @@ class CatalogReleaseTests(ReleaseTestCase):
                               "--evidence", str(self.write("e.json", evidence_document("e" * 64))))
         self.assert_refused(other, "not " + sha(PAYLOAD))
         self.assert_refused(self.run_tool("check-evidence", "--catalog", str(catalog)), "no VM evidence")
-        renamed = self.directory / "catalog-rc.json"
+        renamed = self.directory / "catalog-stable.json"
         shutil.copyfile(catalog, renamed)
         self.assert_refused(self.run_tool("check-evidence", "--catalog", str(renamed),
                                           "--evidence", str(self.write("e.json", evidence_document()))),
-                            "rc and stable come from promotion")
+                            "not built for the stable lane")
+        renamed = self.directory / "catalog-beta.json"
+        shutil.copyfile(catalog, renamed)
+        self.assert_refused(self.run_tool("check-evidence", "--catalog", str(renamed),
+                                          "--evidence", str(self.write("e.json", evidence_document()))),
+                            "channel must be one of edge, rc, stable")
 
     # ── inputs ───────────────────────────────────────────────────────────────
 
@@ -320,9 +333,9 @@ class CatalogReleaseTests(ReleaseTestCase):
         self.assert_refused(self.prepare(payload=payload), "must end with its fileName")
 
     def test_refuses_another_channel_or_image_name(self) -> None:
-        result = self.run_tool("prepare", "--channel", "stable", "--image", IMAGE, "--payload", "x",
+        result = self.run_tool("prepare", "--channel", "beta", "--image", IMAGE, "--payload", "x",
                                "--engine", "x", "--installer-data", "x", "--installer", "x", "--out", str(self.directory / "o"))
-        self.assert_refused(result, "rc and stable come from promotion")
+        self.assert_refused(result, "channel must be one of edge, rc, stable")
         with self.assertRaisesRegex(release.Refusal, "image must be"):
             release.check_image_name("omarchy-mac-edge-latest", "edge")
 
@@ -335,8 +348,148 @@ class CatalogReleaseTests(ReleaseTestCase):
                      f"{LEGACY_IMAGE}-", "omarchy-mac-edge-2026.10.14", f" {IMAGE}", 7):
             with self.subTest(name), self.assertRaisesRegex(release.Refusal, "image must be"):
                 release.check_image_name(name, "edge")
-        with self.assertRaisesRegex(release.Refusal, "not built for the rc channel"):
+        with self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
             release.check_image_name(IMAGE, "rc")
+
+    def test_rc_takes_an_rc_lane_image_named_from_its_tag(self) -> None:
+        self.assertEqual(release.check_image_name(RC_IMAGE, "rc", sha(PAYLOAD)), RC_IMAGE)
+        with self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
+            release.check_image_name(IMAGE, "rc", sha(PAYLOAD))
+        with self.assertRaisesRegex(release.Refusal, "image must be"):
+            release.check_image_name(RC_IMAGE, "edge", sha(PAYLOAD))
+        for name in ("omarchy-mac-4.5.0-r1-2026.10.28-0123456789ab", "omarchy-mac-4.5.0-rc2-r0-2026.10.28-0123456789ab",
+                     "omarchy-mac-v4.5.0-rc2-r1-2026.10.28-0123456789ab", f"{RC_IMAGE}-0123456789ab"):
+            with self.subTest(name), self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
+                release.check_image_name(name, "rc")
+
+    def stable_inputs(self, image: str = STABLE_IMAGE, recorded: str | None = STABLE_IMAGE,
+                      zip_name: str = STABLE_ZIP) -> tuple[dict, dict, dict]:
+        payload = artifact(image, zip_name, PAYLOAD)
+        metadata = artifact(image, "installer_data.json", METADATA)
+        evidence = evidence_document()
+        if recorded is not None:
+            evidence["image"] = recorded
+        return payload, metadata, evidence
+
+    def build_stable(self, payload: dict, metadata: dict, evidence: object, image: str = STABLE_IMAGE) -> dict:
+        now = datetime.datetime(2026, 10, 28, tzinfo=datetime.timezone.utc)
+        return release.build_catalog("stable", image, payload, engine_document(), metadata, evidence,
+                                     installer_document(), now)
+
+    def test_stable_takes_a_stable_lane_image_named_from_its_final_tag(self) -> None:
+        self.assertEqual(release.check_image_name(STABLE_IMAGE, "stable", sha(PAYLOAD)), STABLE_IMAGE)
+        for name in (IMAGE, RC_IMAGE, "omarchy-mac-v4.5.0-r1-2026.10.28-0123456789ab",
+                     "omarchy-mac-4.5.0-r0-2026.10.28-0123456789ab", f"{STABLE_IMAGE}-0123456789ab"):
+            with self.subTest(name), self.assertRaisesRegex(release.Refusal, "not built for the stable lane"):
+                release.check_image_name(name, "stable")
+        with self.assertRaisesRegex(release.Refusal, "not built for the rc lane"):
+            release.check_image_name(STABLE_IMAGE, "rc")
+
+    def test_a_final_tag_built_on_rc_goes_to_catalog_rc_and_never_to_stable(self) -> None:
+        self.assertEqual(release.check_image_name(FINAL_ON_RC_IMAGE, "rc", sha(PAYLOAD)), FINAL_ON_RC_IMAGE)
+        with self.assertRaisesRegex(release.Refusal, "not built for the stable lane"):
+            release.check_image_name(FINAL_ON_RC_IMAGE, "stable")
+        with self.assertRaisesRegex(release.Refusal, "never promoted"):
+            release.check_promotion_source({"models": [{"evidenceRevision": FINAL_ON_RC_IMAGE}]})
+        release.check_promotion_source({"models": [{"evidenceRevision": RC_IMAGE}, {"evidenceRevision": STABLE_IMAGE}]})
+        payload, metadata, evidence = self.stable_inputs(recorded=FINAL_ON_RC_IMAGE, zip_name=RC_ZIP)
+        with self.assertRaisesRegex(release.Refusal, "not built for the stable lane"):
+            self.build_stable(payload, metadata, evidence, image=FINAL_ON_RC_IMAGE)
+
+    def test_a_catalog_stable_entry_takes_the_stable_image_that_passed_acceptance(self) -> None:
+        catalog = self.build_stable(*self.stable_inputs())
+        self.assertEqual({model["evidenceRevision"] for model in catalog["models"]}, {STABLE_IMAGE})
+        self.assertEqual({model["payloadArtifact"]["fileName"] for model in catalog["models"]}, {STABLE_ZIP})
+
+    def test_another_lanes_payload_or_evidence_under_a_stable_name_is_refused(self) -> None:
+        with self.assertRaisesRegex(release.Refusal, f"is not {STABLE_IMAGE}'s stable zip"):
+            self.build_stable(*self.stable_inputs(zip_name=RC_ZIP))
+        with self.assertRaisesRegex(release.Refusal, f"the VM evidence is for {RC_IMAGE}, not {STABLE_IMAGE}"):
+            self.build_stable(*self.stable_inputs(recorded=RC_IMAGE))
+        with self.assertRaisesRegex(release.Refusal, "the VM evidence names no image"):
+            self.build_stable(*self.stable_inputs(recorded=None))
+        payload, metadata, evidence = self.stable_inputs()
+        with self.assertRaisesRegex(release.Refusal, f"is not in {STABLE_IMAGE}'s release"):
+            self.build_stable(artifact(RC_IMAGE, STABLE_ZIP, PAYLOAD), metadata, evidence)
+
+    def test_the_signing_job_holds_catalog_stable_to_its_image_again(self) -> None:
+        payload, metadata, evidence = self.stable_inputs()
+        catalog = self.directory / "catalog-stable.json"
+        catalog.write_bytes(release.catalog_bytes(self.build_stable(payload, metadata, evidence)))
+        ok = self.run_tool("check-evidence", "--catalog", str(catalog), "--evidence", str(self.write("e.json", evidence)))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assert_refused(self.run_tool("check-evidence", "--catalog", str(catalog),
+                                          "--evidence", str(self.write("e.json", dict(evidence_document(), image=RC_IMAGE)))),
+                            f"the VM evidence is for {RC_IMAGE}, not {STABLE_IMAGE}")
+
+    def rc_inputs(self, image: str = RC_IMAGE, recorded: str | None = RC_IMAGE) -> tuple[dict, dict, dict]:
+        """The rc image's upload, as mac-upload.py reports it (its lane's zip in its own release), and its
+        VM evidence, which records the image it tested (RECORDED, none when None)."""
+        payload = artifact(image, RC_ZIP, PAYLOAD)
+        metadata = artifact(image, "installer_data.json", METADATA)
+        evidence = evidence_document()
+        if recorded is not None:
+            evidence["image"] = recorded
+        return payload, metadata, evidence
+
+    def build_rc(self, payload: dict, metadata: dict, evidence: object, image: str = RC_IMAGE) -> dict:
+        now = datetime.datetime(2026, 10, 28, tzinfo=datetime.timezone.utc)
+        return release.build_catalog("rc", image, payload, engine_document(), metadata, evidence,
+                                     installer_document(), now)
+
+    def test_a_catalog_rc_entry_takes_the_rc_image_that_passed_acceptance(self) -> None:
+        catalog = self.build_rc(*self.rc_inputs())
+        self.assertEqual({model["evidenceRevision"] for model in catalog["models"]}, {RC_IMAGE})
+        self.assertEqual({model["payloadDigest"] for model in catalog["models"]}, {f"sha256:{sha(PAYLOAD)}"})
+        self.assertEqual({model["payloadArtifact"]["fileName"] for model in catalog["models"]}, {RC_ZIP})
+        payload, metadata, _ = self.rc_inputs()
+        for evidence, message in ((None, "no VM evidence record"),
+                                  (dict(evidence_document("e" * 64), image=RC_IMAGE), "not " + sha(PAYLOAD)),
+                                  (dict(evidence_document(), result="fail", image=RC_IMAGE), "did not pass")):
+            with self.subTest(message), self.assertRaisesRegex(release.Refusal, message):
+                self.build_rc(payload, metadata, evidence)
+
+    def test_an_edge_payload_under_an_rc_name_is_refused(self) -> None:
+        # An edge upload and its passing evidence, offered as catalog-rc under an invented rc name.
+        with self.assertRaisesRegex(release.Refusal, "the VM evidence names no image"):
+            self.build_rc(payload_document(), artifact(IMAGE, "installer_data.json", METADATA), evidence_document())
+        with self.assertRaisesRegex(release.Refusal, f"the VM evidence is for {IMAGE}, not {RC_IMAGE}"):
+            self.build_rc(payload_document(), artifact(IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=IMAGE))
+        # Even with evidence that names the rc image, an edge zip is not the rc image's.
+        with self.assertRaisesRegex(release.Refusal, f"is not {RC_IMAGE}'s rc zip"):
+            self.build_rc(artifact(RC_IMAGE, EDGE_ZIP, PAYLOAD), artifact(RC_IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=RC_IMAGE))
+        with self.assertRaisesRegex(release.Refusal, f"is not in {RC_IMAGE}'s release"):
+            self.build_rc(artifact(IMAGE, RC_ZIP, PAYLOAD), artifact(RC_IMAGE, "installer_data.json", METADATA),
+                          dict(evidence_document(), image=RC_IMAGE))
+
+    def test_a_recorded_name_that_is_not_the_catalogs_is_refused(self) -> None:
+        respin = RC_IMAGE.replace("-r1-", "-r2-")
+        payload, metadata, evidence = self.rc_inputs(recorded=respin)
+        with self.assertRaisesRegex(release.Refusal, f"the VM evidence is for {respin}, not {RC_IMAGE}"):
+            self.build_rc(payload, metadata, evidence)
+        # The rc zip of another day under this name.
+        payload, metadata, evidence = self.rc_inputs()
+        other_day = artifact(RC_IMAGE, RC_ZIP.replace("2026.10.28", "2026.10.27"), PAYLOAD)
+        with self.assertRaisesRegex(release.Refusal, f"is not {RC_IMAGE}'s rc zip"):
+            self.build_rc(other_day, metadata, evidence)
+        # Its parts and installer data stay in its release too.
+        payload, metadata, evidence = self.rc_inputs()
+        with self.assertRaisesRegex(release.Refusal, f"is not in {RC_IMAGE}'s release"):
+            self.build_rc(payload, artifact(IMAGE, "installer_data.json", METADATA), evidence)
+
+    def test_the_signing_job_holds_catalog_rc_to_its_image_again(self) -> None:
+        payload, metadata, evidence = self.rc_inputs()
+        catalog = self.directory / "catalog-rc.json"
+        catalog.write_bytes(release.catalog_bytes(self.build_rc(payload, metadata, evidence)))
+        ok = self.run_tool("check-evidence", "--catalog", str(catalog), "--evidence", str(self.write("e.json", evidence)))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for other, message in ((evidence_document(), "the VM evidence names no image"),
+                               (dict(evidence_document(), image=IMAGE), f"the VM evidence is for {IMAGE}, not {RC_IMAGE}")):
+            with self.subTest(message):
+                self.assert_refused(self.run_tool("check-evidence", "--catalog", str(catalog),
+                                                  "--evidence", str(self.write("e.json", other))), message)
 
     def test_a_catalog_names_its_image_and_still_takes_an_older_name(self) -> None:
         now = datetime.datetime(2026, 10, 14, tzinfo=datetime.timezone.utc)
@@ -658,6 +811,83 @@ else:
         finally:
             release.open_url = saved
 
+    def test_remote_digest_resumes_a_stalled_read(self) -> None:
+        data = bytes(range(256)) * 64
+        requests = []
+
+        class Stalling(io.BytesIO):
+            status = 200
+
+            def read(self, size=-1):
+                if self.tell() >= 4096:
+                    raise TimeoutError("stalled")
+                return super().read(min(size, 1024))
+
+        def serve(url, timeout=60, headers=None):
+            requests.append(headers)
+            if headers is None:
+                return contextlib.closing(Stalling(data))
+            body = io.BytesIO(data[int(headers["Range"][6:-1]):])
+            body.status = 206
+            return contextlib.closing(body)
+
+        saved, sleep = release.open_url, release.time.sleep
+        release.open_url, release.time.sleep = serve, lambda seconds: None
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=4096-"}])
+
+            def ignore_range(url, timeout=60, headers=None):
+                return contextlib.closing(Stalling(data))
+
+            release.open_url = ignore_range
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(release.Refusal, "ignored a resume request"):
+                    release.remote_digest("https://example.test/p", len(data))
+
+            requests.clear()
+
+            def close_early(url, timeout=60, headers=None):
+                requests.append(headers)
+                start = int(headers["Range"][6:-1]) if headers else 0
+                body = io.BytesIO(data[start:] if headers else data[:3000])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            release.open_url = close_early
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(requests, [None, {"Range": "bytes=3000-"}])
+
+            class StallAfterEnd(io.BytesIO):
+                status = 206
+
+                def read(self, size=-1):
+                    block = super().read(size)
+                    if not block:
+                        raise TimeoutError("stalled before the end of the body")
+                    return block
+
+            def always_stall(url, timeout=60, headers=None):
+                start = int(headers["Range"][6:-1]) if headers else 0
+                stop = len(data) if len(requests) + 1 >= release.REMOTE_READ_ATTEMPTS else start + 512
+                requests.append(headers)
+                body = StallAfterEnd(data[start:stop])
+                body.status = 206 if headers else 200
+                return contextlib.closing(body)
+
+            requests.clear()
+            release.open_url = always_stall
+            with contextlib.redirect_stderr(io.StringIO()):
+                digest, size = release.remote_digest("https://example.test/p", len(data))
+            self.assertEqual((digest, size), (hashlib.sha256(data).hexdigest(), len(data)))
+            self.assertEqual(len(requests), release.REMOTE_READ_ATTEMPTS)
+        finally:
+            release.open_url, release.time.sleep = saved, sleep
+
     def test_remote_verification_reads_the_app_against_its_sidecar(self) -> None:
         base = release.identity()["INSTALLER_CATALOG_BASE"]
         url = f"{base}/installer/2.4.0/App-2.4.0.dmg"
@@ -713,7 +943,7 @@ else:
         self.assertIn("github.ref == 'refs/heads/main'", sign_job)
         # Each gate runs only for its own channels, before the key is read.
         gate_step = sign_job.split("Check the catalog")[1].split("- name: Sign")[0]
-        self.assertIn("evidence:edge)", gate_step)
+        self.assertIn("evidence:edge | evidence:rc | evidence:stable)", gate_step)
         self.assertIn("promotion:rc | promotion:stable)", gate_step)
         publish_job = text.split("\n  publish:\n")[1]
         self.assertIn("needs.sign.result == 'success' && !inputs.dry-run", publish_job)

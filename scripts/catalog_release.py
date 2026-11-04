@@ -47,6 +47,7 @@ import base64
 import binascii
 import datetime
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -72,12 +73,14 @@ SOURCE_LOCK = ROOT / "Engine" / "source-lock.json"
 PUBLISH_CHANNELS = ROOT / "scripts" / "publish-channels"
 
 SCHEMA_VERSION = 4
-# Channels a catalog is built for from an image and its VM evidence. rc and
-# stable get their catalogs only through promotion (parked until the kernel
-# work lands), which re-signs a published catalog's exact pins.
-CHANNELS = ("edge",)
+# Channels a catalog is built for from an image and its VM evidence: edge from
+# an edge image, rc and stable from an image of that lane (built from the
+# channel for a release tag, image-builder/bin/mac-image-check name). Promotion
+# (parked) re-signs a published catalog's exact pins instead.
+CHANNELS = ("edge", "rc", "stable")
+RELEASE_CHANNELS = ("rc", "stable")
 PROMOTED_CHANNELS = ("rc", "stable")
-SIGNED_CHANNELS = CHANNELS + PROMOTED_CHANNELS
+SIGNED_CHANNELS = ("edge", "rc", "stable")
 # A catalog is promoted only forward along this order: edge to rc or
 # stable, rc to stable.
 CHANNEL_ORDER = ("edge", "rc", "stable")
@@ -101,6 +104,17 @@ INSTALLER_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 # the image id was added (their releases, and the catalogs that pin them, are
 # live) are named without it, and a catalog may still be prepared for one.
 IMAGE_NAME = re.compile(r"^omarchy-mac-([a-z]+)-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{12}(?:-([0-9a-f]{12}))?$")
+# An rc or stable image is named from its release tag (without the v) and Mac
+# revision; its payload's sha256 stays its identity, and a respin takes the
+# next revision rather than replacing a published release.
+_RELEASE_VERSION = r"^omarchy-mac-(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+_RELEASE_SUFFIX = r"-r[1-9][0-9]{0,2}-[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9a-f]{12}$"
+RELEASE_IMAGE_NAMES = {
+    # A bare -rc is a final tag built on the rc lane (channel_set.release_image_label).
+    "rc": re.compile(_RELEASE_VERSION + r"-rc(?:[1-9][0-9]*)?" + _RELEASE_SUFFIX),
+    "stable": re.compile(_RELEASE_VERSION + _RELEASE_SUFFIX),
+}
+FINAL_TAG_ON_RC = re.compile(_RELEASE_VERSION + r"-rc" + _RELEASE_SUFFIX)
 FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$")
 
 # PKCS#8 and SubjectPublicKeyInfo prefixes of an Ed25519 key (RFC 8410).
@@ -304,7 +318,14 @@ def check_installer(document: object, engine: dict | None = None) -> dict:
 
 def check_image_name(name: object, channel: str, payload_sha256: str | None = None) -> str:
     """NAME, an image built for CHANNEL. A name with an image id must name
-    PAYLOAD_SHA256 when given; an older name without one is accepted as is."""
+    PAYLOAD_SHA256 when given; an older name without one is accepted as is.
+    An rc or stable catalog takes only an image of that lane, named from its release tag."""
+    if channel in RELEASE_CHANNELS:
+        if not isinstance(name, str) or RELEASE_IMAGE_NAMES[channel].fullmatch(name) is None:
+            shape = "X.Y.Z-rc[N]" if channel == "rc" else "X.Y.Z"
+            raise Refusal(f"image must be omarchy-mac-<{shape}>-r<revision>-<YYYY.MM.DD>-<12 hex package set id>,"
+                          f" not built for the {channel} lane: {name}")
+        return name
     match = IMAGE_NAME.fullmatch(name) if isinstance(name, str) else None
     if match is None:
         raise Refusal("image must be omarchy-mac-<channel>-<YYYY.MM.DD>-<12 hex package set id>-<12 hex image id>"
@@ -316,9 +337,33 @@ def check_image_name(name: object, channel: str, payload_sha256: str | None = No
     return name
 
 
+def check_release_image(image: str, channel: str, payload: dict, metadata: dict, evidence: dict) -> None:
+    """catalog-rc and catalog-stable take only the image of that lane that
+    passed VM acceptance. Such a name carries no image id, so it is tied to the
+    image three ways: the evidence records that image
+    (mac-acceptance-record.py --image, the build's artifact name), the payload
+    is that image's zip for the lane (the lane and date mac-image.yml stages),
+    and every artifact is in the image's own release (as mac-upload.py publishes
+    it). A payload of another lane and its evidence under this name fail all three."""
+    recorded = evidence.get("image")
+    if recorded is None:
+        raise Refusal(f"the VM evidence names no image: catalog-{channel} takes only the {channel} image {image} that passed acceptance")
+    if recorded != image:
+        raise Refusal(f"the VM evidence is for {recorded}, not {image}")
+    date = re.search(r"-r[1-9][0-9]{0,2}-([0-9]{4}\.[0-9]{2}\.[0-9]{2})-[0-9a-f]{12}$", image).group(1)
+    expected = f"omarchy-{date}-aarch64-apple-silicon-mac-{channel}-os-package.zip"
+    if payload["fileName"] != expected:
+        raise Refusal(f"the payload {payload['fileName']} is not {image}'s {channel} zip ({expected})")
+    urls = [("payload", payload["url"]), *(("payload part", part["url"]) for part in payload.get("parts", [])),
+            ("installer_data", metadata["url"])]
+    for field, url in urls:
+        if urllib.parse.urlsplit(url).path.split("/")[-2] != image:
+            raise Refusal(f"{field} {url} is not in {image}'s release")
+
+
 def check_channel(channel: str) -> str:
     if channel not in CHANNELS:
-        raise Refusal(f"channel must be one of {', '.join(CHANNELS)} (rc and stable come from promotion): {channel}")
+        raise Refusal(f"channel must be one of {', '.join(CHANNELS)} {channel}")
     return channel
 
 
@@ -413,6 +458,8 @@ def build_catalog(
     metadata = check_artifact(metadata, "installer_data")
     engine = check_engine(engine)
     check_evidence(evidence, payload["sha256"])
+    if channel in RELEASE_CHANNELS:
+        check_release_image(image, channel, payload, metadata, evidence)
     installer = check_installer(installer, engine)
 
     def plain(artifact: dict) -> dict:
@@ -532,11 +579,20 @@ def from_catalog(field: str, artifact: object, digest: object, allow_parts: bool
     return document
 
 
+def check_promotion_source(source: dict) -> None:
+    """An image of a final tag built on the rc lane stays on rc: stable builds its own."""
+    for model in source.get("models", []):
+        image = model.get("evidenceRevision")
+        if isinstance(image, str) and FINAL_TAG_ON_RC.fullmatch(image):
+            raise Refusal(f"{image} is a final tag built on the rc lane: it is never promoted")
+
+
 def promote_catalog(source: dict, now: datetime.datetime) -> dict:
     """SOURCE with only its sequence and issue time replaced: every model,
     pin, digest and the installer block keep exactly the source's values."""
     if source.get("schemaVersion") != SCHEMA_VERSION:
         raise Refusal("the source catalog is not a schema 4 catalog")
+    check_promotion_source(source)
     promotion_artifacts(source)
     errors = supported_models.catalog_errors(source)
     if errors:
@@ -595,18 +651,41 @@ def open_url(url: str, timeout: float = 60, headers: dict[str, str] | None = Non
     return opener.open(request, timeout=timeout)
 
 
-def remote_digest(url: str, expected_size: int, whole=None) -> tuple[str, int]:
+REMOTE_READ_ATTEMPTS = 8
+
+
+def remote_digest(url: str, expected_size: int, whole=None, exact: bool = True) -> tuple[str, int]:
+    # A multi-gigabyte read through the CDN can stall or close early; resume
+    # from the bytes already hashed instead of failing the catalog. With exact,
+    # expected_size is the pinned length; otherwise it is only an upper bound.
     digest = hashlib.sha256()
     size = 0
-    with open_url(url) as response:
-        while block := response.read(8 * 1024 * 1024):
-            size += len(block)
-            if size > expected_size:
-                raise Refusal(f"{url} serves more than its pinned {expected_size} bytes")
-            digest.update(block)
-            if whole is not None:
-                whole.update(block)
-    return digest.hexdigest(), size
+    for attempt in range(REMOTE_READ_ATTEMPTS):
+        headers = {"Range": f"bytes={size}-"} if size else None
+        try:
+            with (open_url(url, headers=headers) if headers else open_url(url)) as response:
+                if size and response.status != 206:
+                    raise Refusal(f"{url} ignored a resume request (HTTP {response.status})")
+                while block := response.read(8 * 1024 * 1024):
+                    size += len(block)
+                    if size > expected_size:
+                        raise Refusal(f"{url} serves more than its pinned {expected_size} bytes")
+                    digest.update(block)
+                    if whole is not None:
+                        whole.update(block)
+            if exact and size < expected_size:
+                raise http.client.IncompleteRead(b"", expected_size - size)
+            return digest.hexdigest(), size
+        except (TimeoutError, ConnectionError, http.client.IncompleteRead, urllib.error.URLError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                raise
+            if exact and size == expected_size:
+                return digest.hexdigest(), size
+            if attempt + 1 == REMOTE_READ_ATTEMPTS:
+                raise
+            print(f"{url}: read stopped at {size} bytes ({error!r}); resuming", file=sys.stderr)
+            time.sleep(5)
+    raise AssertionError("unreachable")
 
 
 # The installer dmg is not pinned by size in the catalog; this bounds the read.
@@ -628,7 +707,7 @@ def verify_remote_installer(installer: dict) -> None:
     if match is None or match.group(2) != name:
         raise Refusal(f"installer.downloadURL: {url}.sha256 does not read '<sha256>  {name}'")
     try:
-        digest, size = remote_digest(url, MAXIMUM_INSTALLER_BYTES)
+        digest, size = remote_digest(url, MAXIMUM_INSTALLER_BYTES, exact=False)
     except urllib.error.HTTPError as error:
         raise Refusal(f"installer.downloadURL: {url} answers HTTP {error.code}; mirror the app first") from None
     if digest != match.group(1):
@@ -1055,11 +1134,19 @@ def command_prepare(arguments) -> None:
 
 
 def command_check_evidence(arguments) -> None:
-    # Evidence gates only the catalogs built from an image: edge.
-    check_channel(arguments.catalog.name.removeprefix("catalog-").removesuffix(".json"))
+    # Evidence gates only the catalogs built from an image.
+    channel = check_channel(arguments.catalog.name.removeprefix("catalog-").removesuffix(".json"))
     catalog = load_json(arguments.catalog, "catalog")
     digest = catalog_payload_digest(catalog)
-    check_evidence(load_json(arguments.evidence, "evidence") if arguments.evidence else None, digest)
+    evidence = check_evidence(load_json(arguments.evidence, "evidence") if arguments.evidence else None, digest)
+    if channel in RELEASE_CHANNELS:
+        images = {model.get("evidenceRevision") for model in catalog["models"]}
+        if len(images) != 1:
+            raise Refusal(f"catalog-{channel} must name exactly one image")
+        image = check_image_name(images.pop(), channel)
+        pin = catalog["models"][0]
+        check_release_image(image, channel, from_catalog("payload", pin["payloadArtifact"], pin["payloadDigest"], True),
+                       from_catalog("installer_data", pin["metadataArtifact"], pin["metadataDigest"]), evidence)
     print(f"evidence=passed {digest}")
 
 
@@ -1194,6 +1281,7 @@ def command_check_promotion(arguments) -> None:
         source_sha256 = hashlib.sha256(decode_envelope(envelope)[0]).hexdigest()
         if source_sha256 != arguments.source_sha256:
             raise Refusal(f"the source catalog is sha256 {source_sha256}, not the pinned {arguments.source_sha256}")
+    check_promotion_source(source)
     promoted = load_json(arguments.catalog, "catalog")
     check_same_pins(source, promoted)
     promotion_artifacts(promoted)

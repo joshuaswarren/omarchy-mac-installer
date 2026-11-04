@@ -26,6 +26,8 @@ A JSON object in a file named `acceptance-evidence.json`, uploaded as its own wo
 - `scenarios`: one entry per scenario run, each `pass` or `fail`. A passing record has every scenario `pass` and includes at least `first-boot`, `conversion` and `second-boot`.
 - `harness_commit`, `runner`, `run_url`: where and with what the scenarios ran. `run_url` is the GitHub Actions run that uploaded the record's artifact; a real upload refuses a record that names any other run.
 
+The acceptance job also records `image`, the image's name (its build artifact). catalog-rc requires it to be the rc image the catalog names, since an rc name carries no image id (`scripts/catalog_release.py` `check_rc_image`).
+
 Other keys are allowed and ignored, so the harness can add detail (log digests, timings) without a format change.
 
 ## How the acceptance job fills it in

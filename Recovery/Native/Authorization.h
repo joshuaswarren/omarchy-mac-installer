@@ -5,3 +5,4 @@ int aurora_authorized_command_logged(const char *executable, char *const argumen
                                      const char *username, const char *password,
                                      aurora_log_callback output, void *context);
 const char *aurora_authorization_failure(int result);
+int aurora_authorization_password_rejected(int result);

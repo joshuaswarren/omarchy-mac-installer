@@ -104,6 +104,70 @@ fi
 grep -Fq "not an https server URL: http://mirror.invalid" "$work/out" || fail "resolve refuses an http server by name"
 pass "resolve refuses an http server"
 
+# A release tag goes with the rc lane alone, and resolve refuses a wrong one before any download.
+resolve_refuses() {
+  local description=$1 message=$2
+  shift 2
+  if "$BASH" "$inputs" resolve "$work/new" --candidates "$work" --omarchy-server https://pkgs.invalid/x "$@" >"$work/out" 2>&1; then
+    fail "resolve accepts $description"
+  fi
+  grep -Fq -- "$message" "$work/out" || fail "resolve says why it refuses $description: $(cat "$work/out")"
+  ! grep -Fq "could not download" "$work/out" || fail "resolve downloads nothing for $description"
+  [[ ! -e $work/new ]] || fail "resolve writes no record for $description"
+}
+resolve_refuses "an rc build without its tag" "the rc lane needs a release tag" --channel rc
+resolve_refuses "an edge build with a tag" "the edge lane takes no release tag" --release-tag v4.5.0-rc2
+resolve_refuses "a malformed tag" "v4.5-rc2 is not an rc release tag" --channel rc --release-tag v4.5-rc2
+resolve_refuses "a revision without a tag" "--mac-revision needs --release-tag" --mac-revision 2
+resolve_refuses "revision 0" "the Mac revision must be 1 to 999" --channel rc --release-tag v4.5.0-rc2 --mac-revision 0
+resolve_refuses "an rc build from a candidate set" "the rc lane builds from its channel's set: use --channel-set" \
+  --channel rc --release-tag v4.5.0-rc2
+resolve_refuses "an rc build from the edge server" "an rc image takes nothing from edge" --channel rc \
+  --release-tag v4.5.0-rc2 --omarchy-server 'https://pkgs.omarchy.org/edge/$arch'
+resolve_refuses "an rc build from the edge ALARM mirror" "an rc image takes nothing from edge" --channel rc \
+  --release-tag v4.5.0-rc2 --alarm-server 'https://arm-mirror.omarchy.org/$arch/$repo'
+resolve_refuses "a stable build without its tag" "the stable lane needs a release tag" --channel stable
+resolve_refuses "a stable build for an rc tag" "v4.5.0-rc2 is not a stable release tag" --channel stable --release-tag v4.5.0-rc2
+resolve_refuses "a stable build from the rc server" "a stable image takes nothing from rc" --channel stable \
+  --release-tag v4.5.0 --omarchy-server 'https://pkgs.omarchy.org/rc/$arch'
+resolve_refuses "a stable build from the rc ALARM mirror" "a stable image takes nothing from rc" --channel stable \
+  --release-tag v4.5.0 --alarm-server 'https://arm-rc-mirror.omarchy.org/$arch/$repo'
+resolve_refuses "a stable build from rolling ALARM" "takes Arch Linux ARM from its frozen snapshot" --channel stable \
+  --release-tag v4.5.0 --alarm-server 'https://ca.us.mirror.archlinuxarm.org/$arch/$repo'
+resolve_refuses "a stable build from an equivalent rolling ALARM URL" "takes Arch Linux ARM from its frozen snapshot" --channel stable \
+  --release-tag v4.5.0 --alarm-server 'https://ca.us.mirror.archlinuxarm.org/aarch64/$repo'
+resolve_refuses "an rc build from the stable server" "an rc image takes nothing from stable" --channel rc \
+  --release-tag v4.5.0-rc2 --omarchy-server 'https://pkgs.omarchy.org/stable/$arch'
+resolve_refuses "an rc build from the stable ALARM mirror" "an rc image takes nothing from stable" --channel rc \
+  --release-tag v4.5.0-rc2 --alarm-server 'https://arm-stable-mirror.omarchy.org/$arch/$repo'
+resolve_refuses "an rc build from rolling ALARM" "takes Arch Linux ARM from its frozen snapshot" --channel rc \
+  --release-tag v4.5.0-rc2 --alarm-server 'https://ca.us.mirror.archlinuxarm.org/$arch/$repo'
+pass "resolve takes a release tag and revision for the rc and stable lanes alone, and nothing from another lane"
+
+# An rc record names its tag and revision after its channel database.
+sed -e 's/^omarchy_channel=edge$/omarchy_channel=rc/' -e 's|pkgs.omarchy.org/edge/|pkgs.omarchy.org/rc/|' \
+  -e 's|^omarchy_db_sha256=.*|&\nrelease_tag=v4.5.0-rc2\nmac_revision=1|' \
+  -e 's|^alarm_server=.*|alarm_server=https://arm-rc-mirror.omarchy.org/$arch/$repo|' "$work/inputs" >"$work/rc-inputs"
+"$BASH" "$inputs" check "$work/rc-inputs" | cmp -s - "$work/rc-inputs" || fail "check prints a canonical rc record"
+pass "a canonical rc record checks"
+refuse "an rc record without its tag" sed '/^release_tag=/d' "$work/rc-inputs"
+refuse "an rc record without its revision" sed '/^mac_revision=/d' "$work/rc-inputs"
+refuse "an rc record whose tag is not an rc tag" sed 's/^release_tag=.*/release_tag=v4.5-rc2/' "$work/rc-inputs"
+refuse "an rc record with revision 0" sed 's/^mac_revision=.*/mac_revision=0/' "$work/rc-inputs"
+refuse "an rc record with a padded revision" sed 's/^mac_revision=.*/mac_revision=01/' "$work/rc-inputs"
+refuse "an rc record with its tag out of place" awk '/^release_tag=/ { held = $0; next } { print } /^alarm_rootfs/ { print held }' "$work/rc-inputs"
+sed -e 's/^omarchy_channel=rc$/omarchy_channel=stable/' -e 's|pkgs.omarchy.org/rc/|pkgs.omarchy.org/stable/|' \
+  -e 's/^release_tag=.*/release_tag=v4.5.0/' \
+  -e 's|^alarm_server=.*|alarm_server=https://arm-stable-mirror.omarchy.org/$arch/$repo|' "$work/rc-inputs" >"$work/stable-inputs"
+"$BASH" "$inputs" check "$work/stable-inputs" | cmp -s - "$work/stable-inputs" || fail "check prints a canonical stable record"
+pass "a canonical stable record checks"
+refuse "a stable record with an rc tag" sed 's/^release_tag=.*/release_tag=v4.5.0-rc2/' "$work/stable-inputs"
+refuse "a stable record from the rc ALARM mirror" sed 's|^alarm_server=.*|alarm_server=https://arm-rc-mirror.omarchy.org/$arch/$repo|' "$work/stable-inputs"
+refuse "a stable record from rolling ALARM" sed 's|^alarm_server=.*|alarm_server=https://ca.us.mirror.archlinuxarm.org/$arch/$repo|' "$work/stable-inputs"
+refuse "an rc record from the edge server" sed 's|pkgs.omarchy.org/rc/|pkgs.omarchy.org/edge/|' "$work/rc-inputs"
+refuse "an rc record from the edge ALARM mirror" sed 's|^alarm_server=.*|alarm_server=https://arm-mirror.omarchy.org/$arch/$repo|' "$work/rc-inputs"
+refuse "an edge record with a tag" awk '{ print } /^omarchy_db_sha256=/ { print "release_tag=v4.5.0-rc2"; print "mac_revision=1" }' "$work/inputs"
+
 # ── channel records ────────────────────────────────────────────────────────
 # A fixture edge snapshot: a real repository database naming the channel set,
 # its archives and stand-in signatures in the cache (nothing here verifies them).

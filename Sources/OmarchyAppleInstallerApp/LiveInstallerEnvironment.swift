@@ -22,7 +22,6 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
   private var reusableAssets: PreparedInstallerAssets?
   private var releaseConfiguration: InstallerReleaseConfiguration?
   private let buildProfile = InstallerBuildProfile.current
-  private var encryptLinuxDisk = true
   private var selectedLane = ReleaseChannel.stable.rawValue
   private let prefetch = PayloadPrefetchOrchestrator()
   private var plannedPayload: StagedInstallerArtifact?
@@ -373,9 +372,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     return .plan(
       Self.planDisplay(
         review: prepared.review, host: freshHost, recommendation: recommendation,
-        reservedBytes: planningReserve,
-        release:
-          "\(channel.rawValue.capitalized) · \(release.assets.payload.fileURL.lastPathComponent)"
+        reservedBytes: planningReserve
       ))
   }
 
@@ -452,10 +449,6 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     } catch {
       return false
     }
-  }
-
-  func setEncryptLinuxDisk(_ encrypt: Bool) {
-    lock.withLock { encryptLinuxDisk = buildProfile.allowsEncryption ? encrypt : false }
   }
 
   func cancelPayloadPrefetch() {
@@ -704,8 +697,7 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
     review: InstallerPlanReview,
     host: AppleSiliconHostInspection,
     recommendation: InstallerAllocationRecommendation,
-    reservedBytes: UInt64 = 0,
-    release: String
+    reservedBytes: UInt64 = 0
   ) -> PlanDisplay {
     let length = review.plan.lengthBytes
     // A free extent or a replaced install sits beside macOS, which keeps its size.
@@ -722,8 +714,6 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
       isResizable: review.plan.candidateKind != "replace",
       minimumBytes: recommendation.minimumBytes,
       maximumBytes: recommendation.maximumBytes,
-      releaseDescription: release,
-      targetDescription: "Internal storage · " + Self.targetDescription(review.plan.candidateKind),
       fixedMacOSBytes: keepsMacOS ? host.storage.containerSizeBytes : nil,
       macOSFreeBeforeAllocationBytes:
         review.plan.candidateKind == "resize"
@@ -732,14 +722,6 @@ final class LiveInstallerEnvironment: InstallerEnvironment, @unchecked Sendable 
         : nil,
       recommendedOmarchyBytes: recommendation.candidate.recommendedInstallBytes
     )
-  }
-
-  private static func targetDescription(_ candidateKind: String) -> String {
-    switch candidateKind {
-    case "free": "Use free space"
-    case "replace": "Replace the existing Omarchy"
-    default: "Resize macOS"
-    }
   }
 
   static func completionDisplay(

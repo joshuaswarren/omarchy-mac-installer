@@ -21,9 +21,13 @@ compile_run boot-selection Sources/BootSelection.swift Tests/BootSelectionCheck.
 compile_run installer-log Sources/InstallerLog.swift Tests/InstallerLogCheck.swift
 compile_run log-view Sources/InstallerTheme.swift Sources/LogTextView.swift Tests/LogTextViewCheck.swift
 compile_run sheet-presenter Sources/SheetPresenter.swift Tests/SheetPresenterCheck.swift
+compile_run password-rejected Sources/RecoveryPasswordRejected.swift Tests/RecoveryPasswordRejectedCheck.swift
 compile_run configuration Sources/RecoveryOwner.swift Sources/InstallConfiguration.swift Tests/InstallConfigurationCheck.swift
 compile_run file-transaction Sources/Account/RecoveryDigest.swift Sources/Account/RecoveryFileTransaction.swift Tests/RecoveryFileTransactionCheck.swift
 compile_run installation-journal Sources/RecoveryInstallationJournal.swift Tests/RecoveryInstallationJournalCheck.swift
 compile_run account-restart Sources/RecoveryAccountRestart.swift Tests/RecoveryAccountRestartCheck.swift
 compile_run directory-swap Sources/Account/RecoveryDigest.swift Sources/Account/RecoveryFileTransaction.swift Sources/RecoveryDirectorySwap.swift Tests/RecoveryDirectorySwapCheck.swift
 compile_run baseline Sources/Account/RecoveryDigest.swift Sources/RecoveryBaseline.swift Tests/RecoveryBaselineCheck.swift
+compile_run completion-action Sources/CompletionAction.swift Tests/CompletionActionCheck.swift
+compile_run authorization-prompt Sources/AuthorizationPrompt.swift Sources/RecoveryPasswordRejected.swift Tests/AuthorizationPromptCheck.swift
+compile_run window-layout Sources/RecoveryWindowLayout.swift Tests/RecoveryWindowLayoutCheck.swift

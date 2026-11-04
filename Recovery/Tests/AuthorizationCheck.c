@@ -83,6 +83,18 @@ int main(int argc, char **argv)
             const char *secret=getpass("Password for fixture-user: ");
             return strcmp(user,"fixture-user\n") || !secret || strcmp(secret,"fixture-password") ? 17 : 0;
         }
+        if (!strcmp(argv[1], "--bputil-rejected") || !strcmp(argv[1], "--rejected-text-success")) {
+            alarm(3);
+            printf("Authorized user: "); fflush(stdout);
+            if (!fgets(user,sizeof(user),stdin)) return 18;
+            if (!getpass("Please enter password for user fixture-user: ")) return 19;
+            /* bputil's real output for a wrong password, which exits 8. */
+            printf("bputil: failed to set credential: Error Domain=com.apple.LocalAuthentication "
+                   "Code=-1 \"Password rejected (3)\"\n"
+                   "Failed to create ACM context with provided username and password\n");
+            fflush(stdout);
+            return strcmp(argv[1], "--bputil-rejected") ? 0 : 8;
+        }
         if (!strcmp(argv[1], "--failure-output")) {
             fprintf(stderr,"final command diagnostic\n"); return 42;
         }
@@ -124,6 +136,28 @@ int main(int argc, char **argv)
     assert(authorization_run(argv[0],child,"fixture-user","fixture-password",true) == REPEATED_CONFIRMATION);
     child[1] = "--retry";
     assert(authorization_run(argv[0],child,"fixture-user","fixture-password",false) == REPEATED_PASSWORD);
+    assert(aurora_authorization_password_rejected(REPEATED_PASSWORD));
+    assert(aurora_authorization_password_rejected(PASSWORD_REJECTED));
+    for(int result=PASSWORD_REJECTED;result<=8;result++)
+        assert(result==REPEATED_PASSWORD || result==PASSWORD_REJECTED ||
+               !aurora_authorization_password_rejected(result));
+    /* The rejection is recognized whatever was typed, even a password that
+     * redaction would find inside the rejection lines. */
+    child[1] = "--bputil-rejected";
+    const char *const typed[]={"fixture-password","word","Password","rejected","ACM"};
+    for(size_t i=0;i<sizeof(typed)/sizeof(*typed);i++) {
+        int rejected=authorization_run_logged(argv[0],child,"fixture-user",typed[i],false,NULL,NULL);
+        if(rejected!=PASSWORD_REJECTED && rejected!=REPEATED_PASSWORD) {
+            fprintf(stderr,"FAIL bputil rejection with password %s: status=%d\n",typed[i],rejected);
+            return 1;
+        }
+    }
+    /* A command that succeeds never counts as a refusal, whatever it printed. */
+    child[1] = "--rejected-text-success";
+    int succeeded=authorization_run(argv[0],child,"fixture-user","word",false);
+    if(succeeded!=0 && succeeded!=REPEATED_PASSWORD) {
+        fprintf(stderr,"FAIL successful command classified: status=%d\n",succeeded); return 1;
+    }
     assert(aurora_authorized_command(argv[0],child,"fixture-user","fixture-password") == -1);
     child[1] = "--failure-output";
     assert(authorization_run_logged(argv[0],child,"fixture-user","fixture-password",false,capture,NULL) == 42);
@@ -152,6 +186,6 @@ int main(int argc, char **argv)
     assert(kill((pid_t)helper,0)<0 && errno==ESRCH);
 #endif
 
-    puts("PASS exact native kmutil prompt / newline / byte-split / repeated prompt; final output / exact exit status / fragmented credential redaction;  split confirmation/username/password prompts; bputil authorized-user prompt; exact one-shot confirmation; unauthorized/repeated confirmation rejection; repeated password rejection; command allowlist");
+    puts("PASS exact native kmutil prompt / newline / byte-split / repeated prompt; final output / exact exit status / fragmented credential redaction;  split confirmation/username/password prompts; bputil authorized-user prompt; exact one-shot confirmation; unauthorized/repeated confirmation rejection; repeated password rejection and its classification; bputil rejection recognized whatever was typed, never on success; command allowlist");
     return 0;
 }

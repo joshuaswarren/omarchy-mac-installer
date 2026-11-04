@@ -156,6 +156,11 @@ struct OmarchyAppleInstallerApp: App {
       }
       .preferredColorScheme(previewColorScheme)
       .frame(minWidth: 640)
+      .background(
+        InstallerWindowPlacer(
+          growth: OnePageInstallerView.maximumContentHeight
+            - OnePageInstallerView.minimumContentHeight)
+      )
       .omarchyTypography()
       .tint(OmarchyTheme.accent)
       // The window itself takes the theme colour, title bar included, so the
@@ -163,6 +168,9 @@ struct OmarchyAppleInstallerApp: App {
       .containerBackground(OmarchyTheme.window, for: .window)
     }
     .defaultSize(width: 780, height: 600)
+    // Every launch opens where InstallerWindowPlacer puts it, not where the
+    // window was last left.
+    .restorationBehavior(.disabled)
     .windowResizability(.contentSize)
     .windowStyle(.hiddenTitleBar)
     .commands {
@@ -202,6 +210,14 @@ struct OmarchyAppleInstallerApp: App {
       CommandMenu("Installation") {
         Button("Remove Omarchy…") { showsRemoval = true }
           .disabled(removalNeedsReview || showsRemoval || liveSession?.canOpenRemoval != true)
+        if liveSession?.recoveryAccountDeferred == true {
+          Button(
+            liveSession?.recoveryAccountStarted == true
+              ? PlainLanguage.finishRecoveryAccount : PlainLanguage.setUpRecoveryAccount
+          ) { liveSession?.setUpRecoveryAccount() }
+          .disabled(
+            removalNeedsReview || showsRemoval || liveSession?.canSetUpRecoveryAccount != true)
+        }
       }
       if InstallerBuildProfile.current.showsReleaseChannels {
         CommandMenu(PlainLanguage.channelMenuTitle) {

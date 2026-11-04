@@ -89,6 +89,131 @@
       XCTAssertEqual(environment.prepareCount, 0)
       XCTAssertEqual(environment.prefetchStartCount, 0)
     }
+    func testSkippedRecoveryAccountIsInstalledAndOffersTheAccountOnRequest() async {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      for deferred in [false, true] {
+        environment.accountReply = RecoveryAccountReply(
+          ticket: "bound-ticket", target: target, accountDeferred: deferred)
+        let session = InstallerSession(environment: environment)
+        await session.inspect()
+        guard case .existingInstallRefused = session.phase else {
+          return XCTFail("An existing installation must stay refused")
+        }
+        XCTAssertEqual(session.recoveryAccountDeferred, deferred)
+        XCTAssertEqual(session.canSetUpRecoveryAccount, deferred)
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        session.setUpRecoveryAccount()
+        XCTAssertEqual(session.showsRecoveryAccountSetup, deferred)
+        XCTAssertFalse(session.canSetUpRecoveryAccount)
+        session.cancelRecoveryAccountSetup()
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        session.setUpRecoveryAccount()
+        // Inspecting again starts from the installed page.
+        await session.inspect()
+        XCTAssertFalse(session.showsRecoveryAccountSetup)
+        XCTAssertEqual(environment.executeCount, 0)
+      }
+    }
+
+    func testAStartedRecoveryAccountResumesAndItsStepsShutDown() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      func record(_ phase: String) -> RecoveryAccountRecord {
+        RecoveryAccountRecord(
+          target: target, username: "omarchy-owner",
+          generatedUID: "55555555-5555-4555-8555-555555555555", phase: phase)
+      }
+      let cases: [(RecoveryAccountRecord?, Bool, Bool)] = [
+        (nil, true, false),
+        (record("awaiting-ownership"), true, true),
+        (record("prepared"), true, true),
+        (record("finalized"), true, false),
+        (record("awaiting-ownership"), false, false),
+      ]
+      for (record, deferred, started) in cases {
+        environment.accountReply = RecoveryAccountReply(
+          ticket: "bound-ticket", target: target, record: record, accountDeferred: deferred)
+        let session = InstallerSession(environment: environment)
+        await session.inspect()
+        XCTAssertEqual(session.recoveryAccountStarted, started, String(describing: record?.phase))
+      }
+
+      // The setup steps' Shut down works although the page is not waiting
+      // for Recovery; the installed page alone never shuts down.
+      let session = InstallerSession(environment: environment)
+      environment.accountReply = RecoveryAccountReply(
+        ticket: "bound-ticket", target: target, accountDeferred: true)
+      await session.inspect()
+      environment.shutdownAccepted = true
+      let before = environment.requestShutdownCount
+      XCTAssertFalse(session.shutDown())
+      XCTAssertNil(session.shutdownMessage)
+      session.setUpRecoveryAccount()
+      XCTAssertTrue(session.shutDown())
+      XCTAssertNotNil(session.shutdownMessage)
+      XCTAssertEqual(environment.requestShutdownCount, before + 1)
+    }
+
+    func testAHandoffThatTurnsDeferredKeepsTheSetupStepsOnScreen() async throws {
+      let environment = MockInstallerEnvironment()
+      environment.host = HostDisplay(
+        chipAndSpace: "Apple A18 Pro", supported: true,
+        existingInstalls: [
+          ExistingInstallDisplay(sourceIdentifier: "disk0s3", sizeDescription: "89 GB")
+        ])
+      let target = RecoveryAccountTarget(
+        volumeName: "Omarchy",
+        systemUUID: "11111111-1111-4111-8111-111111111111",
+        dataUUID: "22222222-2222-4222-8222-222222222222",
+        groupUUID: "33333333-3333-4333-8333-333333333333",
+        prebootUUID: "44444444-4444-4444-8444-444444444444")
+      environment.accountReply = RecoveryAccountReply(ticket: "bound-ticket", target: target)
+      let session = InstallerSession(environment: environment)
+      await session.inspect()
+      XCTAssertFalse(session.recoveryAccountDeferred)
+      environment.accountReply = RecoveryAccountReply(
+        ticket: "bound-ticket", target: target, accountDeferred: true)
+      _ = try await session.prepareRecoveryHandoffAndShutdown()
+      XCTAssertTrue(session.recoveryAccountDeferred)
+      XCTAssertTrue(session.showsRecoveryAccountSetup)
+    }
+
+    func testRecoveryAccountStepsNameWhatRecoveryShows() {
+      let create = PlainLanguage.recoveryAccountSteps(
+        volumeName: "Omarchy", holdInstruction: "Hold it.", resuming: false)
+      XCTAssertEqual(create.map(\.number), [1, 2, 3, 4])
+      XCTAssertEqual(
+        create[2].title, "Choose “Omarchy”, click Continue, then sign in with your macOS account.")
+      XCTAssertTrue(
+        create[3].title.contains("Utilities → Create Recovery Account…"), create[3].title)
+      let resume = PlainLanguage.recoveryAccountSteps(
+        volumeName: "Omarchy", holdInstruction: "Hold it.", resuming: true)
+      XCTAssertEqual(resume.map(\.number), [1, 2, 3, 4, 5])
+      XCTAssertTrue(resume[3].title.contains("Resume recovery setup"), resume[3].title)
+      XCTAssertTrue(resume[4].title.contains("authorize"), resume[4].title)
+    }
+
     func testChannelAvailabilityKeepsTheLatestCheck() async {
       let environment = MockInstallerEnvironment()
       let slow = OperationGate()
@@ -115,56 +240,38 @@
       XCTAssertEqual(session.channelAvailability, current)
     }
 
-    func testPrivateLimineProfileSubmitsExplicitEncryptionChoice() async throws {
-      for encrypt in [false, true] {
-        let environment = MockInstallerEnvironment()
-        let profile = InstallerBuildProfile.resolve(infoDictionary: [
-          "OmarchyPrivateLimineTest": true
-        ])
-        let session = InstallerSession(
-          environment: environment, allowsEncryption: profile.allowsEncryption)
-        XCTAssertTrue(session.encryptLinuxDisk)
-        await session.inspect()
-        await session.continueToPlan()
-        session.continueToPlanReview()
-        session.setEncryptLinuxDisk(encrypt)
-        XCTAssertEqual(environment.storedEncryptLinuxDisk, encrypt)
-        session.setAcknowledged(true)
-        session.approve()
-        session.presentInstallCredentials()
-        await session.submit(try authorization())
-        XCTAssertEqual(environment.lastEncryptLinuxDisk, encrypt)
-      }
-    }
-
-    func testPlainOnlyProfileCannotEnableEncryptionOrResetIntoIt() async throws {
+    func testPrivateLimineProfileAlwaysSubmitsAnEncryptedInstallation() async throws {
       let environment = MockInstallerEnvironment()
-      let session = InstallerSession(environment: environment, allowsEncryption: false)
-      XCTAssertFalse(session.encryptLinuxDisk)
-      XCTAssertFalse(environment.storedEncryptLinuxDisk)
+      let profile = InstallerBuildProfile.resolve(infoDictionary: [
+        "OmarchyPrivateLimineTest": true
+      ])
+      let session = InstallerSession(
+        environment: environment, allowsEncryption: profile.allowsEncryption)
+      XCTAssertTrue(session.allowsEncryption)
       await session.inspect()
       await session.continueToPlan()
       session.continueToPlanReview()
-      session.setEncryptLinuxDisk(true)
-      XCTAssertFalse(session.encryptLinuxDisk)
-      XCTAssertFalse(environment.storedEncryptLinuxDisk)
+      session.setAcknowledged(true)
+      session.approve()
+      session.presentInstallCredentials()
+      await session.submit(try authorization())
+      XCTAssertEqual(environment.lastEncryptLinuxDisk, true)
+    }
+
+    func testPlainOnlyProfileSubmitsAPlainInstallationAfterReinspection() async throws {
+      let environment = MockInstallerEnvironment()
+      let session = InstallerSession(environment: environment, allowsEncryption: false)
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
+      await session.inspect()
+      await session.continueToPlan()
+      session.continueToPlanReview()
       session.setAcknowledged(true)
       session.approve()
       session.presentInstallCredentials()
       await session.submit(try authorization())
       XCTAssertEqual(environment.lastEncryptLinuxDisk, false)
-    }
-
-    func testPlainOnlyProfileReinspectKeepsPlainState() async {
-      let environment = MockInstallerEnvironment()
-      let session = InstallerSession(environment: environment, allowsEncryption: false)
-      await session.inspect()
-      await session.continueToPlan()
-      session.continueToPlanReview()
-      session.setEncryptLinuxDisk(true)
-      await session.inspect()
-      XCTAssertFalse(session.encryptLinuxDisk)
-      XCTAssertFalse(environment.storedEncryptLinuxDisk)
     }
 
     func testMissingLiveInstallationCannotReachShutdownAfterCompletion() async throws {
@@ -1604,34 +1711,18 @@
       XCTAssertEqual(environment.prepareCount, 0)
     }
 
-    func testReinspectResetsDisplayedAndStoredEncryptionChoice() async {
+    func testStandardInstallAlwaysSubmitsAnEncryptedInstallation() async throws {
       let environment = MockInstallerEnvironment()
       let session = InstallerSession(environment: environment)
+      XCTAssertTrue(session.allowsEncryption)
       await session.inspect()
       await session.continueToPlan()
       session.continueToPlanReview()
-      session.setEncryptLinuxDisk(false)
-      XCTAssertFalse(session.encryptLinuxDisk)
-      XCTAssertFalse(environment.storedEncryptLinuxDisk)
-
-      await session.inspect()
-
-      XCTAssertTrue(session.encryptLinuxDisk)
-      XCTAssertTrue(environment.storedEncryptLinuxDisk)
-    }
-
-    func testInstallReadsEncryptionChoiceFromTheSession() async throws {
-      let environment = MockInstallerEnvironment()
-      let session = InstallerSession(environment: environment)
-      await session.inspect()
-      await session.continueToPlan()
-      session.continueToPlanReview()
-      session.setEncryptLinuxDisk(false)
       session.setAcknowledged(true)
       session.approve()
       session.presentInstallCredentials()
       await session.submit(try authorization())
-      XCTAssertEqual(environment.lastEncryptLinuxDisk, false)
+      XCTAssertEqual(environment.lastEncryptLinuxDisk, true)
     }
 
     func testAwaitingRecoveryRendersTheHandoffWarning() async throws {
@@ -1664,25 +1755,27 @@
       XCTAssertEqual(handoff.warning, PlainLanguage.encryptionChoiceNotRecorded)
     }
 
-    func testRecoveryRetrySubmitStillUsesTheSessionEncryptionChoice() async throws {
-      let environment = MockInstallerEnvironment()
-      environment.executeResults = [
-        .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
-        .success(MockInstallerEnvironment.recoveryCompletion),
-      ]
-      let session = InstallerSession(environment: environment)
-      await session.inspect()
-      await session.continueToPlan()
-      session.continueToPlanReview()
-      session.setEncryptLinuxDisk(false)
-      session.setAcknowledged(true)
-      session.approve()
-      session.presentInstallCredentials()
-      await session.submit(try authorization())
-      session.presentRecoveryRetryCredentials()
-      await session.submit(try authorization())
-      XCTAssertEqual(environment.lastOperation, .retryRecoveryAuthorization)
-      XCTAssertEqual(environment.lastEncryptLinuxDisk, false)
+    func testRecoveryRetrySubmitKeepsTheBuildEncryptionSetting() async throws {
+      for allowsEncryption in [true, false] {
+        let environment = MockInstallerEnvironment()
+        environment.executeResults = [
+          .failure(EngineXPCSubmissionError.recoveryAuthorizationFailed),
+          .success(MockInstallerEnvironment.recoveryCompletion),
+        ]
+        let session = InstallerSession(
+          environment: environment, allowsEncryption: allowsEncryption)
+        await session.inspect()
+        await session.continueToPlan()
+        session.continueToPlanReview()
+        session.setAcknowledged(true)
+        session.approve()
+        session.presentInstallCredentials()
+        await session.submit(try authorization())
+        session.presentRecoveryRetryCredentials()
+        await session.submit(try authorization())
+        XCTAssertEqual(environment.lastOperation, .retryRecoveryAuthorization)
+        XCTAssertEqual(environment.lastEncryptLinuxDisk, allowsEncryption)
+      }
     }
   }
 
@@ -1761,7 +1854,6 @@
     private(set) var prepareCount = 0
     private(set) var lastOperation: InstallOperationKind?
     private(set) var lastEncryptLinuxDisk: Bool?
-    private(set) var storedEncryptLinuxDisk = true
     private var approved = false
 
     var hasApprovedPlan: Bool { approved }
@@ -1860,10 +1952,6 @@
     func requestShutdown() -> Bool {
       requestShutdownCount += 1
       return shutdownAccepted
-    }
-
-    func setEncryptLinuxDisk(_ encrypt: Bool) {
-      storedEncryptLinuxDisk = encrypt
     }
 
     func prefetchPayload(
