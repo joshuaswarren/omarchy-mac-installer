@@ -1346,7 +1346,8 @@
       let startup = ClosedEngineHelperError.macOSStartupNotSet as NSError
       let environment = MockInstallerEnvironment()
       environment.executeResults = [
-        .failure(EngineXPCSubmissionError.helperRejected(domain: startup.domain, code: startup.code))
+        .failure(
+          EngineXPCSubmissionError.helperRejected(domain: startup.domain, code: startup.code))
       ]
       let session = await ready(environment)
       session.presentInstallCredentials()
