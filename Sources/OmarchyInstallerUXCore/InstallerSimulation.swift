@@ -274,9 +274,6 @@
           PlanDisplay(
             diskTotalBytes: total, omarchyBytes: initial,
             bindingDigest: "simulation-\(initial)", isResizable: false,
-            releaseDescription:
-              "SIMULATION · \(channel.rawValue.uppercased()) · Omarchy test release",
-            targetDescription: "Simulated internal disk · Replace the existing Omarchy",
             fixedMacOSBytes: total - initial))
       }
       let maximum: UInt64 =

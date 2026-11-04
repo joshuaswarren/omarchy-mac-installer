@@ -135,8 +135,6 @@
         omarchyBytes: length,
         bindingDigest: "sha256:" + String(repeating: "b", count: 64),
         isResizable: false,
-        releaseDescription: "Recorded simulation",
-        targetDescription: "Internal storage · Replace the existing Omarchy",
         fixedMacOSBytes: total - length
       )
     }

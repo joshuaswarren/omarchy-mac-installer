@@ -24,8 +24,6 @@
         XCTAssertEqual(plan.maximumBytes, plan.omarchyBytes)
         XCTAssertEqual(plan.fixedMacOSBytes, 994_662_584_320 - 137_438_953_472)
         XCTAssertEqual(plan.unallocatedBytes(for: plan.omarchyBytes), 0)
-        XCTAssertEqual(
-          plan.targetDescription, "Simulated internal disk · Replace the existing Omarchy")
       }
     }
 
