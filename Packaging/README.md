@@ -13,6 +13,8 @@ Moving to another identity or host is an edit to `identity.conf` followed by `sc
 
 ## Bundle layout
 
+The helper saves the encryption checkbox and release lane in `omarchy/install.conf` on the new Omarchy EFI partition after the engine completes. It reuses an existing writable mount only after verifying its device and mount root, or creates a verified private mount when necessary. Writes and readback stay relative to pinned directory descriptors, then the helper attempts a normal unmount. A busy volume therefore cannot prevent the choice from being written merely because Spotlight is using it. An unmount failure after the write retains the existing saved-but-unconfirmed result. See [EFI encryption handoff](../docs/efi-encryption-handoff.md) for the failure diagnosis and validation boundary.
+
 The generated `Omarchy Installer.app` contains:
 
 - the SwiftUI application in `Contents/MacOS`;
@@ -99,6 +101,8 @@ The script refuses unsafe or mismatched release inputs and will not overwrite an
 existing application bundle.
 
 For a local hardware test, first assemble an explicitly marked `OMARCHY_DEVELOPER_BUILD=1` app with its sealed developer catalog, then run `Packaging/build-developer-pkg.sh APP OUTPUT.pkg`. This verifies the app and embedded client requirement and creates an unsigned local package that installs the app and its helper through PackageKit. It requires the developer marker and does not use the production signing identities. This package is for local testing, not public distribution.
+
+A developer build's helper blocks any older build, including a release: `SMJobBless` won't replace a helper with a lower build, and the app reports the service couldn't be set up. To go back to an older release on that Mac, remove the helper first: `sudo launchctl bootout system/org.omarchy.installer.helper`, then delete `/Library/PrivilegedHelperTools/org.omarchy.installer.helper` and `/Library/LaunchDaemons/org.omarchy.installer.helper.plist`.
 
 ## Release workflow
 
