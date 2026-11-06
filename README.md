@@ -174,7 +174,7 @@ There is no `CONTRIBUTING.md`; the conventions below come from `AGENTS.md` and `
 - Simulation: `Development/Run Simulation.command` launches the debug app with `--simulate`, which uses an in-memory environment and never touches the disk, the helper or real credentials. Release builds refuse `--simulate`. See [Simulation guide](Development/Simulation.md).
 - Packaging needs an authenticated engine archive, see [Packaging/README.md](Packaging/README.md) and [the extraction prerequisites](docs/extraction.md#inherited-prerequisites-and-open-issues).
 
-**CI.** [Installer checks](.github/workflows/checks.yml) runs on every pull request and on pushes to `main`: portable checks on Ubuntu 24.04 and macOS checks (strict Swift formatting, debug and release tests) on an Apple Silicon macOS runner. Details: [`docs/validation.md`](docs/validation.md#continuous-integration). The release pipeline is in [`docs/mac-release-pipeline.md`](docs/mac-release-pipeline.md).
+**CI.** [Installer checks](.github/workflows/checks.yml) runs on every pull request and on pushes to `main`: portable checks on Ubuntu 24.04 and macOS checks (strict Swift formatting, debug and release tests, and the app assembled and signed ad hoc with its pinned Try Omarchy kit) on an Apple Silicon macOS runner. Details: [`docs/validation.md`](docs/validation.md#continuous-integration). The release pipeline is in [`docs/mac-release-pipeline.md`](docs/mac-release-pipeline.md).
 
 **Conventions** (from `AGENTS.md`):
 
@@ -197,6 +197,7 @@ Further reading:
 - [Validation and macOS handoff](docs/validation.md)
 - [Catalog release](docs/catalog-release.md) and [release pipeline](docs/mac-release-pipeline.md)
 - [Linux image producer](docs/image-builder.md): the Apple Silicon image producer is `image-builder/`, building from a signed candidate set with the authenticated candidate importer and inspecting each image before it is packaged. See also [how to build](image-builder/README.md) and [one image producer](docs/image-producer.md).
+- [Try Omarchy in a VM](docs/try.md): the Try mode, its pinned kit and its signing.
 
 ## Related repositories and where to ask
 
