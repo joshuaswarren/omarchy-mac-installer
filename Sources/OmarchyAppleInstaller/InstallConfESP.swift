@@ -242,7 +242,7 @@
   }
 
   /// Reuse the identified ESP's verified mount, or mount it privately, then
-  /// write and read back through pinned descriptors before unmounting.
+  /// write the document atomically and read back through pinned descriptors before unmounting.
   struct InstallConfESPMountWriter: @unchecked Sendable {
     private let disks: any InstallConfESPDiskOperating
     private let workingDirectory: URL
@@ -255,7 +255,7 @@
       workingDirectory: URL,
       fileManager: FileManager = .default,
       contentsOf: @escaping @Sendable (Int32) throws -> Data = {
-        try FileHandle(fileDescriptor: $0, closeOnDealloc: false).read(upToCount: 1024) ?? Data()
+        try FileHandle(fileDescriptor: $0, closeOnDealloc: false).readToEnd() ?? Data()
       },
       synchronizeDirectory: @escaping @Sendable (Int32) -> Void = Self.bestEffortDirectorySync
     ) {
@@ -272,6 +272,28 @@
       offsetBytes: UInt64,
       lengthBytes: UInt64
     ) throws {
+      try write(
+        conf.serializedData,
+        named: InstallConf.fileName,
+        storeIdentifier: storeIdentifier,
+        offsetBytes: offsetBytes,
+        lengthBytes: lengthBytes
+      )
+    }
+
+    func write(
+      _ document: Data,
+      named fileName: String,
+      storeIdentifier: String,
+      offsetBytes: UInt64,
+      lengthBytes: UInt64
+    ) throws {
+      guard
+        (fileName == InstallConf.fileName || fileName == TryExportStagingMarker.fileName),
+        document.count <= TryExportStagingMarker.maximumBytes
+      else {
+        throw InstallConfESPError.writeFailed
+      }
       let identity = try InstallConfESPLocator.identify(
         storeIdentifier: storeIdentifier,
         offsetBytes: offsetBytes,
@@ -303,8 +325,7 @@
           try? disks.unmount(identity.partitionIdentifier)
         }
       }
-      // This closes every descriptor before diskutil unmount, including errors.
-      try writeAndVerify(conf, on: descriptor)
+      try writeAndVerify(document, named: fileName, on: descriptor)
       do {
         try disks.unmount(identity.partitionIdentifier)
         mounted = false
@@ -313,7 +334,7 @@
       }
     }
 
-    private func writeAndVerify(_ conf: InstallConf, on root: Int32) throws {
+    private func writeAndVerify(_ document: Data, named fileName: String, on root: Int32) throws {
       defer { Darwin.close(root) }
       var rootInfo = stat()
       guard fstat(root, &rootInfo) == 0 else { throw InstallConfESPError.writeFailed }
@@ -327,7 +348,7 @@
       guard fstat(directory, &directoryInfo) == 0, directoryInfo.st_dev == rootInfo.st_dev else {
         throw InstallConfESPError.writeFailed
       }
-      let temporary = ".\(InstallConf.fileName).\(UUID().uuidString.lowercased()).tmp"
+      let temporary = ".\(fileName).\(UUID().uuidString.lowercased()).tmp"
       let pending = openat(
         directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
       guard pending >= 0 else { throw InstallConfESPError.writeFailed }
@@ -335,28 +356,26 @@
       let handle = FileHandle(fileDescriptor: pending, closeOnDealloc: true)
       defer { try? handle.close() }
       do {
-        try handle.write(contentsOf: conf.serializedData)
+        try handle.write(contentsOf: document)
         try handle.synchronize()
         try handle.close()
       } catch {
         throw InstallConfESPError.writeFailed
       }
-      guard renameat(directory, temporary, directory, InstallConf.fileName) == 0 else {
+      guard renameat(directory, temporary, directory, fileName) == 0 else {
         throw InstallConfESPError.writeFailed
       }
-      // A busy volume may stay mounted. Flush the rename and any new parent
-      // entry before readback, even when a later unmount cannot flush them.
       synchronizeDirectory(directory)
       if createdDirectory { synchronizeDirectory(root) }
       let readback = openat(
-        directory, InstallConf.fileName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        directory, fileName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
       guard readback >= 0 else { throw InstallConfESPError.readbackMismatch }
       defer { Darwin.close(readback) }
       var observedInfo = stat()
       guard fstat(readback, &observedInfo) == 0,
         (observedInfo.st_mode & S_IFMT) == S_IFREG,
         observedInfo.st_dev == rootInfo.st_dev,
-        observedInfo.st_size == conf.serializedData.count
+        observedInfo.st_size == document.count
       else { throw InstallConfESPError.readbackMismatch }
       let observed: Data
       do {
@@ -364,9 +383,12 @@
       } catch {
         throw InstallConfESPError.readbackMismatch
       }
-      guard observed == conf.serializedData,
-        let parsed = try? InstallConf.parse(observed), parsed == conf
-      else { throw InstallConfESPError.readbackMismatch }
+      guard observed == document else { throw InstallConfESPError.readbackMismatch }
+      if fileName == InstallConf.fileName {
+        guard let expected = try? InstallConf.parse(document),
+          let parsed = try? InstallConf.parse(observed), parsed == expected
+        else { throw InstallConfESPError.readbackMismatch }
+      }
     }
 
     private static func bestEffortDirectorySync(_ descriptor: Int32) {
