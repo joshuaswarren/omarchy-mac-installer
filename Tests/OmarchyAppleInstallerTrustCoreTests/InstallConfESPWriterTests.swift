@@ -391,6 +391,62 @@
       XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: existing.path), [])
       XCTAssertTrue(disks.descriptorsWereClosedBeforeUnmount)
     }
+    func testMountWriterWritesMigrationMarkerThroughPinnedDescriptor() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("esp-marker-\(UUID().uuidString)", isDirectory: true)
+      let existing = root.appendingPathComponent("existing", isDirectory: true)
+      try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let disks = MockESPDisks(
+        partitions: [
+          .init(
+            identifier: "disk0s5", storeIdentifier: "disk0", type: "EFI",
+            name: "EFI - OMARC", offsetBytes: 100, lengthBytes: 50)
+        ],
+        existingMountPoint: existing,
+        replacePathAfterOpen: true)
+      let document = Data(#"{"schema":"omarchy-migration/staging/1"}"#.utf8)
+
+      try InstallConfESPMountWriter(disks: disks, workingDirectory: root).write(
+        document, named: TryExportStagingMarker.fileName,
+        storeIdentifier: "disk0", offsetBytes: 50, lengthBytes: 200)
+
+      let pinned = root.appendingPathComponent("pinned/omarchy/migration.json")
+      XCTAssertEqual(try Data(contentsOf: pinned), document)
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: existing.appendingPathComponent("omarchy/migration.json").path))
+      XCTAssertTrue(disks.descriptorsWereClosedBeforeUnmount)
+    }
+
+    func testMountWriterRejectsMigrationMarkerSymlinkWithoutFollowingIt() throws {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("esp-marker-link-\(UUID().uuidString)", isDirectory: true)
+      let existing = root.appendingPathComponent("existing", isDirectory: true)
+      let outside = root.appendingPathComponent("outside", isDirectory: true)
+      let omarchy = existing.appendingPathComponent("omarchy", isDirectory: true)
+      try FileManager.default.createDirectory(at: existing, withIntermediateDirectories: true)
+      try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+      try FileManager.default.createSymbolicLink(at: omarchy, withDestinationURL: outside)
+      defer { try? FileManager.default.removeItem(at: root) }
+      let sentinel = outside.appendingPathComponent(TryExportStagingMarker.fileName)
+      try Data("keep".utf8).write(to: sentinel)
+      let disks = MockESPDisks(
+        partitions: [
+          .init(
+            identifier: "disk0s5", storeIdentifier: "disk0", type: "EFI",
+            name: "EFI - OMARC", offsetBytes: 100, lengthBytes: 50)
+        ],
+        existingMountPoint: existing)
+
+      XCTAssertThrowsError(
+        try InstallConfESPMountWriter(disks: disks, workingDirectory: root).write(
+          Data("new".utf8), named: TryExportStagingMarker.fileName,
+          storeIdentifier: "disk0", offsetBytes: 50, lengthBytes: 200)
+      ) { XCTAssertEqual($0 as? InstallConfESPError, .writeFailed) }
+      XCTAssertEqual(try Data(contentsOf: sentinel), Data("keep".utf8))
+      XCTAssertTrue(disks.descriptorsWereClosedBeforeUnmount)
+    }
   }
 
   private final class MockInstallConfESPHelper: InstallConfESPHelping, @unchecked Sendable {
