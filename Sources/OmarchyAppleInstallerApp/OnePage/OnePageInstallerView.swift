@@ -27,12 +27,15 @@ struct OnePageInstallerView: View {
   /// names the channel the next preparation will actually fetch; `nil` when
   /// the bundle has no release descriptor to fetch from.
   let channel: ReleaseChannel?
+  /// Try, when this build embeds the Try Omarchy kit.
+  let trial: TrialSession?
   let onChannelAvailability: (Bool) -> Void
   let onSessionAvailable: (InstallerSession) -> Void
 
   init(
     environment: any InstallerEnvironment,
     channel: ReleaseChannel?,
+    trial: TrialSession? = nil,
     onChannelAvailability: @escaping (Bool) -> Void = { _ in },
     onSessionAvailable: @escaping (InstallerSession) -> Void = { _ in }
   ) {
@@ -42,6 +45,7 @@ struct OnePageInstallerView: View {
         allowsEncryption: InstallerBuildProfile.current.allowsEncryption
       ))
     self.channel = channel
+    self.trial = trial
     self.onChannelAvailability = onChannelAvailability
     self.onSessionAvailable = onSessionAvailable
   }
@@ -60,12 +64,30 @@ struct OnePageInstallerView: View {
           .padding(.top, 24)
           .padding(.bottom, 16)
         header.padding(.bottom, 20)
-        VStack(alignment: .leading, spacing: 14) { stage }
-          .frame(maxWidth: 560)
+        VStack(alignment: .leading, spacing: 14) {
+          if let trial, trial.phase != .hidden {
+            TrialStage(trial: trial)
+          } else if let trial, trial.showsLanding {
+            TrialLandingMessage(
+              trial: trial, canCheckAgain: session.canInspect,
+              onCheckAgain: { Task { await recheck() } })
+          } else {
+            stage
+          }
+        }
+        .frame(maxWidth: 560)
         Spacer(minLength: 0)
-        HStack(spacing: 16) { actions }
-          .padding(.top, 24)
-          .padding(.bottom, 24)
+        HStack(spacing: 16) {
+          if let trial, trial.phase != .hidden {
+            TrialActions(trial: trial, onInstall: continueToPlan)
+          } else if let trial, trial.showsLanding {
+            TrialLandingButtons(trial: trial, onInstall: continueToPlan)
+          } else {
+            actions
+          }
+        }
+        .padding(.top, 24)
+        .padding(.bottom, 24)
       }
       .frame(maxWidth: .infinity, minHeight: Self.minimumContentHeight, alignment: .top)
       .padding(.horizontal, 40)
@@ -88,7 +110,11 @@ struct OnePageInstallerView: View {
     }
     .task {
       onSessionAvailable(session)
+      trial?.openAtLaunch()
       await recheck()
+    }
+    .onChange(of: session.trialInstallStatus, initial: true) { _, status in
+      trial?.follow(status)
     }
     .onChange(of: channel) { _, _ in
       // Switching channel discards anything already planned: the new channel
@@ -98,6 +124,7 @@ struct OnePageInstallerView: View {
     .onChange(of: scenePhase) { _, phase in
       if phase == .active {
         session.refreshHelperStatus()
+        trial?.refresh()
       }
     }
     .onChange(of: session.phase, initial: true) { _, phase in
@@ -118,6 +145,18 @@ struct OnePageInstallerView: View {
             Task { await session.submit(authorization) }
           },
           onCheckHelper: { await session.checkWhetherHelperIsSwitchedOff() }
+        )
+      }
+    }
+    .sheet(isPresented: migrationNoticeBinding) {
+      if let trial {
+        ConfirmationSheet(
+          title: PlainLanguage.trialMigrationNoticeTitle,
+          message: PlainLanguage.trialMigrationNoticeMessage,
+          action: PlainLanguage.trialInstallWithoutMigrating,
+          cancelIsDefault: true,
+          onConfirm: { trial.installWithoutMigrating() },
+          onCancel: { trial.dismissMigrationNotice() }
         )
       }
     }
@@ -166,6 +205,7 @@ struct OnePageInstallerView: View {
         .font(OmarchyTheme.eyebrow)
         .textCase(.uppercase)
         .foregroundStyle(OmarchyTheme.accent)
+        .padding(.vertical, 4)
     }
   }
 
@@ -217,6 +257,7 @@ struct OnePageInstallerView: View {
         onEditingChange: { session.setSizeEditing($0) }
       )
       .id(session.planRevision)
+      .task { await trial?.refreshVMBytes() }
       PrefetchStrip(
         state: session.prefetchState,
         onRetry: session.canRetryPrefetch ? { session.retryPrefetch() } : nil
@@ -228,6 +269,12 @@ struct OnePageInstallerView: View {
       }
       if let notice = session.allocationNotice {
         Text(notice).font(OmarchyTheme.body).foregroundStyle(OmarchyTheme.caution)
+      }
+      if let trial, let notice = trial.diskNotice {
+        Text(notice)
+          .font(OmarchyTheme.body)
+          .foregroundStyle(OmarchyTheme.secondaryText)
+          .fixedSize(horizontal: false, vertical: true)
       }
       acknowledgement(acknowledged, resizesMacOS: plan.fixedMacOSBytes == nil)
 
@@ -280,7 +327,7 @@ struct OnePageInstallerView: View {
         .disabled(session.isBusy)
 
     case .welcome:
-      Button(PlainLanguage.checkContinue) { Task { await session.continueToPlan() } }
+      Button(PlainLanguage.trialInstall) { Task { await session.continueToPlan() } }
         .omarchyPrimaryButton()
         .disabled(session.isBusy)
         .keyboardShortcut(.defaultAction)
@@ -366,6 +413,21 @@ struct OnePageInstallerView: View {
   }
 
   // MARK: Pieces
+
+  /// Install on this Mac, or Migrate to Native, from the landing page and
+  /// the running page: Omarchy shuts down first, then the plan follows.
+  private func continueToPlan() {
+    Task { await session.continueToPlan() }
+  }
+
+  private var migrationNoticeBinding: Binding<Bool> {
+    Binding(
+      get: { trial?.showsMigrationNotice == true },
+      set: { presented in
+        if !presented { trial?.dismissMigrationNotice() }
+      }
+    )
+  }
 
   private func statusPanel(title: String) -> some View {
     Panel {
