@@ -823,7 +823,10 @@
     private(set) var listings = 0
 
     func partitions(on storeIdentifier: String) throws -> [InstallConfESPPartition] { [] }
-    func mount(_ identifier: String, at mountPoint: URL) throws { XCTFail("mounted \(identifier)") }
+    func mount(_ identifier: String, at mountPoint: URL) throws -> Int32 {
+      XCTFail("mounted \(identifier)")
+      return -1
+    }
     func unmount(_ identifier: String) throws {}
     func stagingPartitions(on storeIdentifier: String) throws -> [TryExportStagingPartition] {
       listings += 1

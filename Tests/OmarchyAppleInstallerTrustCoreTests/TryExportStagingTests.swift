@@ -162,6 +162,7 @@
       #expect(padding.allSatisfy { $0 == 0 })
       #expect(fixture.disks.synchronizations == 1)
       #expect(fixture.disks.markers == [try marker.serializedData()])
+      #expect(fixture.disks.descriptorClosedBeforeUnmount)
       #expect(fixture.disks.mounted.isEmpty)
     }
 
@@ -271,6 +272,8 @@
     private(set) var markers: [Data] = []
     private(set) var mounted: [String] = []
     private var mountPoint: URL?
+    private var mountDescriptor: Int32?
+    private(set) var descriptorClosedBeforeUnmount = false
 
     init(partitions: [TryExportStagingPartition], device: URL) {
       stagingRows = partitions
@@ -306,15 +309,23 @@
       }
     }
 
-    func mount(_ identifier: String, at mountPoint: URL) throws {
+    func mount(_ identifier: String, at mountPoint: URL) throws -> Int32 {
       #expect(identifier == "disk0s5")
       if mountFails { throw InstallConfESPError.mountFailed }
       try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+      let descriptor = open(mountPoint.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+      guard descriptor >= 0 else { throw InstallConfESPError.mountFailed }
       self.mountPoint = mountPoint
+      mountDescriptor = descriptor
       mounted.append(identifier)
+      return descriptor
     }
 
     func unmount(_ identifier: String) throws {
+      if let mountDescriptor {
+        errno = 0
+        descriptorClosedBeforeUnmount = fcntl(mountDescriptor, F_GETFD) == -1 && errno == EBADF
+      }
       if let mountPoint,
         let data = try? Data(
           contentsOf: mountPoint.appendingPathComponent("omarchy/migration.json"))

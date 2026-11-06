@@ -344,7 +344,7 @@
       try esp.partitions(on: storeIdentifier)
     }
 
-    func mount(_ identifier: String, at mountPoint: URL) throws {
+    func mount(_ identifier: String, at mountPoint: URL) throws -> Int32 {
       try esp.mount(identifier, at: mountPoint)
     }
 

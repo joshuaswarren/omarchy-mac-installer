@@ -60,8 +60,9 @@
         lengthBytes: end - first.offsetBytes, partitions: try disks.partitions(on: disk))
       let mountPoint = work.appendingPathComponent("esp", isDirectory: true)
       try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
-      try disks.mount(esp.partitionIdentifier, at: mountPoint)
+      let mountDescriptor = try disks.mount(esp.partitionIdentifier, at: mountPoint)
       defer { try? disks.unmount(esp.partitionIdentifier) }
+      defer { Darwin.close(mountDescriptor) }
       let onDisk = try Data(contentsOf: mountPoint.appendingPathComponent("omarchy/migration.json"))
       #expect(onDisk == (try marker.serializedData()))
     }
