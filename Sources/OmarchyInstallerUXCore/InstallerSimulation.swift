@@ -112,6 +112,7 @@
     private var approved = false
     private var attempts = 0
     private var cancelled = false
+    private var tryExportForInstall: String?
     public let channel: ReleaseChannel
     private let tryExportShelf: TryOmarchyExportShelf?
 
@@ -129,6 +130,12 @@
     }
 
     public var isSimulation: Bool { true }
+    private var tryExportPlan: TryExportPlan? {
+      lock.withLock { tryExportForInstall } == nil ? nil : .comesAlong
+    }
+    public func useTryExportForInstall(_ exportID: String?) {
+      lock.withLock { tryExportForInstall = exportID }
+    }
     public var installationBlocked: Bool { scenario == .unsupported }
     public var engineSupported: Bool { scenario != .unsupported && scenario != .engineUnavailable }
     public var hasApprovedPlan: Bool { lock.withLock { approved } }
@@ -310,7 +317,7 @@
             bindingDigest: "simulation-tight-\(chosen)", minimumBytes: 40_000_000_000,
             maximumBytes: maximum,
             macOSFreeBeforeAllocationBytes: 80_000_000_000,
-            recommendedOmarchyBytes: 77_000_000_000))
+            recommendedOmarchyBytes: 77_000_000_000, tryExport: tryExportPlan))
       }
       progress(AssetProgressUpdate(stage: .planning))
       try await tick()
@@ -327,7 +334,7 @@
           omarchyBytes: length,
           bindingDigest: "simulation-\(length)", minimumBytes: 80_000_000_000,
           maximumBytes: maximum,
-          fixedMacOSBytes: scenario == .freeSpace ? 100_000_000_000 : nil))
+          fixedMacOSBytes: scenario == .freeSpace ? 100_000_000_000 : nil, tryExport: tryExportPlan))
     }
 
     public func approve() throws {
@@ -385,6 +392,9 @@
     }
 
     private func completion() -> CompletionDisplay {
+      let tryExport = lock.withLock { tryExportForInstall }.map {
+        PlainLanguage.tryExportStaging(.staged(exportID: $0))
+      }
       let next: InstallerNextAction =
         switch scenario {
         case .manualRecovery: .manualRecovery
@@ -399,10 +409,11 @@
             ? PlainLanguage.recoveryHeadline : PlainLanguage.mediaHeadline,
           steps: PlainLanguage.recoverySteps(for: [
             "enterOneTrueRecovery", "authenticateMachineOwner",
-          ])) : nil
+          ]), tryExport: tryExport) : nil
       return CompletionDisplay(
         nextAction: next, headline: PlainLanguage.doneHeadline,
-        subheadline: PlainLanguage.nextActionMessage(next), verified: [], handoff: handoff)
+        subheadline: PlainLanguage.nextActionMessage(next), verified: [], handoff: handoff,
+        tryExport: tryExport)
     }
 
     public func requestShutdown() -> Bool { scenario != .shutdownFailure }
