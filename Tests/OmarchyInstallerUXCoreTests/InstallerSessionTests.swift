@@ -111,13 +111,19 @@
           return XCTFail("An existing installation must stay refused")
         }
         XCTAssertEqual(session.recoveryAccountDeferred, deferred)
+        XCTAssertEqual(
+          session.trialInstallStatus, deferred ? .installed : .finishingInstall)
         XCTAssertEqual(session.canSetUpRecoveryAccount, deferred)
         XCTAssertFalse(session.showsRecoveryAccountSetup)
         session.setUpRecoveryAccount()
         XCTAssertEqual(session.showsRecoveryAccountSetup, deferred)
+        XCTAssertEqual(
+          session.trialInstallStatus, .finishingInstall)
         XCTAssertFalse(session.canSetUpRecoveryAccount)
         session.cancelRecoveryAccountSetup()
         XCTAssertFalse(session.showsRecoveryAccountSetup)
+        XCTAssertEqual(
+          session.trialInstallStatus, deferred ? .installed : .finishingInstall)
         session.setUpRecoveryAccount()
         // Inspecting again starts from the installed page.
         await session.inspect()

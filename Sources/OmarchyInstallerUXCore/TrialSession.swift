@@ -162,7 +162,9 @@
   extension InstallerSession {
     public var trialInstallStatus: TrialInstallStatus {
       TrialInstallStatus(
-        phase, isBusy: isBusy, pendingRecovery: recoveryAccount?.target != nil)
+        phase, isBusy: isBusy,
+        pendingRecovery:
+          recoveryAccount?.target != nil && (!recoveryAccountDeferred || showsRecoveryAccountSetup))
     }
   }
 

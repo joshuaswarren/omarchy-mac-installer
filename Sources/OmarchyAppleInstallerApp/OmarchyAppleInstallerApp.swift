@@ -235,7 +235,6 @@ struct OmarchyAppleInstallerApp: App {
     // Every launch opens where InstallerWindowPlacer puts it, not where the
     // window was last left.
     .restorationBehavior(.disabled)
-    .defaultWindowPlacement { _, _ in WindowPlacement(.center) }
     .windowResizability(.contentSize)
     .windowStyle(.hiddenTitleBar)
     .commands {
